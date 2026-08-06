@@ -20,7 +20,7 @@ from app.models.content import (
     Subject,
     Topic,
 )
-from app.models.identity import RefreshToken, User, UserProfile
+from app.models.identity import PasswordResetToken, RefreshToken, User, UserProfile
 from app.models.learning import Flashcard, FlashcardReview
 from app.models.platform import AdminAuditLog, Notification
 from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion
@@ -29,6 +29,7 @@ __all__ = [
     "User",
     "UserProfile",
     "RefreshToken",
+    "PasswordResetToken",
     "Discipline",
     "Subject",
     "Topic",

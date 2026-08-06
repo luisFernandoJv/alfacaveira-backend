@@ -1,18 +1,27 @@
-"""Regras de negócio de autenticação: registro, login, refresh (com rotação) e logout."""
+"""Regras de negócio de autenticação: registro, login, refresh (com rotação),
+logout e recuperação de senha."""
 
+import hashlib
+import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import ConflictError, UnauthorizedError
 from app.database.uow import UnitOfWork
+from app.models.identity.password_reset_token import PasswordResetToken
 from app.models.identity.refresh_token import RefreshToken
 from app.models.identity.user import User, UserProfile
+from app.repositories.identity.password_reset_token_repository import (
+    PasswordResetTokenRepository,
+)
 from app.repositories.identity.refresh_token_repository import RefreshTokenRepository
 from app.repositories.identity.user_repository import UserRepository
 from app.security.jwt import create_access_token, generate_refresh_token, hash_refresh_token
 from app.security.password import hash_password, verify_password
+from app.services.identity.email_service import EmailService
 
 
 @dataclass
@@ -30,10 +39,12 @@ class AuthService:
     sempre `DomainError` e subclasses, traduzidas para HTTP pelos handlers globais.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, email_service: EmailService | None = None) -> None:
         self._session = session
         self._users = UserRepository(session)
         self._refresh_tokens = RefreshTokenRepository(session)
+        self._password_reset_tokens = PasswordResetTokenRepository(session)
+        self._email_service = email_service or EmailService()
 
     async def register(self, email: str, password: str, full_name: str) -> User:
         existing = await self._users.get_by_email(email)
@@ -99,6 +110,58 @@ class AuthService:
             return
         async with UnitOfWork(self._session):
             await self._refresh_tokens.revoke(stored_token)
+
+    async def forgot_password(self, email: str) -> None:
+        """Inicia a recuperação de senha.
+
+        Por design, não revela se o e-mail existe ou não na base: o método
+        sempre "funciona" do ponto de vista do chamador (endpoint sempre
+        responde 204). Se o e-mail pertencer a um usuário ativo, um link de
+        redefinição é enviado; caso contrário, a chamada é um no-op. Isso
+        evita que o endpoint seja usado para enumerar contas cadastradas.
+        """
+        user = await self._users.get_by_email(email)
+        if user is None or not user.is_active:
+            return
+
+        async with UnitOfWork(self._session):
+            # Invalida qualquer link de recuperação anterior ainda válido,
+            # para que só o mais recente funcione.
+            await self._password_reset_tokens.invalidate_all_for_user(user.id)
+
+            plain_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+            expires_at = datetime.now(UTC) + timedelta(
+                minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+            )
+            reset_token = PasswordResetToken(
+                user_id=user.id, token_hash=token_hash, expires_at=expires_at
+            )
+            await self._password_reset_tokens.add(reset_token)
+
+        reset_url = f"{settings.FRONTEND_URL}/redefinir-senha?token={plain_token}"
+        await self._email_service.send_password_reset_email(
+            to_email=user.email, to_name=user.full_name, reset_url=reset_url
+        )
+
+    async def reset_password(self, plain_token: str, new_password: str) -> None:
+        token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+        stored_token = await self._password_reset_tokens.get_valid_by_hash(token_hash)
+        if stored_token is None:
+            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
+
+        user = await self._users.get_by_id(stored_token.user_id)
+        if user is None or not user.is_active:
+            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
+
+        async with UnitOfWork(self._session):
+            user.password_hash = hash_password(new_password)
+            await self._password_reset_tokens.mark_used(stored_token)
+            # Redefinir a senha revoga todas as sessões ativas (refresh tokens):
+            # se a conta foi comprometida, isso derruba qualquer acesso indevido
+            # em outros dispositivos assim que a senha é trocada.
+            for refresh_token in await self._refresh_tokens.list_active_for_user(user.id):
+                await self._refresh_tokens.revoke(refresh_token)
 
     async def _issue_tokens(self, user: User) -> AuthTokens:
         access_token, expires_in = create_access_token(user.id)

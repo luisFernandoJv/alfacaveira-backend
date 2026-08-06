@@ -1,4 +1,5 @@
-"""Endpoints HTTP de autenticação: registro, login, refresh, logout, /me."""
+"""Endpoints HTTP de autenticação: registro, login, refresh, logout, /me,
+recuperação e redefinição de senha."""
 
 from typing import Annotated
 
@@ -8,10 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.responses import Envelope
 from app.database.session import get_db
 from app.schemas.identity import (
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     RefreshRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenResponse,
     UserResponse,
 )
@@ -66,3 +69,18 @@ async def refresh(body: RefreshRequest, auth_service: AuthServiceDep) -> Envelop
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(body: LogoutRequest, auth_service: AuthServiceDep) -> None:
     await auth_service.logout(body.refresh_token)
+
+
+@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+async def forgot_password(body: ForgotPasswordRequest, auth_service: AuthServiceDep) -> None:
+    """Sempre responde 204, exista ou não uma conta com o e-mail informado.
+
+    A resposta não deve variar conforme o e-mail existe ou não (evita
+    enumeração de contas); ver `AuthService.forgot_password`.
+    """
+    await auth_service.forgot_password(body.email)
+
+
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_password(body: ResetPasswordRequest, auth_service: AuthServiceDep) -> None:
+    await auth_service.reset_password(body.token, body.new_password)

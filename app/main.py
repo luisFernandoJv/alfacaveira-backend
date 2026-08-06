@@ -11,6 +11,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
+from app.core.scheduler import shutdown_scheduler, start_scheduler
 from app.middlewares.rate_limit import RateLimitMiddleware
 
 
@@ -18,7 +19,9 @@ from app.middlewares.rate_limit import RateLimitMiddleware
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
     app.state.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    start_scheduler()
     yield
+    shutdown_scheduler()
     await app.state.redis.aclose()
 
 

@@ -11,10 +11,11 @@ from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
 from app.models.base import UUIDPKMixin
+from app.models.content.taxonomy import Discipline
 
 
 class UserDailyStat(UUIDPKMixin, Base):
@@ -47,6 +48,12 @@ class UserSubjectStat(UUIDPKMixin, Base):
     questions_answered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     correct_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # Adicionada nesta etapa (módulo `analytics`): sem isso, o endpoint de
+    # desempenho por disciplina teria que fazer um segundo SELECT manual em
+    # `disciplines` para cada linha — o relationship deixa o repository
+    # carregar tudo em uma única query (`selectinload`).
+    discipline: Mapped["Discipline"] = relationship()
 
     __table_args__ = (UniqueConstraint("user_id", "discipline_id", name="uq_user_subject_stat"),)
 

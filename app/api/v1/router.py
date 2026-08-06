@@ -6,6 +6,7 @@ implementado (Etapas 5 em diante: Autenticação, Usuários, Questões, ...).
 
 from fastapi import APIRouter
 
+from app.api.v1.analytics.user_stats import router as analytics_router
 from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
 from app.api.v1.assessment.exam_templates import router as exam_templates_router
 from app.api.v1.content.exam_sources import router as exam_sources_router
@@ -33,5 +34,6 @@ api_router.include_router(
 api_router.include_router(
     exam_attempts_router, prefix="/exam-attempts", tags=["exam-attempts"]
 )
+api_router.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
 
-# Etapa 10+: api_router.include_router(...)
+# Etapa 11+: api_router.include_router(...)

@@ -1,10 +1,12 @@
 """Schemas do contexto 'identity'."""
 
 from app.schemas.identity.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     RefreshRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenResponse,
     UserResponse,
 )
@@ -21,11 +23,13 @@ from app.schemas.identity.user import (
 __all__ = [
     "AdminUserListItem",
     "ChangePasswordRequest",
+    "ForgotPasswordRequest",
     "LoginRequest",
     "LogoutRequest",
     "MeResponse",
     "RefreshRequest",
     "RegisterRequest",
+    "ResetPasswordRequest",
     "TokenResponse",
     "UpdateAccountRequest",
     "UpdateProfileRequest",
