@@ -14,6 +14,7 @@ from app.api.v1.content.questions import router as questions_router
 from app.api.v1.content.taxonomy import router as taxonomy_router
 from app.api.v1.identity.auth import router as auth_router
 from app.api.v1.identity.users import router as users_router
+from app.api.v1.learning.flashcards import router as flashcards_router
 from app.api.v1.practice.attempts import router as attempts_router
 from app.api.v1.practice.training_sessions import router as training_sessions_router
 
@@ -35,5 +36,6 @@ api_router.include_router(
     exam_attempts_router, prefix="/exam-attempts", tags=["exam-attempts"]
 )
 api_router.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
+api_router.include_router(flashcards_router, prefix="/flashcards", tags=["flashcards"])
 
-# Etapa 11+: api_router.include_router(...)
+# Etapa 12+: api_router.include_router(...)

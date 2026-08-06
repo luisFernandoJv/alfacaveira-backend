@@ -26,3 +26,7 @@ class Flashcard(UUIDPKMixin, TimestampMixin, Base):
     back: Mapped[str] = mapped_column(Text, nullable=False)
 
     review_state: Mapped["FlashcardReview"] = relationship(back_populates="flashcard", uselist=False)
+    # Somente leitura (sem back_populates): `Discipline` não precisa navegar até
+    # os flashcards que a referenciam. Usada para exibir o "baralho" (agrupado
+    # por disciplina) nas listagens sem N+1 (`selectinload` no repositório).
+    discipline: Mapped["Discipline | None"] = relationship(viewonly=True)

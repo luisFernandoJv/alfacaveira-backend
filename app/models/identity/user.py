@@ -26,7 +26,10 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     profile: Mapped["UserProfile"] = relationship(back_populates="user", uselist=False)
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user")
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
-        back_populates="user"
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    question_states: Mapped[list["UserQuestionState"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
     )
 
 

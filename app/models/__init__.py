@@ -1,8 +1,4 @@
-"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic).
-
-Importar este módulo garante que toda tabela do sistema seja registrada em
-`Base.metadata` antes de `alembic revision --autogenerate` rodar.
-"""
+"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
 
 from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
 from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
@@ -20,16 +16,15 @@ from app.models.content import (
     Subject,
     Topic,
 )
-from app.models.identity import PasswordResetToken, RefreshToken, User, UserProfile
+from app.models.identity import RefreshToken, User, UserProfile
 from app.models.learning import Flashcard, FlashcardReview
 from app.models.platform import AdminAuditLog, Notification
-from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion
+from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
 
 __all__ = [
     "User",
     "UserProfile",
     "RefreshToken",
-    "PasswordResetToken",
     "Discipline",
     "Subject",
     "Topic",
@@ -44,6 +39,7 @@ __all__ = [
     "TrainingSession",
     "TrainingSessionQuestion",
     "QuestionAttempt",
+    "UserQuestionState",
     "ExamTemplate",
     "ExamAttempt",
     "ExamAttemptQuestion",
