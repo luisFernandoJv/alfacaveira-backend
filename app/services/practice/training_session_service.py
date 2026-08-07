@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question
 from app.models.enums import QuestionStatus, SessionType
@@ -109,6 +109,29 @@ class TrainingSessionService:
             user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
         )
         return {attempt.question_id for attempt in attempts}
+
+    async def update_position(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
+    ) -> TrainingSession:
+        """Atualiza a posição (índice da questão) que o aluno está vendo.
+
+        `get_session` já garante que a sessão pertence a `user_id` (levanta
+        `NotFoundError` — nunca `ForbiddenError` — para não revelar a
+        existência de sessões de outros usuários, mesmo padrão do resto do
+        service). Nunca confia em nada além do `user_id` resolvido via
+        `CurrentUser` no endpoint.
+        """
+        training_session = await self.get_session(session_id, user_id)
+        if current_question_index >= training_session.total_questions:
+            raise ValidationDomainError(
+                "Posição fora do intervalo de questões da sessão."
+            )
+
+        async with UnitOfWork(self._session):
+            training_session.current_question_index = current_question_index
+            await self._session.flush()
+
+        return training_session
 
     async def finish_session(
         self, session_id: uuid.UUID, user_id: uuid.UUID

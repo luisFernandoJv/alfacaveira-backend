@@ -1,21 +1,35 @@
-"""add user_question_states table
+"""add user_question_states table and set_updated_at function
 
-Revision ID: 0003
-Revises: 0002
+Revision ID: 0003_user_question_states
+Revises: 0002_password_reset_tokens
 Create Date: 2025-01-01 00:00:00.000000
 """
+from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "0003"
-down_revision = "0002"
-branch_labels = None
-depends_on = None
+revision: str = "0003_user_question_states"
+down_revision: Union[str, None] = "0002_password_reset_tokens"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Cria a função compartilhada para atualização automática de timestamp de forma idempotente
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION set_updated_at()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+
     op.create_table(
         "user_question_states",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -91,3 +105,4 @@ def downgrade() -> None:
     op.drop_index("ix_uqs_noted", table_name="user_question_states")
     op.drop_index("ix_uqs_favorites", table_name="user_question_states")
     op.drop_table("user_question_states")
+    op.execute("DROP FUNCTION IF EXISTS set_updated_at()")

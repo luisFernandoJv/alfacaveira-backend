@@ -10,6 +10,7 @@ from app.api.v1.analytics.user_stats import router as analytics_router
 from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
 from app.api.v1.assessment.exam_templates import router as exam_templates_router
 from app.api.v1.content.exam_sources import router as exam_sources_router
+from app.api.v1.content.question_states import router as question_states_router
 from app.api.v1.content.questions import router as questions_router
 from app.api.v1.content.taxonomy import router as taxonomy_router
 from app.api.v1.identity.auth import router as auth_router
@@ -22,6 +23,15 @@ api_router = APIRouter()
 
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(users_router, prefix="/users", tags=["users"])
+# question_states precisa ser incluído ANTES de questions: ambos compartilham
+# o prefixo "/questions", e question_states expõe paths literais como
+# "/favorites" e "/notes". Se questions_router (que tem "/{question_id}")
+# for registrado primeiro, o Starlette casaria "/questions/favorites" com
+# "/{question_id}" (question_id="favorites") antes de chegar em
+# question_states_router, quebrando os endpoints de listagem.
+api_router.include_router(
+    question_states_router, prefix="/questions", tags=["question-states"]
+)
 api_router.include_router(questions_router, prefix="/questions", tags=["questions"])
 api_router.include_router(taxonomy_router, tags=["taxonomy"])
 api_router.include_router(exam_sources_router, tags=["exam-sources"])
@@ -38,4 +48,4 @@ api_router.include_router(
 api_router.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(flashcards_router, prefix="/flashcards", tags=["flashcards"])
 
-# Etapa 12+: api_router.include_router(...)
+# Etapa 13+: api_router.include_router(...)

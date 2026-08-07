@@ -20,6 +20,8 @@ from app.schemas.practice.training_session import (
     TrainingSessionCreateRequest,
     TrainingSessionDetailResponse,
     TrainingSessionListItem,
+    TrainingSessionPositionResponse,
+    TrainingSessionPositionUpdateRequest,
     TrainingSessionQuestionResponse,
 )
 from app.security.dependencies import CurrentUser
@@ -67,6 +69,7 @@ async def _build_detail(
         correct_count=training_session.correct_count,
         started_at=training_session.started_at,
         finished_at=training_session.finished_at,
+        current_question_index=training_session.current_question_index,
         questions=[
             TrainingSessionQuestionResponse(
                 id=question.id,
@@ -163,6 +166,25 @@ async def answer_training_question(
             is_correct=bool(attempt.is_correct),
             explanation=question.explanation,
         )
+    )
+
+
+@router.patch(
+    "/{session_id}/position",
+    response_model=Envelope[TrainingSessionPositionResponse],
+    summary="Atualiza a posição (questão atual) da sessão",
+)
+async def update_training_session_position(
+    session_id: uuid.UUID,
+    body: TrainingSessionPositionUpdateRequest,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionPositionResponse]:
+    training_session = await training_session_service.update_position(
+        session_id, current_user.id, body.current_question_index
+    )
+    return Envelope(
+        data=TrainingSessionPositionResponse.model_validate(training_session)
     )
 
 

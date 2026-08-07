@@ -80,4 +80,21 @@ class TrainingSessionDetailResponse(BaseModel):
     correct_count: int
     started_at: datetime
     finished_at: datetime | None
+    current_question_index: int
     questions: list[TrainingSessionQuestionResponse]
+
+
+class TrainingSessionPositionUpdateRequest(BaseModel):
+    """Nova posição (índice da questão) que o aluno está vendo na sessão."""
+
+    current_question_index: int = Field(ge=0)
+
+
+class TrainingSessionPositionResponse(BaseModel):
+    """Confirmação da posição salva — resposta enxuta, sem recarregar as
+    questões inteiras da sessão a cada troca de posição."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    current_question_index: int

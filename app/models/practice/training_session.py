@@ -25,6 +25,11 @@ class TrainingSession(UUIDPKMixin, TimestampMixin, Base):
     correct_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Índice (0-based) da última questão vista pelo aluno nesta sessão —
+    # permite restaurar `/questoes/resolver?session={id}` na mesma posição
+    # após reload, sem depender de "primeira não respondida" (o aluno pode
+    # ter avançado sem responder, ex.: pular questão).
+    current_question_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     questions: Mapped[list["TrainingSessionQuestion"]] = relationship(
         back_populates="session", cascade="all, delete-orphan", order_by="TrainingSessionQuestion.position"

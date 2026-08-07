@@ -176,6 +176,7 @@ class ExamAttemptService:
             is_correct=is_correct,
             time_spent_seconds=data.time_spent_seconds,
         )
+        answer.question = question  # evita lazy-load em `answer.question` após a sessão fechar
 
         async with UnitOfWork(self._session):
             await self._answers.add(answer)

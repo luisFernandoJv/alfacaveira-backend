@@ -76,6 +76,7 @@ class QuestionAttemptService:
             is_correct=is_correct,
             time_spent_seconds=data.time_spent_seconds,
         )
+        attempt.question = question  # evita lazy-load em `attempt.question` após a sessão fechar
 
         async with UnitOfWork(self._session):
             await self._attempts.add(attempt)
