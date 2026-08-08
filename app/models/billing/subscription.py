@@ -37,4 +37,8 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
     current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    plan: Mapped["Plan"] = relationship(back_populates="subscriptions")
     payments: Mapped[list["Payment"]] = relationship(back_populates="subscription")
+    history: Mapped[list["SubscriptionHistory"]] = relationship(
+        back_populates="subscription", order_by="SubscriptionHistory.created_at.desc()"
+    )

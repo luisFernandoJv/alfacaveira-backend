@@ -17,6 +17,7 @@ from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
 from app.models.assessment.exam_attempt import ExamAttempt
+from app.models.enums import FeatureKey
 from app.schemas.assessment.exam_attempt import (
     ExamAttemptDetailResponse,
     ExamAttemptListItem,
@@ -24,7 +25,7 @@ from app.schemas.assessment.exam_attempt import (
     ExamAttemptStartRequest,
 )
 from app.schemas.practice.question_attempt import AnswerResultResponse, AnswerSubmitRequest
-from app.security.dependencies import CurrentUser
+from app.security.dependencies import CurrentUser, RequireFeature
 from app.services.assessment.exam_attempt_service import ExamAttemptService
 
 router = APIRouter()
@@ -77,7 +78,10 @@ async def _build_detail(
 
 
 @router.post(
-    "", response_model=Envelope[ExamAttemptDetailResponse], status_code=status.HTTP_201_CREATED
+    "",
+    response_model=Envelope[ExamAttemptDetailResponse],
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(RequireFeature(FeatureKey.SIMULADOS))],
 )
 async def start_exam_attempt(
     body: ExamAttemptStartRequest,

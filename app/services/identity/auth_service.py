@@ -46,7 +46,7 @@ class AuthService:
         self._password_reset_tokens = PasswordResetTokenRepository(session)
         self._email_service = email_service or EmailService()
 
-    async def register(self, email: str, password: str, full_name: str) -> User:
+    async def register(self, email: str, password: str, full_name: str) -> AuthTokens:
         existing = await self._users.get_by_email(email)
         if existing is not None:
             raise ConflictError("Já existe uma conta cadastrada com este e-mail.")
@@ -60,7 +60,10 @@ class AuthService:
             await self._users.add(user)
             profile = UserProfile(user_id=user.id)
             self._session.add(profile)
-        return user
+
+        # Auto-login: evita que o aluno precise digitar a senha de novo
+        # logo após se cadastrar (ver `app/api/v1/identity/auth.py::register`).
+        return await self._issue_tokens(user)
 
     async def login(self, email: str, password: str) -> AuthTokens:
         user = await self._users.get_by_email(email)

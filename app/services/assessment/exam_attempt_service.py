@@ -17,13 +17,20 @@ from app.core.exceptions import ConflictError, NotFoundError
 from app.database.uow import UnitOfWork
 from app.models.assessment.exam_attempt import ExamAttempt, ExamAttemptQuestion
 from app.models.content.question import Question
-from app.models.enums import ExamAttemptStatus, QuestionDifficulty, QuestionStatus, SessionType
+from app.models.enums import (
+    ExamAttemptStatus,
+    FeatureKey,
+    QuestionDifficulty,
+    QuestionStatus,
+    SessionType,
+)
 from app.models.practice.question_attempt import QuestionAttempt
 from app.repositories.assessment.exam_attempt_repository import ExamAttemptRepository
 from app.repositories.assessment.exam_template_repository import ExamTemplateRepository
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.schemas.practice.question_attempt import AnswerSubmitRequest
+from app.services.billing.feature_gate_service import FeatureGateService
 
 
 def _filters_from_snapshot(snapshot: dict[str, object]) -> QuestionFilters:
@@ -56,8 +63,11 @@ class ExamAttemptService:
         self._templates = ExamTemplateRepository(session)
         self._questions = QuestionRepository(session)
         self._answers = QuestionAttemptRepository(session)
+        self._feature_gate = FeatureGateService(session)
 
     async def start_attempt(self, user_id: uuid.UUID, exam_template_id: uuid.UUID) -> ExamAttempt:
+        await self._feature_gate.assert_feature(user_id, FeatureKey.SIMULADOS)
+
         template = await self._templates.get_by_id(exam_template_id)
         if template is None or not (template.is_public or template.created_by == user_id):
             raise NotFoundError("Molde de simulado não encontrado.")

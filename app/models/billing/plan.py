@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import Boolean, Integer, String
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
 from app.models.base import TimestampMixin, UUIDPKMixin
@@ -26,5 +26,11 @@ class Plan(UUIDPKMixin, TimestampMixin, Base):
             values_callable=lambda obj: [e.value for e in obj],
         ), nullable=False
     )
+    # Cache derivado de `PlanFeature` (fonte de verdade normalizada),
+    # reconstruído por `PlanService._rebuild_features_cache` sempre que a
+    # associação plano/feature muda. Nunca escrito diretamente fora dali.
     features: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    plan_features: Mapped[list["PlanFeature"]] = relationship(back_populates="plan")
+    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="plan")

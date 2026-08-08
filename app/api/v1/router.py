@@ -9,6 +9,9 @@ from fastapi import APIRouter
 from app.api.v1.analytics.user_stats import router as analytics_router
 from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
 from app.api.v1.assessment.exam_templates import router as exam_templates_router
+from app.api.v1.billing.plans import router as billing_plans_router
+from app.api.v1.billing.subscriptions import router as billing_subscriptions_router
+from app.api.v1.billing.webhooks import router as billing_webhooks_router
 from app.api.v1.content.exam_sources import router as exam_sources_router
 from app.api.v1.content.question_states import router as question_states_router
 from app.api.v1.content.questions import router as questions_router
@@ -47,5 +50,17 @@ api_router.include_router(
 )
 api_router.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(flashcards_router, prefix="/flashcards", tags=["flashcards"])
+
+# Etapa 4: billing (planos, assinaturas, webhooks de pagamento). Prefixos
+# separados (não um único "/billing" compartilhado) porque cada router tem
+# seu próprio conjunto de paths sem sobreposição — dispensa o cuidado de
+# ordenação usado acima entre question_states/questions.
+api_router.include_router(billing_plans_router, prefix="/billing/plans", tags=["billing-plans"])
+api_router.include_router(
+    billing_subscriptions_router, prefix="/billing/subscriptions", tags=["billing-subscriptions"]
+)
+api_router.include_router(
+    billing_webhooks_router, prefix="/billing/webhooks", tags=["billing-webhooks"]
+)
 
 # Etapa 13+: api_router.include_router(...)

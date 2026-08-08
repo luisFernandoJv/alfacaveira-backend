@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -69,6 +69,41 @@ class Settings(BaseSettings):
 
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+
+    # Billing — gateway de pagamento (ver app/services/billing/gateway.py)
+    # PAYMENT_GATEWAY_DRIVER=console (padrão): nenhum provedor real — aprova
+    # toda cobrança imediatamente via ConsoleGateway. Usar apenas em
+    # desenvolvimento/teste. Quando um provedor real for integrado, este
+    # campo passa a selecionar o driver correspondente (ex.: "stripe").
+    PAYMENT_GATEWAY_DRIVER: str = Field(default="console")  # console | (futuro: stripe, etc.)
+    # Segredo compartilhado com o provedor de pagamento, usado para validar a
+    # assinatura HMAC do payload recebido em app/api/v1/billing/webhooks.py.
+    # Deve ficar vazio apenas quando PAYMENT_GATEWAY_DRIVER="console" — ver
+    # validação abaixo, que impede subir em produção com um driver real e
+    # sem segredo configurado.
+    PAYMENT_WEBHOOK_SECRET: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _validate_production_webhook_secret(self) -> "Settings":
+        """Em produção, um driver de pagamento real exige PAYMENT_WEBHOOK_SECRET
+        configurado — sem isso, o webhook aceitaria qualquer payload sem
+        verificar a assinatura (ver `_verify_signature` em
+        app/api/v1/billing/webhooks.py, que pula a checagem quando o segredo
+        está vazio). O driver "console" fica isento porque não fala com
+        nenhum provedor real e não há assinatura para validar.
+        """
+        if (
+            self.APP_ENV == "production"
+            and self.PAYMENT_GATEWAY_DRIVER != "console"
+            and not self.PAYMENT_WEBHOOK_SECRET
+        ):
+            raise ValueError(
+                "PAYMENT_WEBHOOK_SECRET é obrigatório em produção quando "
+                f"PAYMENT_GATEWAY_DRIVER='{self.PAYMENT_GATEWAY_DRIVER}' (driver "
+                "diferente de 'console'). Configure a variável de ambiente antes "
+                "de subir este serviço."
+            )
+        return self
 
 
 @lru_cache

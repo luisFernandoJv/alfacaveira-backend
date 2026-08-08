@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.responses import Envelope
 from app.database.session import get_db
+from app.models.enums import FeatureKey
 from app.schemas.analytics.user_stats import (
     DailyStatResponse,
     StreakResponse,
@@ -21,7 +22,7 @@ from app.schemas.analytics.user_stats import (
     TodayStatResponse,
 )
 from app.schemas.content.taxonomy import DisciplineResponse
-from app.security.dependencies import CurrentUser
+from app.security.dependencies import CurrentUser, RequireFeature
 from app.services.analytics.analytics_service import AnalyticsService
 
 router = APIRouter()
@@ -40,7 +41,11 @@ def _accuracy(correct: int, total: int) -> float:
     return round(correct / total * 100, 1) if total else 0.0
 
 
-@router.get("/daily", response_model=Envelope[list[DailyStatResponse]])
+@router.get(
+    "/daily",
+    response_model=Envelope[list[DailyStatResponse]],
+    dependencies=[Depends(RequireFeature(FeatureKey.DASHBOARD_COMPLETO))],
+)
 async def list_daily_stats(
     current_user: CurrentUser,
     analytics_service: AnalyticsServiceDep,
@@ -62,7 +67,11 @@ async def list_daily_stats(
     )
 
 
-@router.get("/today", response_model=Envelope[TodayStatResponse])
+@router.get(
+    "/today",
+    response_model=Envelope[TodayStatResponse],
+    dependencies=[Depends(RequireFeature(FeatureKey.ESTATISTICAS))],
+)
 async def get_today_stat(
     current_user: CurrentUser,
     analytics_service: AnalyticsServiceDep,
@@ -88,7 +97,11 @@ async def get_today_stat(
     )
 
 
-@router.get("/subjects", response_model=Envelope[list[SubjectStatResponse]])
+@router.get(
+    "/subjects",
+    response_model=Envelope[list[SubjectStatResponse]],
+    dependencies=[Depends(RequireFeature(FeatureKey.DASHBOARD_COMPLETO))],
+)
 async def list_subject_stats(
     current_user: CurrentUser,
     analytics_service: AnalyticsServiceDep,
@@ -108,7 +121,11 @@ async def list_subject_stats(
     )
 
 
-@router.get("/streak", response_model=Envelope[StreakResponse])
+@router.get(
+    "/streak",
+    response_model=Envelope[StreakResponse],
+    dependencies=[Depends(RequireFeature(FeatureKey.ESTATISTICAS))],
+)
 async def get_streak(
     current_user: CurrentUser,
     analytics_service: AnalyticsServiceDep,

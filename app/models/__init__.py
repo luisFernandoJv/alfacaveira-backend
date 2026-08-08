@@ -2,7 +2,7 @@
 
 from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
 from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
-from app.models.billing import Payment, Plan, Subscription
+from app.models.billing import Feature, Payment, Plan, PlanFeature, Subscription, SubscriptionHistory
 from app.models.content import (
     Discipline,
     ExamBoard,
@@ -49,7 +49,10 @@ __all__ = [
     "UserSubjectStat",
     "StudyStreak",
     "Plan",
+    "PlanFeature",
+    "Feature",
     "Subscription",
+    "SubscriptionHistory",
     "Payment",
     "Notification",
     "AdminAuditLog",

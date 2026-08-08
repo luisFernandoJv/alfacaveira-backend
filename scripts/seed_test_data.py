@@ -23,14 +23,126 @@ já existem antes de criar (por slug/email únicos).
 import asyncio
 
 from app.database.session import AsyncSessionFactory
+from app.models.billing.plan import Plan
 from app.models.content.exam_source import ExamBoard, ExamEdition, Organization
 from app.models.content.question import Question, QuestionAlternative
 from app.models.content.taxonomy import Discipline, Subject, Topic
-from app.models.enums import QuestionDifficulty, QuestionStatus
+from app.models.enums import BillingPeriod, FeatureKey, FeatureKind, QuestionDifficulty, QuestionStatus
 from app.models.identity.user import User, UserProfile
+from app.repositories.billing.feature_repository import FeatureRepository
 from app.security.password import hash_password
+from app.services.billing.feature_gate_service import FREE_PLAN_SLUG
+from app.services.billing.plan_service import PlanService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# --- catálogo de features (Etapa 5) -------------------------------------- #
+# Uma linha por FeatureKey do enum (`app/models/enums.py`), sincronizado com
+# os valores criados em `migrations/versions/0005_billing_features.py`.
+# `kind` decide se `PlanFeature.quota_limit` é relevante (QUOTA) ou se a
+# feature é liga/desliga (BOOLEAN).
+FEATURE_CATALOG: list[tuple[FeatureKey, FeatureKind, str, str]] = [
+    (FeatureKey.DAILY_QUESTIONS, FeatureKind.QUOTA, "Questões por dia", "Quantidade de questões que o usuário pode responder por dia."),
+    (FeatureKey.NOTEBOOKS, FeatureKind.BOOLEAN, "Cadernos de questões", "Acesso à criação de cadernos de questões personalizados."),
+    (FeatureKey.NOTEBOOK_MAX_QUESTIONS, FeatureKind.QUOTA, "Questões por caderno", "Limite de questões por caderno de questões."),
+    (FeatureKey.SIMULADOS, FeatureKind.BOOLEAN, "Simulados", "Acesso à realização de simulados cronometrados."),
+    (FeatureKey.FLASHCARDS, FeatureKind.BOOLEAN, "Flashcards", "Acesso ao módulo de flashcards com revisão espaçada."),
+    (FeatureKey.ESTATISTICAS, FeatureKind.BOOLEAN, "Estatísticas básicas", "Acesso às estatísticas básicas de desempenho."),
+    (FeatureKey.DASHBOARD_COMPLETO, FeatureKind.BOOLEAN, "Dashboard completo", "Acesso ao dashboard completo de acompanhamento de estudos."),
+    (FeatureKey.AI_EXPLICACAO_QUESTAO, FeatureKind.BOOLEAN, "Explicação de questão por IA", "Explicação de questões geradas por IA."),
+    (FeatureKey.AI_RESUMOS, FeatureKind.BOOLEAN, "Resumos por IA", "Geração de resumos de conteúdo por IA."),
+    (FeatureKey.AI_CRONOGRAMA, FeatureKind.BOOLEAN, "Cronograma por IA", "Geração de cronograma de estudos por IA."),
+    (FeatureKey.AI_ANALISE_DESEMPENHO, FeatureKind.BOOLEAN, "Análise de desempenho por IA", "Análise de desempenho gerada por IA."),
+    (FeatureKey.ANALYTICS_AVANCADO, FeatureKind.BOOLEAN, "Analytics avançado", "Métricas avançadas de desempenho e evolução."),
+]
+
+# --- planos base (Etapa 5) ------------------------------------------------ #
+# `quota_limit=None` em uma feature QUOTA significa "ilimitado" (ver
+# docstring de `PlanFeature`). Features BOOLEAN não devem receber quota_limit
+# (o service levanta `ValidationDomainError` se isso acontecer).
+PLAN_CATALOG: list[dict] = [
+    {
+        "slug": FREE_PLAN_SLUG,
+        "name": "Free",
+        "price_cents": 0,
+        "billing_period": BillingPeriod.MENSAL,
+        "features": {
+            FeatureKey.DAILY_QUESTIONS: 5,
+            FeatureKey.FLASHCARDS: None,
+            FeatureKey.ESTATISTICAS: None,
+        },
+    },
+    {
+        "slug": "standard",
+        "name": "Standard",
+        "price_cents": 2990,
+        "billing_period": BillingPeriod.MENSAL,
+        "features": {
+            FeatureKey.DAILY_QUESTIONS: None,
+            FeatureKey.NOTEBOOKS: None,
+            FeatureKey.NOTEBOOK_MAX_QUESTIONS: 50,
+            FeatureKey.SIMULADOS: None,
+            FeatureKey.FLASHCARDS: None,
+            FeatureKey.ESTATISTICAS: None,
+            FeatureKey.DASHBOARD_COMPLETO: None,
+        },
+    },
+    {
+        "slug": "pro",
+        "name": "Pro",
+        "price_cents": 4990,
+        "billing_period": BillingPeriod.MENSAL,
+        "features": {
+            FeatureKey.DAILY_QUESTIONS: None,
+            FeatureKey.NOTEBOOKS: None,
+            FeatureKey.NOTEBOOK_MAX_QUESTIONS: None,
+            FeatureKey.SIMULADOS: None,
+            FeatureKey.FLASHCARDS: None,
+            FeatureKey.ESTATISTICAS: None,
+            FeatureKey.DASHBOARD_COMPLETO: None,
+            FeatureKey.AI_EXPLICACAO_QUESTAO: None,
+            FeatureKey.AI_RESUMOS: None,
+            FeatureKey.AI_CRONOGRAMA: None,
+            FeatureKey.AI_ANALISE_DESEMPENHO: None,
+            FeatureKey.ANALYTICS_AVANCADO: None,
+        },
+    },
+]
+
+
+async def seed_feature_catalog(session: AsyncSession, plan_service: PlanService) -> None:
+    """Cria o catálogo de `Feature` (uma linha por `FeatureKey`), se ainda
+    não existir. Precisa rodar antes do seed de planos: `set_plan_feature`
+    levanta `NotFoundError` para uma `FeatureKey` sem `Feature` cadastrada.
+    """
+    features = FeatureRepository(session)
+    for key, kind, name, description in FEATURE_CATALOG:
+        existing = await features.get_by_key(key)
+        if existing is not None:
+            continue
+        await plan_service.create_feature(key=key, kind=kind, name=name, description=description)
+
+
+async def seed_plans(session: AsyncSession, plan_service: PlanService) -> None:
+    """Cria os planos base (free/standard/pro) e associa as features do
+    catálogo via `PlanService.set_plan_feature` — nunca escrevendo direto em
+    `Plan.features` (JSONB), que é gerenciado pelo service.
+    """
+    for spec in PLAN_CATALOG:
+        result = await session.execute(select(Plan).where(Plan.slug == spec["slug"]))
+        plan = result.scalar_one_or_none()
+        if plan is None:
+            plan = await plan_service.create_plan(
+                name=spec["name"],
+                slug=spec["slug"],
+                price_cents=spec["price_cents"],
+                billing_period=spec["billing_period"],
+            )
+
+        for feature_key, quota_limit in spec["features"].items():
+            await plan_service.set_plan_feature(
+                plan_id=plan.id, feature_key=feature_key, quota_limit=quota_limit
+            )
 
 
 async def get_or_create_user(
@@ -194,6 +306,16 @@ async def create_question(
 
 async def main() -> None:
     async with AsyncSessionFactory() as session:
+        # --- billing: catálogo de features + planos base (Etapa 5) ---
+        # Precisa rodar antes de qualquer outra coisa que dependa de
+        # `FeatureGateService.get_effective_plan` (ex.: qualquer endpoint
+        # autenticado que verifique quota/feature) — sem o plano FREE
+        # seedado, `GET /billing/subscriptions/me/plan` levanta `NotFoundError`
+        # pra qualquer usuário sem assinatura ativa (comportamento intencional).
+        plan_service = PlanService(session)
+        await seed_feature_catalog(session, plan_service)
+        await seed_plans(session, plan_service)
+
         # --- usuários ---
         admin = await get_or_create_user(
             session,

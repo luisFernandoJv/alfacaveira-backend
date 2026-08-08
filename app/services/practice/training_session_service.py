@@ -10,13 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question
-from app.models.enums import QuestionStatus, SessionType
+from app.models.enums import FeatureKey, QuestionStatus, SessionType
 from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
 from app.schemas.practice.training_session import TrainingSessionCreateRequest
-
+from app.services.billing.feature_gate_service import FeatureGateService
 
 def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
     """Snapshot (JSONB) dos filtros usados para montar a sessão."""
@@ -40,10 +40,18 @@ class TrainingSessionService:
         self._sessions = TrainingSessionRepository(session)
         self._questions = QuestionRepository(session)
         self._attempts = QuestionAttemptRepository(session)
+        self._feature_gate = FeatureGateService(session)
 
     async def create_session(
         self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
     ) -> TrainingSession:
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
         filters = QuestionFilters(
             discipline_id=data.discipline_id,
             subject_id=data.subject_id,

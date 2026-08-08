@@ -1,8 +1,9 @@
 """Repositório de acesso a dados de `QuestionAttempt` (histórico de respostas)."""
 
 import uuid
+from datetime import datetime, time, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import SessionType
@@ -31,6 +32,24 @@ class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def count_answered_today(
+        self, user_id: uuid.UUID, session_type: SessionType
+    ) -> int:
+        """Quantidade de respostas do usuário hoje (UTC) para uma origem
+        (`session_type`). Usado pelo Feature Gate de quota `daily_questions`
+        — não conta respostas de outras origens (ex.: simulado tem seu
+        próprio gate, `simulados`, e não compartilha a cota diária)."""
+        today_start = datetime.combine(
+            datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
+        )
+        stmt = select(func.count()).select_from(QuestionAttempt).where(
+            QuestionAttempt.user_id == user_id,
+            QuestionAttempt.session_type == session_type,
+            QuestionAttempt.answered_at >= today_start,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def list_by_session(
         self, user_id: uuid.UUID, session_type: SessionType, session_id: uuid.UUID

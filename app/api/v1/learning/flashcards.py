@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
+from app.models.enums import FeatureKey
 from app.repositories.learning.flashcard_repository import FlashcardFilters
 from app.schemas.learning.flashcard import (
     FlashcardCreateFromQuestionRequest,
@@ -22,7 +23,7 @@ from app.schemas.learning.flashcard import (
     FlashcardStatsResponse,
     FlashcardUpdateRequest,
 )
-from app.security.dependencies import CurrentUser
+from app.security.dependencies import CurrentUser, RequireFeature
 from app.services.learning.flashcard_service import FlashcardService
 
 router = APIRouter()
@@ -39,7 +40,7 @@ FlashcardServiceDep = Annotated[FlashcardService, Depends(get_flashcard_service)
 async def list_flashcards(
     current_user: CurrentUser,
     flashcard_service: FlashcardServiceDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: Annotated[str | None, Query()] = None,
     discipline_id: Annotated[uuid.UUID | None, Query()] = None,
     question_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -118,7 +119,12 @@ async def get_flashcard(
     return Envelope(data=FlashcardResponse.from_model(flashcard))
 
 
-@router.post("", response_model=Envelope[FlashcardResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=Envelope[FlashcardResponse],
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(RequireFeature(FeatureKey.FLASHCARDS))],
+)
 async def create_flashcard(
     body: FlashcardCreateRequest,
     current_user: CurrentUser,
@@ -132,6 +138,7 @@ async def create_flashcard(
     "/from-question",
     response_model=Envelope[FlashcardResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(RequireFeature(FeatureKey.FLASHCARDS))],
 )
 async def create_flashcard_from_question(
     body: FlashcardCreateFromQuestionRequest,

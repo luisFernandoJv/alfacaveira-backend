@@ -16,7 +16,6 @@ from app.schemas.identity import (
     RegisterRequest,
     ResetPasswordRequest,
     TokenResponse,
-    UserResponse,
 )
 from app.services.identity import AuthService
 
@@ -32,14 +31,22 @@ AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 
 @router.post(
     "/register",
-    response_model=Envelope[UserResponse],
+    response_model=Envelope[TokenResponse],
     status_code=status.HTTP_201_CREATED,
 )
-async def register(body: RegisterRequest, auth_service: AuthServiceDep) -> Envelope[UserResponse]:
-    user = await auth_service.register(
+async def register(body: RegisterRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
+    """Cria a conta e já retorna os tokens (auto-login), evitando que o
+    aluno precise digitar a senha novamente logo após se cadastrar."""
+    tokens = await auth_service.register(
         email=body.email, password=body.password, full_name=body.full_name
     )
-    return Envelope(data=UserResponse.model_validate(user))
+    return Envelope(
+        data=TokenResponse(
+            access_token=tokens.access_token,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+        )
+    )
 
 
 @router.post("/login", response_model=Envelope[TokenResponse])

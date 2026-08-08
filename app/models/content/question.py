@@ -13,7 +13,13 @@ from app.models.enums import QuestionDifficulty, QuestionStatus
 
 
 class Question(UUIDPKMixin, TimestampMixin, Base):
-    """Questão de múltipla escolha."""
+    """Questão de múltipla escolha.
+
+    Totalmente normalizada: nenhuma string de classificação é repetida na
+    própria linha, tudo referencia tabelas de dimensão por FK. `search_vector`
+    é mantido por trigger no banco (Etapa 3 da migration) para full-text search
+    sem depender de LIKE '%...%'.
+    """
 
     __tablename__ = "questions"
 
@@ -87,11 +93,10 @@ class Question(UUIDPKMixin, TimestampMixin, Base):
     tags: Mapped[list["QuestionTag"]] = relationship(
         secondary="question_tag_links", back_populates="questions"
     )
-    user_states: Mapped[list["UserQuestionState"]] = relationship(
-        back_populates="question", cascade="all, delete-orphan"
-    )
+    user_states: Mapped[list["UserQuestionState"]] = relationship(back_populates="question")
 
     __table_args__ = (
+        # Índice composto para o conjunto de filtros usado pelo filters-panel do frontend.
         Index(
             "ix_questions_filter_composite",
             "discipline_id",

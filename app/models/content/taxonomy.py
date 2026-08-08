@@ -22,6 +22,11 @@ class Discipline(UUIDPKMixin, TimestampMixin, Base):
     slug: Mapped[str] = mapped_column(String(160), unique=True, nullable=False, index=True)
 
     subjects: Mapped[list["Subject"]] = relationship(back_populates="discipline")
+    # `viewonly` implícito não é usado aqui de propósito: Flashcard.discipline_id
+    # é SET NULL on delete, então apagar uma Discipline com flashcards vinculados
+    # é uma operação válida (só desvincula), não algo que deva ser bloqueado
+    # nem versionado por esta relationship.
+    flashcards: Mapped[list["Flashcard"]] = relationship(back_populates="discipline")
 
 
 class Subject(UUIDPKMixin, TimestampMixin, Base):
