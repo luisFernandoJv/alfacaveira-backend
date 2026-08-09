@@ -70,6 +70,34 @@ class Settings(BaseSettings):
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
 
+    # Políticas dedicadas para rotas sensíveis a abuso (força bruta,
+    # enumeração de contas, flood de webhook/checkout). Cada uma é contada
+    # isoladamente por IP e por janela de 60s — não compartilham o balde da
+    # política padrão (`RATE_LIMIT_PER_MINUTE`) nem entre si.
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
+    RATE_LIMIT_REGISTER_PER_MINUTE: int = 5
+    RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: int = 3
+    RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: int = 5
+    RATE_LIMIT_BILLING_PER_MINUTE: int = 20
+
+    # Comportamento explícito quando o Redis está indisponível (ou quando
+    # `request.app.state.redis` não existe). Antes desta mudança, a falha
+    # era engolida em silêncio (`except Exception: pass`), sem log e sem
+    # decisão declarada.
+    #
+    # True (padrão): "fail open" — a requisição prossegue sem limite
+    # aplicado. Prioriza disponibilidade (inclusive de login) sobre a
+    # proteção de rate limit quando a infra de cache está fora do ar. O
+    # evento é sempre logado como warning estruturado para alerta
+    # operacional (ver PROJECT_STATE.md §15 — observabilidade).
+    #
+    # False: "fail closed" — a requisição é bloqueada com 503 enquanto o
+    # Redis estiver indisponível. Prioriza proteção contra abuso sobre
+    # disponibilidade. Só ative se o negócio decidir que abuso sem rate
+    # limit é pior do que indisponibilidade parcial.
+    RATE_LIMIT_FAIL_OPEN: bool = True
+
+
     # Billing — gateway de pagamento (ver app/services/billing/gateway.py)
     # PAYMENT_GATEWAY_DRIVER=console (padrão): nenhum provedor real — aprova
     # toda cobrança imediatamente via ConsoleGateway. Usar apenas em
@@ -77,20 +105,24 @@ class Settings(BaseSettings):
     # campo passa a selecionar o driver correspondente (ex.: "stripe").
     PAYMENT_GATEWAY_DRIVER: str = Field(default="console")  # console | (futuro: stripe, etc.)
     # Segredo compartilhado com o provedor de pagamento, usado para validar a
-    # assinatura HMAC do payload recebido em app/api/v1/billing/webhooks.py.
-    # Deve ficar vazio apenas quando PAYMENT_GATEWAY_DRIVER="console" — ver
-    # validação abaixo, que impede subir em produção com um driver real e
-    # sem segredo configurado.
+    # assinatura do payload recebido em app/api/v1/billing/webhooks.py,
+    # verificada pelo driver configurado (ver
+    # app/services/billing/gateway.py::PaymentGateway.parse_webhook_event,
+    # ADR-016). Deve ficar vazio apenas quando PAYMENT_GATEWAY_DRIVER=
+    # "console" — ver validação abaixo, que impede subir em produção com um
+    # driver real e sem segredo configurado.
     PAYMENT_WEBHOOK_SECRET: str = Field(default="")
 
     @model_validator(mode="after")
     def _validate_production_webhook_secret(self) -> "Settings":
         """Em produção, um driver de pagamento real exige PAYMENT_WEBHOOK_SECRET
         configurado — sem isso, o webhook aceitaria qualquer payload sem
-        verificar a assinatura (ver `_verify_signature` em
-        app/api/v1/billing/webhooks.py, que pula a checagem quando o segredo
-        está vazio). O driver "console" fica isento porque não fala com
-        nenhum provedor real e não há assinatura para validar.
+        verificar a assinatura (ver
+        `PaymentGateway.parse_webhook_event`/`ConsoleGateway.
+        parse_webhook_event` em app/services/billing/gateway.py, ADR-016,
+        que pula a checagem quando o segredo está vazio). O driver "console"
+        fica isento porque não fala com nenhum provedor real e não há
+        assinatura para validar.
         """
         if (
             self.APP_ENV == "production"

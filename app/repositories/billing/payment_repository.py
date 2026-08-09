@@ -7,10 +7,12 @@ provedor reenvie o evento (retry é padrão em gateways de pagamento).
 """
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.models.billing.payment import Payment
+from app.models.enums import PaymentStatus
 from app.repositories.base import BaseRepository
 
 
@@ -30,3 +32,31 @@ class PaymentRepository(BaseRepository[Payment]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def compare_and_swap_status(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        expected_status: PaymentStatus,
+        new_status: PaymentStatus,
+        paid_at: datetime | None = None,
+    ) -> bool:
+        """Análogo a `SubscriptionRepository.compare_and_swap_status`
+        (mesmo raciocínio de `UPDATE ... WHERE status = :expected_status`
+        sob READ COMMITTED, ver o docstring lá para o detalhe) — aqui é a
+        base de concorrência real para `PaymentService.process_webhook_event`
+        (roadmap item 7, ADR-017): duas entregas concorrentes do mesmo
+        evento de webhook (ou de dois eventos diferentes para o mesmo
+        `Payment`) só deixam uma vencer a transição; a outra recebe
+        `False` e trata como reentrega idempotente.
+        """
+        values: dict[str, object] = {"status": new_status}
+        if paid_at is not None:
+            values["paid_at"] = paid_at
+        stmt = (
+            update(Payment)
+            .where(Payment.id == payment_id, Payment.status == expected_status)
+            .values(**values)
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount == 1

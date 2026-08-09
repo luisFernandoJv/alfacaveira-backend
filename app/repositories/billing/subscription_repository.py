@@ -8,8 +8,9 @@ outros contextos), por isso já carrega o plano com suas features via
 """
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.billing.plan import Plan
@@ -46,12 +47,36 @@ class SubscriptionRepository(BaseRepository[Subscription]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_pending_by_user(self, user_id: uuid.UUID) -> Subscription | None:
+        """Assinatura PENDENTE do usuário, se houver (PROMPT 05).
+
+        Usada por `SubscriptionService.create_subscription` para impedir
+        que o mesmo usuário acumule várias assinaturas aguardando
+        pagamento. Diferente de `get_active_by_user`, não há índice único
+        parcial no banco cobrindo PENDENTE — a checagem aqui é só
+        aplicativa (ver ADR-014, pendência registrada). Se dois requests
+        concorrentes criarem PENDENTE ao mesmo tempo, nenhum backstop de
+        `IntegrityError` os impede (diferente do caso ATIVA).
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.status == SubscriptionStatus.PENDENTE,
+            )
+            .options(_WITH_PLAN)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_id_with_plan(self, subscription_id: uuid.UUID) -> Subscription | None:
         """Busca por id (sem exigir `user_id`), com o plano e suas features
         já carregados — mesmo `selectinload` de `get_active_by_user`. Usada
-        por `PaymentService.charge_subscription`, que já resolveu a posse da
-        assinatura antes de chamar isto (não é um método de leitura exposta
-        diretamente a partir de um endpoint escopado ao usuário).
+        por `PaymentService.charge_subscription` e por
+        `SubscriptionService.activate_subscription`, que já resolveram a
+        posse/identidade da assinatura antes de chamar isto (não é um
+        método de leitura exposta diretamente a partir de um endpoint
+        escopado ao usuário).
         """
         stmt = select(Subscription).where(Subscription.id == subscription_id).options(_WITH_PLAN)
         result = await self.session.execute(stmt)
@@ -82,3 +107,84 @@ class SubscriptionRepository(BaseRepository[Subscription]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+
+    async def compare_and_swap(
+        self,
+        subscription_id: uuid.UUID,
+        *,
+        expected: dict[str, object],
+        values: dict[str, object],
+    ) -> bool:
+        """Generalização de `compare_and_swap_status` (ADR-019) para
+        cobrir escritas de `Subscription` que não são *apenas* uma
+        transição de status: `expected` é um dicionário arbitrário de
+        colunas/valores que devem bater no banco para o `UPDATE` se
+        aplicar (sempre inclui `id`, adicionado aqui automaticamente —
+        quem chama não precisa repetir), `values` é o que será gravado.
+
+        Mesmo raciocínio de `UPDATE ... WHERE ...` sob READ COMMITTED já
+        documentado em `compare_and_swap_status` (mantido abaixo como
+        atalho para o caso comum de CAS só-de-status): a segunda transação
+        concorrente bloqueia no lock de linha, reavalia o `WHERE` contra o
+        valor já commitado pela primeira, e afeta 0 linhas se qualquer
+        coluna de `expected` não bater mais — não só `status`.
+
+        Existe porque `cancel_subscription`, `reactivate_subscription`,
+        `renew_subscription` e `change_plan` (ADR-018, "Não decidido/
+        implementado nesta sessão") comparam/gravam colunas diferentes
+        cada um (`cancel_at_period_end`, `current_period_start`/
+        `current_period_end` a partir do período *atual* não de "agora",
+        `plan_id`) — parâmetros nomeados fixos não davam conta sem um
+        método por escrita. Não atualiza o objeto ORM em memória; mesma
+        responsabilidade do chamador que `compare_and_swap_status`.
+        """
+        conditions = [Subscription.id == subscription_id]
+        for column_name, expected_value in expected.items():
+            conditions.append(getattr(Subscription, column_name) == expected_value)
+        stmt = update(Subscription).where(*conditions).values(**values)
+        result = await self.session.execute(stmt)
+        return result.rowcount == 1
+
+    async def compare_and_swap_status(
+        self,
+        subscription_id: uuid.UUID,
+        *,
+        expected_status: SubscriptionStatus,
+        new_status: SubscriptionStatus,
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
+    ) -> bool:
+        """Grava `new_status` somente se o status atual em banco ainda for
+        `expected_status` (roadmap item 7 — concorrência real de webhook,
+        ver ADR-017 e ADR-018).
+
+        Desde o ADR-019, é um atalho fino sobre `compare_and_swap` para o
+        caso comum de CAS só-de-status (usado por `mark_payment_failed`,
+        `activate_subscription`, `expire_subscription`) — ver o docstring
+        de `compare_and_swap` para o raciocínio completo de por que o
+        `UPDATE ... WHERE` condicional é suficiente sob READ COMMITTED,
+        sem precisar de `SELECT ... FOR UPDATE` nem de SERIALIZABLE.
+
+        `period_start`/`period_end` são opcionais e, quando informados,
+        entram no mesmo `UPDATE` condicional (análogo ao `paid_at`
+        opcional de `PaymentRepository.compare_and_swap_status`) — usado
+        por `SubscriptionService.activate_subscription` (ADR-018) para
+        gravar o período real de cobrança atomicamente com a transição de
+        status, em vez de um segundo `UPDATE` incondicional separado que
+        reabriria uma janela de corrida entre os dois passos.
+
+        Não atualiza o objeto ORM já carregado em memória — quem chama é
+        responsável por refletir os novos valores no objeto quando o
+        retorno for `True` (ver `SubscriptionService.mark_payment_failed`,
+        `activate_subscription`, `expire_subscription`).
+        """
+        values: dict[str, object] = {"status": new_status}
+        if period_start is not None:
+            values["current_period_start"] = period_start
+        if period_end is not None:
+            values["current_period_end"] = period_end
+        return await self.compare_and_swap(
+            subscription_id,
+            expected={"status": expected_status},
+            values=values,
+        )

@@ -4,6 +4,16 @@ de status ou de plano de uma assinatura.
 Nunca é atualizada nem apagada — apenas inserida por `SubscriptionService`
 dentro da mesma transação que muda a `Subscription`. `from_plan_id` fica
 `None` na criação (não havia plano anterior).
+
+`payment_id` (ADR-023, migration 0008): chave de idempotência por evento
+para `renew_subscription` — opcional (nula para toda entrada que não é uma
+renovação: criação, ativação, cancelamento, reativação, troca de plano,
+expiração, falha de pagamento). Quando presente, o índice único parcial
+`ux_subscription_history_payment` (`subscription_id`, `payment_id`, `WHERE
+payment_id IS NOT NULL`) garante que o mesmo `payment_id` nunca gera duas
+entradas para a mesma assinatura — o backstop de banco para a checagem
+aplicativa em `SubscriptionService.renew_subscription`. Ver ADR-022 (achado)
+e ADR-023 (decisão).
 """
 
 import uuid
@@ -33,6 +43,9 @@ class SubscriptionHistory(UUIDPKMixin, Base):
     )
     to_plan_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False
+    )
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("payments.id", ondelete="SET NULL")
     )
     from_status: Mapped[SubscriptionStatus | None] = mapped_column(
         PGEnum(

@@ -30,7 +30,13 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
             values_callable=lambda obj: [e.value for e in obj],
         ),
         nullable=False,
-        default=SubscriptionStatus.ATIVA,
+        # PENDENTE, não ATIVA (ADR-003 / ADR-014, PROMPT 05): este default
+        # do lado do SQLAlchemy só se aplica se `status` não for passado
+        # explicitamente ao construtor — `SubscriptionService.create_subscription`
+        # sempre define o status na criação, então isto é sobretudo
+        # documentação de que "assinatura sem confirmação" é o estado
+        # seguro por padrão, nunca ATIVA.
+        default=SubscriptionStatus.PENDENTE,
         index=True,
     )
     current_period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

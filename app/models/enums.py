@@ -53,6 +53,12 @@ class BillingPeriod(str, enum.Enum):
 
 
 class SubscriptionStatus(str, enum.Enum):
+    # PENDENTE: assinatura criada, aguardando confirmação de pagamento do
+    # gateway. Nasce aqui por padrão (ADR-003) e só vira ATIVA quando
+    # `PaymentService.process_webhook_event` confirma um pagamento
+    # APROVADO via `SubscriptionService.activate_subscription` (ver
+    # ADR-014, PROMPT 05).
+    PENDENTE = "pendente"
     ATIVA = "ativa"
     CANCELADA = "cancelada"
     INADIMPLENTE = "inadimplente"
@@ -92,6 +98,12 @@ class FeatureKind(str, enum.Enum):
 
 class SubscriptionHistoryReason(str, enum.Enum):
     CRIADA = "criada"
+    # ATIVADA: transição PENDENTE -> ATIVA feita por
+    # `SubscriptionService.activate_subscription` quando o webhook
+    # confirma o primeiro pagamento (PROMPT 05). Distinta de RENOVADA
+    # (que é ATIVA -> ATIVA, avanço de período de uma assinatura que já
+    # estava paga).
+    ATIVADA = "ativada"
     RENOVADA = "renovada"
     UPGRADE = "upgrade"
     DOWNGRADE = "downgrade"
