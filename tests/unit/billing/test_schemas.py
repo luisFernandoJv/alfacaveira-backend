@@ -139,6 +139,42 @@ class TestCreateSubscriptionRequest:
         with pytest.raises(ValidationError):
             CreateSubscriptionRequest(plan_id="not-a-uuid")
 
+    def test_ignores_price_field_supplied_by_client(self):
+        """PROMPT 08 do master (TESTES): 'preço não confiável é rejeitado'.
+
+        Verificado por leitura de código nesta sessão (backend.xml):
+        - `CreateSubscriptionRequest` só declara `plan_id`; o endpoint
+          `POST /billing/subscriptions` chama
+          `subscription_service.create_subscription(current_user.id, body.plan_id)`
+          — nenhum outro campo do body é lido.
+        - `PaymentService.charge_subscription` resolve o valor cobrado
+          exclusivamente a partir de `subscription.plan.price_cents`
+          (já coberto por `test_creates_approved_payment_via_gateway` em
+          `test_payment_service.py`, que asserta `payment.amount_cents == 4990`
+          vindo do `Plan`, nunca de um parâmetro).
+        - o endpoint `POST /billing/subscriptions/{id}/charge` nem aceita
+          corpo de requisição — não existe rota para o cliente enviar
+          preço nessa chamada.
+
+        Este teste trava o único ponto onde um cliente mal-intencionado
+        poderia tentar injetar um preço: o body de criação da assinatura.
+        Pydantic v2, por padrão (`extra="ignore"`, sem `model_config`
+        customizado em `CreateSubscriptionRequest`), descarta campos
+        desconhecidos silenciosamente em vez de expô-los como atributo —
+        o que já impede qualquer leitura acidental a jusante. Este teste
+        existe para que uma mudança futura (ex.: alguém adicionar
+        `model_config = ConfigDict(extra="allow")` ou passar
+        `**body.model_dump()` para o service) quebre a suíte antes de
+        chegar em produção.
+        """
+        plan_id = uuid.uuid4()
+        req = CreateSubscriptionRequest.model_validate(
+            {"plan_id": plan_id, "price_cents": 1, "amount_cents": 1}
+        )
+        assert req.plan_id == plan_id
+        assert not hasattr(req, "price_cents")
+        assert not hasattr(req, "amount_cents")
+
 
 class TestChangePlanRequest:
     def test_requires_new_plan_id(self):

@@ -37,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.database.uow import UnitOfWork
 from app.models.billing.subscription import Subscription
@@ -380,8 +381,42 @@ class SubscriptionService:
         `unique_violation` (23505, o índice parcial) é tratado como
         backstop de corrida; qualquer outro `IntegrityError` (em especial
         `foreign_key_violation`, 23503) é relançado.
+
+        Compartilha a implementação com `renew_subscription_system`
+        (PROMPT 10, roadmap item 10) via `_renew_by_subscription` — a
+        única diferença entre as duas é como a `Subscription` é resolvida
+        (com ou sem checagem de posse por `user_id`); a lógica de CAS,
+        idempotência por `payment_id` e histórico é idêntica.
         """
         subscription = await self.get_subscription(subscription_id, user_id)
+        return await self._renew_by_subscription(subscription, payment_id)
+
+    async def renew_subscription_system(
+        self, subscription_id: uuid.UUID, payment_id: uuid.UUID
+    ) -> Subscription:
+        """Mesma renovação de `renew_subscription`, mas acionada pelo job
+        de renovação automática (`app/workers/subscription_renewal.py`,
+        PROMPT 10) ou por `PaymentService.process_webhook_event` quando um
+        pagamento APROVADO chega para uma assinatura já ATIVA — não recebe
+        `user_id` porque quem aciona não é uma requisição autenticada de
+        usuário (mesmo padrão de `activate_subscription`/
+        `mark_payment_failed`/`expire_subscription`).
+        """
+        subscription = await self._subscriptions.get_by_id_with_plan(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        return await self._renew_by_subscription(subscription, payment_id)
+
+    async def _renew_by_subscription(
+        self, subscription: Subscription, payment_id: uuid.UUID
+    ) -> Subscription:
+        """Corpo comum de `renew_subscription`/`renew_subscription_system`
+        (PROMPT 10). Recebe a `Subscription` já resolvida pelo chamador —
+        cada refetch interno (idempotência por `payment_id`, corrida
+        perdida no CAS) usa `get_by_id_with_plan` (sem `user_id`), já que
+        a posse/existência já foi validada uma vez antes de chegar aqui.
+        """
+        subscription_id = subscription.id
         if subscription.status != SubscriptionStatus.ATIVA:
             raise ConflictError("Apenas assinaturas ativas podem ser renovadas.")
 
@@ -460,7 +495,8 @@ class SubscriptionService:
             sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
             if sqlstate != "23505":
                 raise
-            return await self.get_subscription(subscription_id, user_id)
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
+            return current if current is not None else subscription
 
         if not applied:
             # Perdeu a corrida (mesma leitura, duas escritas — ver acima):
@@ -468,8 +504,8 @@ class SubscriptionService:
             # período entre a leitura e o CAS. Idempotente — devolve o
             # período já avançado pela chamada vencedora em vez de
             # duplicar.
-            current = await self.get_subscription(subscription_id, user_id)
-            return current
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
+            return current if current is not None else subscription
 
         return subscription
 
@@ -610,12 +646,37 @@ class SubscriptionService:
             else SubscriptionStatus.INADIMPLENTE
         )
 
+        # PROMPT 11 (dunning): ao entrar em INADIMPLENTE a partir de ATIVA,
+        # inicializa o ciclo de dunning (grava atomicamente no mesmo CAS que
+        # a transição de status — mesmo raciocínio de `activate_subscription`
+        # gravar o período junto com o CAS, em vez de um segundo UPDATE
+        # incondicional que reabriria uma janela de corrida). Origem PENDENTE
+        # vai para CANCELADA, não tem ciclo de dunning.
+        cas_values: dict[str, object] = {"status": new_status}
+        if new_status == SubscriptionStatus.INADIMPLENTE:
+            now = _utcnow()
+            cas_values["dunning_attempts"] = 0
+            cas_values["dunning_next_retry_at"] = now + timedelta(
+                days=settings.DUNNING_RETRY_INTERVAL_DAYS
+            )
+            cas_values["dunning_grace_period_ends_at"] = now + timedelta(
+                days=settings.DUNNING_GRACE_PERIOD_DAYS
+            )
+
         async with UnitOfWork(self._session):
-            applied = await self._subscriptions.compare_and_swap_status(
-                subscription_id, expected_status=previous_status, new_status=new_status
+            applied = await self._subscriptions.compare_and_swap(
+                subscription_id,
+                expected={"status": previous_status},
+                values=cas_values,
             )
             if applied:
                 subscription.status = new_status
+                if new_status == SubscriptionStatus.INADIMPLENTE:
+                    subscription.dunning_attempts = cas_values["dunning_attempts"]
+                    subscription.dunning_next_retry_at = cas_values["dunning_next_retry_at"]
+                    subscription.dunning_grace_period_ends_at = cas_values[
+                        "dunning_grace_period_ends_at"
+                    ]
                 self._session.add(
                     SubscriptionHistory(
                         subscription_id=subscription.id,
@@ -632,6 +693,232 @@ class SubscriptionService:
             # Perdeu a corrida: outra entrega concorrente já aplicou esta
             # transição entre a leitura acima e o CAS. Devolve o estado
             # atual em vez do objeto potencialmente desatualizado.
+            current = await self._subscriptions.get_by_id(subscription_id)
+            return current if current is not None else subscription
+
+        return subscription
+
+    async def record_dunning_retry_failure(self, subscription_id: uuid.UUID) -> Subscription:
+        """Chamado pelo job de dunning (`app/workers/subscription_dunning.py`,
+        PROMPT 11) quando uma tentativa de recobrança de uma assinatura
+        INADIMPLENTE falha de novo. Permanece INADIMPLENTE (não muda de
+        status) — só incrementa `dunning_attempts` e agenda a próxima
+        tentativa (`dunning_next_retry_at`), sem tocar
+        `dunning_grace_period_ends_at` (o grace period é fixo desde que a
+        assinatura entrou em INADIMPLENTE, não se estende a cada retry).
+
+        Se a tentativa que acabou de falhar já era a última permitida
+        (`dunning_attempts + 1 >= DUNNING_MAX_RETRIES`), não agenda mais
+        nenhum retry (`dunning_next_retry_at = None`) — a assinatura só sai
+        de INADIMPLENTE quando o grace period vencer
+        (`expire_from_dunning`, via `list_due_for_dunning_expiration`, que
+        não depende de `dunning_next_retry_at`).
+
+        CAS inclui `dunning_attempts` esperado (não só `status`): duas
+        execuções concorrentes do job de dunning para a mesma assinatura
+        (não deveria acontecer com `max_instances=1` no scheduler, mesmo
+        raciocínio de `finalize_scheduled_cancellation`) não incrementam a
+        contagem em duplicidade — quem perde o CAS devolve o estado atual
+        em vez de sobrescrever `dunning_attempts` com um valor obsoleto.
+        """
+        subscription = await self._subscriptions.get_by_id(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        if subscription.status != SubscriptionStatus.INADIMPLENTE:
+            # Idempotente: outra execução concorrente já tirou esta
+            # assinatura de INADIMPLENTE (recuperada ou expirada) entre a
+            # seleção do job e esta chamada — mesmo padrão dos demais
+            # métodos deste service diante de corrida.
+            return subscription
+
+        previous_attempts = subscription.dunning_attempts
+        new_attempts = previous_attempts + 1
+        next_retry_at = (
+            None
+            if new_attempts >= settings.DUNNING_MAX_RETRIES
+            else _utcnow() + timedelta(days=settings.DUNNING_RETRY_INTERVAL_DAYS)
+        )
+
+        async with UnitOfWork(self._session):
+            applied = await self._subscriptions.compare_and_swap(
+                subscription_id,
+                expected={
+                    "status": SubscriptionStatus.INADIMPLENTE,
+                    "dunning_attempts": previous_attempts,
+                },
+                values={
+                    "dunning_attempts": new_attempts,
+                    "dunning_next_retry_at": next_retry_at,
+                },
+            )
+            if applied:
+                subscription.dunning_attempts = new_attempts
+                subscription.dunning_next_retry_at = next_retry_at
+                self._session.add(
+                    SubscriptionHistory(
+                        subscription_id=subscription.id,
+                        from_plan_id=subscription.plan_id,
+                        to_plan_id=subscription.plan_id,
+                        from_status=SubscriptionStatus.INADIMPLENTE,
+                        to_status=SubscriptionStatus.INADIMPLENTE,
+                        reason=SubscriptionHistoryReason.RETRY_DUNNING_FALHOU,
+                    )
+                )
+                await self._session.flush()
+
+        if not applied:
+            current = await self._subscriptions.get_by_id(subscription_id)
+            return current if current is not None else subscription
+
+        return subscription
+
+    async def recover_from_dunning(
+        self, subscription_id: uuid.UUID, payment_id: uuid.UUID
+    ) -> Subscription:
+        """Uma tentativa de recobrança de uma assinatura INADIMPLENTE foi
+        aprovada — volta para ATIVA e avança o período corrente (mesmo
+        efeito de uma renovação normal: a cobrança que acabou de ser
+        aprovada paga exatamente o período que estava em aberto). Chamado
+        pelo job de dunning (aplicação direta, mesmo padrão de
+        `renew_subscription_system` — ver docstring de
+        `app/workers/subscription_dunning.py`) e por
+        `PaymentService.process_webhook_event` quando um evento APROVADO
+        chega para uma assinatura já INADIMPLENTE (caminho de um provedor
+        assíncrono real, ainda não implementado — roadmap item 6).
+
+        Idempotência por `payment_id`, mesmo mecanismo de
+        `_renew_by_subscription` (ADR-023): reentrega do mesmo evento não
+        avança o período nem grava uma segunda `SubscriptionHistory`. Ao
+        contrário de `_renew_by_subscription`, este método também limpa os
+        campos de dunning (`dunning_attempts=0`,
+        `dunning_next_retry_at=None`, `dunning_grace_period_ends_at=None`)
+        — o próximo ciclo de inadimplência, se houver, começa do zero.
+        """
+        subscription = await self._subscriptions.get_by_id_with_plan(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        if subscription.status == SubscriptionStatus.ATIVA:
+            # Idempotente: outra execução concorrente já recuperou esta
+            # assinatura entre a leitura do chamador e agora.
+            return subscription
+        if subscription.status != SubscriptionStatus.INADIMPLENTE:
+            raise ConflictError("Apenas assinaturas inadimplentes podem ser recuperadas.")
+
+        already_processed = await self._history.get_by_subscription_and_payment(
+            subscription_id, payment_id
+        )
+        if already_processed is not None:
+            # Idempotente: este payment_id já recuperou esta assinatura —
+            # reentrega do mesmo evento, mesmo padrão de
+            # `_renew_by_subscription`.
+            return subscription
+
+        period_length = _PERIOD_LENGTH[subscription.plan.billing_period]
+        now = _utcnow()
+        new_period_start = now
+        new_period_end = now + period_length
+
+        try:
+            async with UnitOfWork(self._session):
+                applied = await self._subscriptions.compare_and_swap(
+                    subscription_id,
+                    expected={"status": SubscriptionStatus.INADIMPLENTE},
+                    values={
+                        "status": SubscriptionStatus.ATIVA,
+                        "current_period_start": new_period_start,
+                        "current_period_end": new_period_end,
+                        "dunning_attempts": 0,
+                        "dunning_next_retry_at": None,
+                        "dunning_grace_period_ends_at": None,
+                    },
+                )
+                if applied:
+                    subscription.status = SubscriptionStatus.ATIVA
+                    subscription.current_period_start = new_period_start
+                    subscription.current_period_end = new_period_end
+                    subscription.dunning_attempts = 0
+                    subscription.dunning_next_retry_at = None
+                    subscription.dunning_grace_period_ends_at = None
+                    self._session.add(
+                        SubscriptionHistory(
+                            subscription_id=subscription.id,
+                            from_plan_id=subscription.plan_id,
+                            to_plan_id=subscription.plan_id,
+                            from_status=SubscriptionStatus.INADIMPLENTE,
+                            to_status=SubscriptionStatus.ATIVA,
+                            reason=SubscriptionHistoryReason.RECUPERADA_DUNNING,
+                            payment_id=payment_id,
+                        )
+                    )
+                    await self._session.flush()
+        except IntegrityError as exc:
+            # Backstop de corrida real, mesmo padrão de
+            # `_renew_by_subscription`/ADR-023: só `unique_violation`
+            # (23505, o índice único parcial de `payment_id`) é tratado
+            # como idempotência; qualquer outro `IntegrityError` (ex.: FK
+            # de `payment_id` inválido) é relançado.
+            sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if sqlstate != "23505":
+                raise
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
+            return current if current is not None else subscription
+
+        if not applied:
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
+            return current if current is not None else subscription
+
+        return subscription
+
+    async def expire_from_dunning(self, subscription_id: uuid.UUID) -> Subscription:
+        """Chamado pelo job de dunning quando o grace period de uma
+        assinatura INADIMPLENTE termina sem recuperação
+        (`list_due_for_dunning_expiration`) — move para EXPIRADA,
+        independentemente de quantas tentativas de retry ainda restariam.
+
+        Distinto de `expire_subscription` (ATIVA -> EXPIRADA, período
+        terminou sem renovação — roadmap item 7/18): este é
+        INADIMPLENTE -> EXPIRADA, fim do grace period de dunning. Mesmo
+        `SubscriptionHistoryReason.EXPIRADA` é reaproveitado para os dois
+        casos (a distinção fica em `from_status`, já registrado em toda
+        entrada de histórico) — não crio uma razão nova só para diferenciar
+        a origem, mesmo espírito de reaproveitar `PAGAMENTO_FALHOU` para
+        ATIVA->INADIMPLENTE e PENDENTE->CANCELADA.
+        """
+        subscription = await self._subscriptions.get_by_id(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        if subscription.status == SubscriptionStatus.EXPIRADA:
+            # Idempotente: outra execução concorrente já expirou esta
+            # assinatura entre a seleção do job e esta chamada.
+            return subscription
+        if subscription.status != SubscriptionStatus.INADIMPLENTE:
+            raise ConflictError("Apenas assinaturas inadimplentes podem expirar por dunning.")
+
+        async with UnitOfWork(self._session):
+            applied = await self._subscriptions.compare_and_swap(
+                subscription_id,
+                expected={"status": SubscriptionStatus.INADIMPLENTE},
+                values={
+                    "status": SubscriptionStatus.EXPIRADA,
+                    "dunning_next_retry_at": None,
+                },
+            )
+            if applied:
+                subscription.status = SubscriptionStatus.EXPIRADA
+                subscription.dunning_next_retry_at = None
+                self._session.add(
+                    SubscriptionHistory(
+                        subscription_id=subscription.id,
+                        from_plan_id=subscription.plan_id,
+                        to_plan_id=subscription.plan_id,
+                        from_status=SubscriptionStatus.INADIMPLENTE,
+                        to_status=SubscriptionStatus.EXPIRADA,
+                        reason=SubscriptionHistoryReason.EXPIRADA,
+                    )
+                )
+                await self._session.flush()
+
+        if not applied:
             current = await self._subscriptions.get_by_id(subscription_id)
             return current if current is not None else subscription
 
@@ -694,6 +981,67 @@ class SubscriptionService:
             # Perdeu a corrida: outra execução concorrente do job já
             # expirou esta assinatura entre a leitura acima e o CAS.
             current = await self._subscriptions.get_by_id(subscription_id)
+            return current if current is not None else subscription
+
+        return subscription
+
+    async def finalize_scheduled_cancellation(self, subscription_id: uuid.UUID) -> Subscription:
+        """Efetiva um cancelamento agendado (`cancel_subscription` com
+        `immediately=False`, `cancel_at_period_end=True`) cujo período já
+        terminou — chamado pelo job de renovação automática
+        (`app/workers/subscription_renewal.py`, PROMPT 10), nunca por uma
+        requisição autenticada de usuário (por isso não recebe `user_id`,
+        mesmo padrão de `expire_subscription`/`renew_subscription_system`).
+
+        Não cobra: uma assinatura marcada para cancelar ao fim do período
+        não deve gerar uma nova tentativa de cobrança neste momento — é
+        exatamente o requisito "não cobrar cancelada/expirada" do
+        PROMPT 10 aplicado ao caso "cancelamento agendado que acabou de
+        vencer" (distinto de uma assinatura já CANCELADA/EXPIRADA, que
+        `list_due_for_renewal`/`list_scheduled_cancellations_due` já nem
+        selecionam).
+
+        Mesmo padrão de CAS + idempotência de `expire_subscription`: quem
+        perde a corrida (duas execuções concorrentes do job — não deveria
+        acontecer com `max_instances=1` no scheduler, mas o guard custa
+        pouco e seguiria correto mesmo assim) recebe o estado atual em vez
+        de duplicar `SubscriptionHistory`.
+        """
+        subscription = await self._subscriptions.get_by_id_with_plan(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        if subscription.status == SubscriptionStatus.CANCELADA:
+            # Idempotente: outra execução (concorrente, ou reentrega do
+            # mesmo job) já efetivou este cancelamento agendado.
+            return subscription
+        if subscription.status != SubscriptionStatus.ATIVA or not subscription.cancel_at_period_end:
+            raise ConflictError("Esta assinatura não está agendada para cancelamento.")
+
+        async with UnitOfWork(self._session):
+            applied = await self._subscriptions.compare_and_swap(
+                subscription_id,
+                expected={
+                    "status": SubscriptionStatus.ATIVA,
+                    "cancel_at_period_end": True,
+                },
+                values={"status": SubscriptionStatus.CANCELADA},
+            )
+            if applied:
+                subscription.status = SubscriptionStatus.CANCELADA
+                self._session.add(
+                    SubscriptionHistory(
+                        subscription_id=subscription.id,
+                        from_plan_id=subscription.plan_id,
+                        to_plan_id=subscription.plan_id,
+                        from_status=SubscriptionStatus.ATIVA,
+                        to_status=SubscriptionStatus.CANCELADA,
+                        reason=SubscriptionHistoryReason.CANCELADA,
+                    )
+                )
+                await self._session.flush()
+
+        if not applied:
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
             return current if current is not None else subscription
 
         return subscription

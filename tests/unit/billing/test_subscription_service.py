@@ -27,9 +27,11 @@ decisão. Nenhum teste pré-existente que dependia apenas do caminho `ATIVA`
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.enums import BillingPeriod, SubscriptionHistoryReason, SubscriptionStatus
 from app.services.billing import subscription_service as subscription_service_module
@@ -208,13 +210,39 @@ class TestCancelSubscription:
         assert result.status == SubscriptionStatus.CANCELADA
         assert result.cancel_at_period_end is True
 
-    async def test_rejects_cancel_of_non_active_subscription(self, repos, service):
+    async def test_rejects_cancel_of_non_cancelable_subscription(self, repos, service):
+        """CORREÇÃO (achado do rerun real de `pytest`, ver docs/HANDOFF.md):
+        este teste usava `status=CANCELADA` esperando `ConflictError`, mas
+        `cancel_subscription` foi corrigido de propósito para tratar
+        "cancelar algo já CANCELADA" como idempotente (ver guard no início
+        de `cancel_subscription` e o teste dedicado logo abaixo) — mesmo
+        padrão já usado em `activate_subscription`/`mark_payment_failed`.
+        `EXPIRADA` é o estado genuinamente inválido: não é alcançável a
+        partir de ATIVA/PENDENTE por este método, então continua devendo
+        levantar `ConflictError`."""
         subs, plans = repos
-        sub = make_subscription(status=SubscriptionStatus.CANCELADA)
+        sub = make_subscription(status=SubscriptionStatus.EXPIRADA)
         subs.seed(sub)
 
         with pytest.raises(ConflictError):
             await service.cancel_subscription(sub.id, sub.user_id)
+
+    async def test_cancel_of_already_cancelled_subscription_is_idempotent(self, repos, service):
+        """Cobre o guard de idempotência descrito na docstring de
+        `cancel_subscription`: uma segunda chamada concorrente cuja leitura
+        acontece depois do commit da primeira deve devolver o estado atual
+        sem levantar `ConflictError` nem gravar `SubscriptionHistory` de
+        novo."""
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.CANCELADA)
+        subs.seed(sub)
+
+        result = await service.cancel_subscription(sub.id, sub.user_id)
+
+        assert result.status == SubscriptionStatus.CANCELADA
+        assert result is sub
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert history_entries == []
 
     async def test_rejects_cancel_of_subscription_not_owned_by_user(self, repos, service):
         subs, plans = repos
@@ -340,6 +368,125 @@ class TestRenewSubscription:
         assert len(history_entries) == 2
 
 
+class TestRenewSubscriptionSystem:
+    """`renew_subscription_system` (PROMPT 10, roadmap item 10) — mesma
+    lógica de `renew_subscription`, mas sem checagem de posse por
+    `user_id` (acionada pelo job de renovação automática ou por
+    `PaymentService.process_webhook_event`, não por uma requisição
+    autenticada de usuário). Cobre só o que difere de `TestRenewSubscription`
+    acima — o corpo de CAS/idempotência é o mesmo (`_renew_by_subscription`),
+    já validado ali.
+    """
+
+    async def test_advances_current_period_without_user_id(self, repos, service):
+        subs, plans = repos
+        plan = make_plan(billing_period=BillingPeriod.MENSAL)
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=plan)
+        subs.seed(sub)
+        old_end = sub.current_period_end
+
+        result = await service.renew_subscription_system(sub.id, uuid.uuid4())
+
+        assert result.current_period_start == old_end
+        assert result.current_period_end > old_end
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert len(history_entries) == 1
+        assert history_entries[0].reason == SubscriptionHistoryReason.RENOVADA
+
+    async def test_raises_not_found_for_unknown_subscription(self, repos, service):
+        with pytest.raises(NotFoundError):
+            await service.renew_subscription_system(uuid.uuid4(), uuid.uuid4())
+
+    async def test_rejects_renew_of_non_active_subscription(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.INADIMPLENTE)
+        subs.seed(sub)
+
+        with pytest.raises(ConflictError):
+            await service.renew_subscription_system(sub.id, uuid.uuid4())
+
+    async def test_repeated_payment_id_is_idempotent_no_op(self, repos, service):
+        """Mesmo comportamento de `TestRenewSubscription`: reentrega do
+        mesmo evento (mesmo `payment_id`) não duplica o avanço de
+        período — relevante aqui porque é exatamente o que garante que
+        rodar o job de renovação automática duas vezes não cobra/renova
+        em duplicidade (PROMPT 10, critério de aceite)."""
+        subs, plans = repos
+        plan = make_plan(billing_period=BillingPeriod.MENSAL)
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=plan)
+        subs.seed(sub)
+        old_end = sub.current_period_end
+        payment_id = uuid.uuid4()
+
+        first = await service.renew_subscription_system(sub.id, payment_id)
+        second = await service.renew_subscription_system(sub.id, payment_id)
+
+        assert first.current_period_end > old_end
+        assert second.current_period_end == first.current_period_end
+        history_entries = [
+            e for e in service._session.added if getattr(e, "payment_id", None) == payment_id
+        ]
+        assert len(history_entries) == 1
+
+
+class TestFinalizeScheduledCancellation:
+    """`finalize_scheduled_cancellation` (PROMPT 10) — efetiva um
+    cancelamento agendado (`cancel_at_period_end=True`) cujo período já
+    terminou, sem gerar uma nova cobrança."""
+
+    async def test_moves_scheduled_cancellation_to_cancelada(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(
+            status=SubscriptionStatus.ATIVA, cancel_at_period_end=True
+        )
+        subs.seed(sub)
+
+        result = await service.finalize_scheduled_cancellation(sub.id)
+
+        assert result.status == SubscriptionStatus.CANCELADA
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert len(history_entries) == 1
+        assert history_entries[0].reason == SubscriptionHistoryReason.CANCELADA
+        assert history_entries[0].from_status == SubscriptionStatus.ATIVA
+        assert history_entries[0].to_status == SubscriptionStatus.CANCELADA
+
+    async def test_raises_not_found_for_unknown_subscription(self, repos, service):
+        with pytest.raises(NotFoundError):
+            await service.finalize_scheduled_cancellation(uuid.uuid4())
+
+    async def test_rejects_active_subscription_not_scheduled_for_cancellation(
+        self, repos, service
+    ):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, cancel_at_period_end=False)
+        subs.seed(sub)
+
+        with pytest.raises(ConflictError):
+            await service.finalize_scheduled_cancellation(sub.id)
+
+    async def test_rejects_non_active_subscription(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.PENDENTE)
+        subs.seed(sub)
+
+        with pytest.raises(ConflictError):
+            await service.finalize_scheduled_cancellation(sub.id)
+
+    async def test_is_idempotent_if_already_cancelled(self, repos, service):
+        """Segunda chamada (ex.: reentrega do job) sobre uma assinatura já
+        CANCELADA não levanta erro nem duplica histórico."""
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, cancel_at_period_end=True)
+        subs.seed(sub)
+
+        await service.finalize_scheduled_cancellation(sub.id)
+        result = await service.finalize_scheduled_cancellation(sub.id)
+
+        assert result.status == SubscriptionStatus.CANCELADA
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert len(history_entries) == 1
+
+
 class TestChangePlan:
     async def test_upgrade_when_new_plan_is_more_expensive(self, repos, service):
         subs, plans = repos
@@ -449,6 +596,26 @@ class TestMarkPaymentFailed:
         history_entries = [e for e in service._session.added if hasattr(e, "reason")]
         assert history_entries[-1].reason == SubscriptionHistoryReason.PAGAMENTO_FALHOU
 
+    async def test_initializes_dunning_cycle_on_transition_to_inadimplente(self, repos, service):
+        """PROMPT 11: ao entrar em INADIMPLENTE a partir de ATIVA, o ciclo de
+        dunning é inicializado atomicamente — attempts=0, next_retry_at e
+        grace_period_ends_at calculados a partir da política configurada
+        (DUNNING_RETRY_INTERVAL_DAYS / DUNNING_GRACE_PERIOD_DAYS)."""
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA)
+        subs.seed(sub)
+        before = datetime.now(UTC)
+
+        result = await service.mark_payment_failed(sub.id)
+
+        assert result.dunning_attempts == 0
+        assert result.dunning_next_retry_at is not None
+        assert result.dunning_grace_period_ends_at is not None
+        expected_retry_min = before + timedelta(days=settings.DUNNING_RETRY_INTERVAL_DAYS)
+        expected_grace_min = before + timedelta(days=settings.DUNNING_GRACE_PERIOD_DAYS)
+        assert result.dunning_next_retry_at >= expected_retry_min
+        assert result.dunning_grace_period_ends_at >= expected_grace_min
+
     async def test_moves_pending_subscription_to_cancelada(self, repos, service):
         """Novo no PROMPT 05 (ADR-014, decisão 2): se a origem é PENDENTE
         (falha do pagamento de ativação), o destino é CANCELADA, não
@@ -465,10 +632,184 @@ class TestMarkPaymentFailed:
         assert history_entries[-1].reason == SubscriptionHistoryReason.PAGAMENTO_FALHOU
         assert history_entries[-1].from_status == SubscriptionStatus.PENDENTE
         assert history_entries[-1].to_status == SubscriptionStatus.CANCELADA
+        # Não inicializa ciclo de dunning para uma assinatura que nunca
+        # chegou a ser paga (vai direto para CANCELADA, não INADIMPLENTE).
+        assert result.dunning_attempts == 0
+        assert result.dunning_next_retry_at is None
+        assert result.dunning_grace_period_ends_at is None
 
     async def test_rejects_unknown_subscription(self, repos, service):
         with pytest.raises(NotFoundError):
             await service.mark_payment_failed(uuid.uuid4())
+
+
+class TestRecordDunningRetryFailure:
+    async def test_increments_attempts_and_schedules_next_retry(self, repos, service):
+        subs, plans = repos
+        now = datetime.now(UTC)
+        sub = make_subscription(
+            status=SubscriptionStatus.INADIMPLENTE,
+            dunning_attempts=0,
+            dunning_next_retry_at=now,
+            dunning_grace_period_ends_at=now + timedelta(days=3),
+        )
+        subs.seed(sub)
+
+        result = await service.record_dunning_retry_failure(sub.id)
+
+        assert result.status == SubscriptionStatus.INADIMPLENTE
+        assert result.dunning_attempts == 1
+        assert result.dunning_next_retry_at is not None
+        assert result.dunning_next_retry_at > now
+        # Grace period não muda a cada retry falhado.
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert history_entries[-1].reason == SubscriptionHistoryReason.RETRY_DUNNING_FALHOU
+        assert history_entries[-1].from_status == SubscriptionStatus.INADIMPLENTE
+        assert history_entries[-1].to_status == SubscriptionStatus.INADIMPLENTE
+
+    async def test_does_not_schedule_next_retry_when_attempts_exhausted(self, repos, service):
+        """Se a tentativa que acabou de falhar já é a última permitida
+        (DUNNING_MAX_RETRIES), não agenda mais retry — só o grace period
+        (fim independente) decide quando expirar."""
+        subs, plans = repos
+        now = datetime.now(UTC)
+        sub = make_subscription(
+            status=SubscriptionStatus.INADIMPLENTE,
+            dunning_attempts=settings.DUNNING_MAX_RETRIES - 1,
+            dunning_next_retry_at=now,
+            dunning_grace_period_ends_at=now + timedelta(days=1),
+        )
+        subs.seed(sub)
+
+        result = await service.record_dunning_retry_failure(sub.id)
+
+        assert result.dunning_attempts == settings.DUNNING_MAX_RETRIES
+        assert result.dunning_next_retry_at is None
+
+    async def test_idempotent_when_subscription_no_longer_inadimplente(self, repos, service):
+        """Corrida: outra execução já recuperou/expirou a assinatura entre a
+        seleção do job e esta chamada — não deve incrementar nada."""
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA)
+        subs.seed(sub)
+
+        result = await service.record_dunning_retry_failure(sub.id)
+
+        assert result.status == SubscriptionStatus.ATIVA
+        assert result.dunning_attempts == 0
+
+    async def test_rejects_unknown_subscription(self, repos, service):
+        with pytest.raises(NotFoundError):
+            await service.record_dunning_retry_failure(uuid.uuid4())
+
+
+class TestRecoverFromDunning:
+    async def test_moves_inadimplente_to_ativa_and_advances_period(self, repos, service):
+        subs, plans = repos
+        plan = make_plan(billing_period=BillingPeriod.MENSAL)
+        plans.seed(plan)
+        now = datetime.now(UTC)
+        sub = make_subscription(
+            status=SubscriptionStatus.INADIMPLENTE,
+            plan=plan,
+            dunning_attempts=2,
+            dunning_next_retry_at=now,
+            dunning_grace_period_ends_at=now + timedelta(days=1),
+        )
+        subs.seed(sub)
+        payment_id = uuid.uuid4()
+
+        result = await service.recover_from_dunning(sub.id, payment_id)
+
+        assert result.status == SubscriptionStatus.ATIVA
+        assert result.dunning_attempts == 0
+        assert result.dunning_next_retry_at is None
+        assert result.dunning_grace_period_ends_at is None
+        assert result.current_period_end > now
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert history_entries[-1].reason == SubscriptionHistoryReason.RECUPERADA_DUNNING
+        assert history_entries[-1].from_status == SubscriptionStatus.INADIMPLENTE
+        assert history_entries[-1].to_status == SubscriptionStatus.ATIVA
+        assert history_entries[-1].payment_id == payment_id
+
+    async def test_idempotent_on_payment_id_replay(self, repos, service):
+        """Mesmo `payment_id` reentregue não avança o período de novo nem
+        duplica histórico — mesmo padrão de `_renew_by_subscription`
+        (ADR-023)."""
+        subs, plans = repos
+        plan = make_plan(billing_period=BillingPeriod.MENSAL)
+        plans.seed(plan)
+        sub = make_subscription(status=SubscriptionStatus.INADIMPLENTE, plan=plan)
+        subs.seed(sub)
+        payment_id = uuid.uuid4()
+
+        first = await service.recover_from_dunning(sub.id, payment_id)
+        second = await service.recover_from_dunning(sub.id, payment_id)
+
+        assert first.current_period_end == second.current_period_end
+        history_entries = [
+            e
+            for e in service._session.added
+            if getattr(e, "reason", None) == SubscriptionHistoryReason.RECUPERADA_DUNNING
+        ]
+        assert len(history_entries) == 1
+
+    async def test_rejects_recovering_non_inadimplente_subscription(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.CANCELADA)
+        subs.seed(sub)
+
+        with pytest.raises(ConflictError):
+            await service.recover_from_dunning(sub.id, uuid.uuid4())
+
+    async def test_rejects_unknown_subscription(self, repos, service):
+        with pytest.raises(NotFoundError):
+            await service.recover_from_dunning(uuid.uuid4(), uuid.uuid4())
+
+
+class TestExpireFromDunning:
+    async def test_moves_inadimplente_to_expirada(self, repos, service):
+        subs, plans = repos
+        now = datetime.now(UTC)
+        sub = make_subscription(
+            status=SubscriptionStatus.INADIMPLENTE,
+            dunning_attempts=1,
+            dunning_next_retry_at=now,
+            dunning_grace_period_ends_at=now - timedelta(hours=1),
+        )
+        subs.seed(sub)
+
+        result = await service.expire_from_dunning(sub.id)
+
+        assert result.status == SubscriptionStatus.EXPIRADA
+        assert result.dunning_next_retry_at is None
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert history_entries[-1].reason == SubscriptionHistoryReason.EXPIRADA
+        assert history_entries[-1].from_status == SubscriptionStatus.INADIMPLENTE
+        assert history_entries[-1].to_status == SubscriptionStatus.EXPIRADA
+
+    async def test_idempotent_when_already_expirada(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.EXPIRADA)
+        subs.seed(sub)
+
+        result = await service.expire_from_dunning(sub.id)
+
+        assert result.status == SubscriptionStatus.EXPIRADA
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert history_entries == []
+
+    async def test_rejects_expiring_non_inadimplente_subscription(self, repos, service):
+        subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA)
+        subs.seed(sub)
+
+        with pytest.raises(ConflictError):
+            await service.expire_from_dunning(sub.id)
+
+    async def test_rejects_unknown_subscription(self, repos, service):
+        with pytest.raises(NotFoundError):
+            await service.expire_from_dunning(uuid.uuid4())
 
 
 class TestExpireSubscription:

@@ -64,6 +64,47 @@ class Settings(BaseSettings):
     ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC: int = Field(default=3, ge=0, le=23)
     ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS: int = Field(default=30, ge=1)
 
+    # Worker de renovação automática de assinaturas
+    # (app/workers/subscription_renewal.py, PROMPT 10), agendado in-process
+    # via APScheduler — mesmo padrão de ANALYTICS_AGGREGATOR_*, ver
+    # app/core/scheduler.py. Só é seguro com a API rodando como processo
+    # único (mesma ressalva de escala horizontal do agregador de analytics).
+    SUBSCRIPTION_RENEWAL_ENABLED: bool = Field(default=True)
+    # Frequência do job: cobra assinaturas ATIVA cujo período já terminou e
+    # efetiva cancelamentos agendados vencidos. Não precisa rodar com alta
+    # frequência (diferente do analytics, que alimenta um dashboard quase
+    # em tempo real) — o requisito é só não deixar o período vencido sem
+    # cobrança por muito tempo.
+    SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES: int = Field(default=60, ge=1)
+
+    # Worker de dunning (app/workers/subscription_dunning.py, PROMPT 11,
+    # roadmap item 11), agendado in-process via APScheduler — mesmo padrão
+    # de SUBSCRIPTION_RENEWAL_*/ANALYTICS_AGGREGATOR_*, ver
+    # app/core/scheduler.py. Só é seguro com a API rodando como processo
+    # único (mesma ressalva de escala horizontal dos demais workers).
+    #
+    # Política comercial (decidida explicitamente pelo usuário nesta sessão,
+    # não inventada — ver docs/DECISIONS.md ADR-027): 3 tentativas de
+    # recobrança, uma por dia, dentro de um grace period de 3 dias — ou
+    # seja, o grace period e o intervalo x tentativas coincidem por
+    # construção (3 x 1 dia = 3 dias). Mudar um sem o outro é uma decisão
+    # de negócio válida (ex.: grace period maior que tentativas x intervalo
+    # só significa que a assinatura fica alguns dias sem nova tentativa
+    # antes de expirar) — os três valores são independentes no código.
+    DUNNING_ENABLED: bool = Field(default=True)
+    # Frequência do job: procura assinaturas INADIMPLENTE com retry
+    # elegível ou grace period vencido. Mesmo raciocínio de
+    # SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES — não precisa de alta
+    # frequência, só não deixar uma tentativa elegível esperando demais.
+    DUNNING_INTERVAL_MINUTES: int = Field(default=60, ge=1)
+    # Número máximo de tentativas de recobrança por ciclo de inadimplência.
+    DUNNING_MAX_RETRIES: int = Field(default=3, ge=1)
+    # Intervalo entre tentativas de recobrança, em dias.
+    DUNNING_RETRY_INTERVAL_DAYS: int = Field(default=1, ge=1)
+    # Duração do grace period (INADIMPLENTE -> EXPIRADA), em dias, a partir
+    # do momento em que a assinatura entra em INADIMPLENTE.
+    DUNNING_GRACE_PERIOD_DAYS: int = Field(default=3, ge=1)
+
     # CORS
     CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 

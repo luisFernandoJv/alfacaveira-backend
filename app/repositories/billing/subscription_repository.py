@@ -108,6 +108,102 @@ class SubscriptionRepository(BaseRepository[Subscription]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    async def list_due_for_renewal(self, now: datetime) -> list[Subscription]:
+        """Assinaturas ATIVA, não agendadas para cancelamento
+        (`cancel_at_period_end=False`), cujo período corrente já terminou —
+        elegíveis para o job de renovação automática cobrar (PROMPT 10).
+
+        Não inclui PENDENTE/CANCELADA/INADIMPLENTE/EXPIRADA nem assinaturas
+        agendadas para cancelar (ver `list_scheduled_cancellations_due`) —
+        cobrar qualquer uma dessas violaria o requisito "não cobrar
+        cancelada/expirada" do PROMPT 10.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.ATIVA,
+                Subscription.cancel_at_period_end.is_(False),
+                Subscription.current_period_end <= now,
+            )
+            .options(_WITH_PLAN)
+            .order_by(Subscription.current_period_end.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def list_scheduled_cancellations_due(self, now: datetime) -> list[Subscription]:
+        """Assinaturas ATIVA agendadas para cancelar ao fim do período
+        (`cancel_subscription` com `immediately=False`) cujo período já
+        terminou — elegíveis para o job efetivar o cancelamento
+        (`SubscriptionService.finalize_scheduled_cancellation`, PROMPT 10)
+        sem gerar uma nova tentativa de cobrança.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.ATIVA,
+                Subscription.cancel_at_period_end.is_(True),
+                Subscription.current_period_end <= now,
+            )
+            .options(_WITH_PLAN)
+            .order_by(Subscription.current_period_end.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def list_due_for_dunning_retry(
+        self, now: datetime, *, max_attempts: int
+    ) -> list[Subscription]:
+        """Assinaturas INADIMPLENTE com uma tentativa de recobrança elegível
+        agora — usadas pelo job de dunning (PROMPT 11) para tentar cobrar de
+        novo. `max_attempts` é responsabilidade do chamador (config de
+        negócio, não do repositório — mesmo raciocínio de `now` ser passado
+        de fora): só assinaturas com `dunning_attempts < max_attempts`
+        entram na seleção; ao atingir o limite, a assinatura só volta a ser
+        tocada por `list_due_for_dunning_expiration` quando o grace period
+        vencer.
+
+        `dunning_next_retry_at IS NOT NULL` exclui assinaturas cujo ciclo de
+        dunning nunca foi inicializado (dado herdado de antes da migration
+        0009, ou qualquer estado inconsistente) — não tenta adivinhar uma
+        data de retry para elas.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.INADIMPLENTE,
+                Subscription.dunning_attempts < max_attempts,
+                Subscription.dunning_next_retry_at.is_not(None),
+                Subscription.dunning_next_retry_at <= now,
+            )
+            .options(_WITH_PLAN)
+            .order_by(Subscription.dunning_next_retry_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def list_due_for_dunning_expiration(self, now: datetime) -> list[Subscription]:
+        """Assinaturas INADIMPLENTE cujo grace period já terminou — elegíveis
+        para o job de dunning mover para EXPIRADA (PROMPT 11), independente
+        de quantas tentativas de retry ainda restariam.
+
+        `dunning_grace_period_ends_at IS NOT NULL` mesma razão do método
+        acima: dado herdado de antes da migration 0009 nunca expira
+        automaticamente por este caminho.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.INADIMPLENTE,
+                Subscription.dunning_grace_period_ends_at.is_not(None),
+                Subscription.dunning_grace_period_ends_at <= now,
+            )
+            .options(_WITH_PLAN)
+            .order_by(Subscription.dunning_grace_period_ends_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
     async def compare_and_swap(
         self,
         subscription_id: uuid.UUID,

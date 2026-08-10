@@ -58,6 +58,9 @@ def make_subscription(
     status: SubscriptionStatus = SubscriptionStatus.ATIVA,
     cancel_at_period_end: bool = False,
     period_days: int = 30,
+    dunning_attempts: int = 0,
+    dunning_next_retry_at: datetime | None = None,
+    dunning_grace_period_ends_at: datetime | None = None,
 ) -> Subscription:
     plan = plan or make_plan()
     now = datetime.now(UTC)
@@ -69,6 +72,13 @@ def make_subscription(
         current_period_start=now,
         current_period_end=now + timedelta(days=period_days),
         cancel_at_period_end=cancel_at_period_end,
+        # PROMPT 11 (dunning) — explícitos aqui pelo mesmo motivo de
+        # `cancel_at_period_end` acima: o `default=` do mapped_column só se
+        # aplica no flush contra um banco real, não na construção em
+        # memória usada pelos testes/dublês.
+        dunning_attempts=dunning_attempts,
+        dunning_next_retry_at=dunning_next_retry_at,
+        dunning_grace_period_ends_at=dunning_grace_period_ends_at,
     )
     sub.plan = plan
     sub.history = []

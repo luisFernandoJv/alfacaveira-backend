@@ -111,3 +111,13 @@ class SubscriptionHistoryReason(str, enum.Enum):
     REATIVADA = "reativada"
     EXPIRADA = "expirada"
     PAGAMENTO_FALHOU = "pagamento_falhou"
+    # PROMPT 11 (Dunning): tentativa de recobrança de uma assinatura já
+    # INADIMPLENTE falhou de novo (permanece INADIMPLENTE, from_status ==
+    # to_status — mesmo espírito de RENOVADA, que também é ATIVA -> ATIVA).
+    # Distinta de PAGAMENTO_FALHOU, que é a transição inicial ATIVA/PENDENTE
+    # -> INADIMPLENTE/CANCELADA (falha de status muda).
+    RETRY_DUNNING_FALHOU = "retry_dunning_falhou"
+    # PROMPT 11: uma tentativa de recobrança de uma assinatura INADIMPLENTE
+    # foi aprovada — volta para ATIVA e o período é avançado (mesmo efeito
+    # de uma renovação normal).
+    RECUPERADA_DUNNING = "recuperada_dunning"

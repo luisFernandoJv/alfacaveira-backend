@@ -79,6 +79,65 @@ class FakeSubscriptionRepository:
     async def get_by_id(self, subscription_id: uuid.UUID):
         return self.store.get(subscription_id)
 
+    async def list_due_for_renewal(self, now):
+        """Espelha `SubscriptionRepository.list_due_for_renewal` real
+        (PROMPT 10) — usado pelo job de renovação automática."""
+        return sorted(
+            (
+                s
+                for s in self.store.values()
+                if s.status == SubscriptionStatus.ATIVA
+                and not s.cancel_at_period_end
+                and s.current_period_end <= now
+            ),
+            key=lambda s: s.current_period_end,
+        )
+
+    async def list_scheduled_cancellations_due(self, now):
+        """Espelha `SubscriptionRepository.list_scheduled_cancellations_due`
+        real (PROMPT 10) — usado pelo job de renovação automática para
+        efetivar cancelamentos agendados vencidos."""
+        return sorted(
+            (
+                s
+                for s in self.store.values()
+                if s.status == SubscriptionStatus.ATIVA
+                and s.cancel_at_period_end
+                and s.current_period_end <= now
+            ),
+            key=lambda s: s.current_period_end,
+        )
+
+    async def list_due_for_dunning_retry(self, now, *, max_attempts: int):
+        """Espelha `SubscriptionRepository.list_due_for_dunning_retry` real
+        (PROMPT 11) — usado pelo job de dunning."""
+        return sorted(
+            (
+                s
+                for s in self.store.values()
+                if s.status == SubscriptionStatus.INADIMPLENTE
+                and s.dunning_attempts < max_attempts
+                and s.dunning_next_retry_at is not None
+                and s.dunning_next_retry_at <= now
+            ),
+            key=lambda s: s.dunning_next_retry_at,
+        )
+
+    async def list_due_for_dunning_expiration(self, now):
+        """Espelha `SubscriptionRepository.list_due_for_dunning_expiration`
+        real (PROMPT 11) — usado pelo job de dunning para expirar
+        assinaturas cujo grace period terminou."""
+        return sorted(
+            (
+                s
+                for s in self.store.values()
+                if s.status == SubscriptionStatus.INADIMPLENTE
+                and s.dunning_grace_period_ends_at is not None
+                and s.dunning_grace_period_ends_at <= now
+            ),
+            key=lambda s: s.dunning_grace_period_ends_at,
+        )
+
     async def add(self, entity: object):
         self.store[entity.id] = entity
         return entity

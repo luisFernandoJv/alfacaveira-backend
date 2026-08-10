@@ -9,9 +9,11 @@ Cobre: início de cobrança (`charge_subscription`), idempotência do
 processamento de webhook (`process_webhook_event` — ADR-005), o efeito
 colateral de pagamento recusado/estornado sobre a assinatura (delega para
 `SubscriptionService.mark_payment_failed`, ramificado por status de origem
-desde o PROMPT 05), e o efeito colateral de um pagamento aprovado sobre uma
+desde o PROMPT 05), o efeito colateral de um pagamento aprovado sobre uma
 assinatura PENDENTE (delega para `SubscriptionService.activate_subscription`
-— novo no PROMPT 05, ver ADR-014).
+— PROMPT 05, ver ADR-014), e sobre uma assinatura já ATIVA (delega para
+`SubscriptionService.renew_subscription_system` — PROMPT 10, roadmap item
+10, recorrência).
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import uuid
 import pytest
 
 from app.core.exceptions import NotFoundError
-from app.models.enums import PaymentStatus, SubscriptionStatus
+from app.models.enums import PaymentStatus, SubscriptionHistoryReason, SubscriptionStatus
 from app.services.billing import payment_service as payment_service_module
 from app.services.billing import subscription_service as subscription_service_module
 from app.services.billing.gateway import ChargeResult
@@ -31,6 +33,7 @@ from tests.unit.billing.fakes import (
     FakeAsyncSession,
     FakePaymentRepository,
     FakePlanRepository,
+    FakeSubscriptionHistoryRepository,
     FakeSubscriptionRepository,
 )
 
@@ -75,6 +78,16 @@ def repos(monkeypatch: pytest.MonkeyPatch):
     # mesma assinatura semeada no teste.
     monkeypatch.setattr(subscription_service_module, "SubscriptionRepository", lambda session: subs)
     monkeypatch.setattr(subscription_service_module, "PlanRepository", lambda session: plans)
+    # PROMPT 10: um APROVADO sobre assinatura já ATIVA agora também aciona
+    # `renew_subscription_system`, que consulta `SubscriptionHistoryRepository`
+    # (idempotência por `payment_id`) — precisa do mesmo fake que
+    # `test_subscription_service.py` já usa, ou o service tentaria falar
+    # com um banco real inexistente.
+    monkeypatch.setattr(
+        subscription_service_module,
+        "SubscriptionHistoryRepository",
+        FakeSubscriptionHistoryRepository,
+    )
     return payments, subs, plans
 
 
@@ -207,15 +220,18 @@ class TestProcessWebhookEvent:
         assert result.status == PaymentStatus.APROVADO
         assert subs.store[sub.id].status == SubscriptionStatus.ATIVA
 
-    async def test_aprovado_does_not_touch_already_active_subscription(self, repos):
-        """Uma APROVADO de renovação (assinatura já ATIVA — roadmap item 10,
-        recorrência, ainda não implementado) não deve tentar ativar de novo
-        (o que levantaria `ConflictError` em `activate_subscription`,
-        porque a origem não é PENDENTE) — `process_webhook_event` checa o
-        status antes de chamar, ver payment_service.py."""
+    async def test_aprovado_renews_already_active_subscription(self, repos):
+        """PROMPT 10 (roadmap item 10, recorrência — implementado nesta
+        sessão): uma APROVADO para uma assinatura já ATIVA é a confirmação
+        de uma cobrança de renovação (job automático ou `charge_subscription`
+        manual), não uma segunda ativação — `process_webhook_event` deve
+        chamar `SubscriptionService.renew_subscription_system` (que
+        avançaria `activate_subscription` para `ConflictError`, por não ser
+        PENDENTE)."""
         payments, subs, plans = repos
         sub = make_subscription(status=SubscriptionStatus.ATIVA)
         subs.seed(sub)
+        old_period_end = sub.current_period_end
         payment = make_payment(subscription_id=sub.id, status=PaymentStatus.PENDENTE)
         payments.seed(payment)
         service, _ = make_service(repos)
@@ -226,6 +242,78 @@ class TestProcessWebhookEvent:
 
         assert result.status == PaymentStatus.APROVADO
         assert subs.store[sub.id].status == SubscriptionStatus.ATIVA
+        assert subs.store[sub.id].current_period_end > old_period_end
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert len(history_entries) == 1
+        assert history_entries[0].reason == SubscriptionHistoryReason.RENOVADA
+        assert history_entries[0].payment_id == payment.id
+
+    async def test_aprovado_renewal_is_idempotent_for_repeated_webhook_delivery(self, repos):
+        """Reentrega do mesmo evento de renovação (mesmo `payment_id`) não
+        avança o período uma segunda vez — mesma idempotência de
+        `TestRenewSubscriptionSystem.test_repeated_payment_id_is_idempotent_no_op`
+        (test_subscription_service.py), exercida agora pelo caminho
+        completo do webhook. É o que garante, na prática, que o job de
+        renovação automática (PROMPT 10) rodar duas vezes não duplica
+        cobrança."""
+        payments, subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.ATIVA)
+        subs.seed(sub)
+        old_period_end = sub.current_period_end
+        payment = make_payment(subscription_id=sub.id, status=PaymentStatus.PENDENTE)
+        payments.seed(payment)
+        service, _ = make_service(repos)
+
+        await service.process_webhook_event(
+            provider_payment_id=payment.provider_payment_id, status=PaymentStatus.APROVADO
+        )
+        first_period_end = subs.store[sub.id].current_period_end
+
+        # Reentrega: mesmo `provider_payment_id`, mesmo status — a checagem
+        # `payment.status == status` no topo de `process_webhook_event` já
+        # devolve cedo, sem sequer tentar renovar de novo.
+        result = await service.process_webhook_event(
+            provider_payment_id=payment.provider_payment_id, status=PaymentStatus.APROVADO
+        )
+
+        assert result is payments.store[payment.id]
+        assert subs.store[sub.id].current_period_end == first_period_end
+        assert first_period_end > old_period_end
+        history_entries = [e for e in service._session.added if hasattr(e, "reason")]
+        assert len(history_entries) == 1
+
+    async def test_aprovado_does_not_reactivate_cancelled_subscription(self, repos):
+        """PROMPT 09 do master (Confirmação e ativação) — TESTES AUTO
+        'fora de ordem' + 'assinatura cancelada': um evento APROVADO que
+        chega atrasado (ex.: o usuário já cancelou a assinatura PENDENTE
+        pelo banner de ADR-025, e só depois o webhook do provedor real
+        confirma o pagamento que originou aquela PENDENTE) não pode
+        reativar uma assinatura que já foi para um estado terminal.
+
+        Verificado por leitura de código (`process_webhook_event`,
+        `app/services/billing/payment_service.py`): o ramo `APROVADO` só
+        chama `activate_subscription` quando
+        `subscription.status == SubscriptionStatus.PENDENTE` — para
+        CANCELADA (ou qualquer outro status não-PENDENTE) o evento é
+        aplicado ao `Payment` (fica com o status real do provedor,
+        correto para auditoria) mas não gera nenhum efeito colateral na
+        assinatura. O comportamento já existia antes deste teste; este
+        teste só fecha a lacuna de cobertura (não havia nenhum teste
+        para o caso 'assinatura já CANCELADA' antes desta sessão).
+        """
+        payments, subs, plans = repos
+        sub = make_subscription(status=SubscriptionStatus.CANCELADA)
+        subs.seed(sub)
+        payment = make_payment(subscription_id=sub.id, status=PaymentStatus.PENDENTE)
+        payments.seed(payment)
+        service, _ = make_service(repos)
+
+        result = await service.process_webhook_event(
+            provider_payment_id=payment.provider_payment_id, status=PaymentStatus.APROVADO
+        )
+
+        assert result.status == PaymentStatus.APROVADO
+        assert subs.store[sub.id].status == SubscriptionStatus.CANCELADA
 
     async def test_estornado_marks_subscription_as_inadimplente(self, repos):
         payments, subs, plans = repos

@@ -43,6 +43,25 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
     current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # --- Dunning (PROMPT 11, roadmap item 11) ---------------------------- #
+    # Só têm significado enquanto `status == INADIMPLENTE`; zerados/limpos
+    # ao sair desse estado (recuperada -> ATIVA, ou expirada -> EXPIRADA).
+    # `dunning_attempts` conta tentativas de recobrança já feitas desde a
+    # transição ATIVA -> INADIMPLENTE mais recente (não é cumulativo entre
+    # ciclos de inadimplência distintos).
+    dunning_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Próxima tentativa de recobrança elegível (NULL quando não há retry
+    # agendado — ex.: fora de INADIMPLENTE, ou tentativas já esgotadas).
+    dunning_next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # Prazo final do grace period — quando `now >= dunning_grace_period_ends_at`
+    # e a assinatura ainda está INADIMPLENTE, o job de dunning expira (EXPIRADA)
+    # independentemente de quantas tentativas de retry ainda restariam.
+    dunning_grace_period_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
     plan: Mapped["Plan"] = relationship(back_populates="subscriptions")
     payments: Mapped[list["Payment"]] = relationship(back_populates="subscription")
     history: Mapped[list["SubscriptionHistory"]] = relationship(

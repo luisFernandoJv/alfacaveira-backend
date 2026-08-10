@@ -141,15 +141,35 @@ class PaymentService:
         if status in (PaymentStatus.RECUSADO, PaymentStatus.ESTORNADO):
             await self._subscription_service.mark_payment_failed(payment.subscription_id)
         elif status == PaymentStatus.APROVADO:
-            # Só ativa se a assinatura ainda está PENDENTE (primeiro
-            # pagamento). Uma APROVADO de renovação de uma assinatura já
-            # ATIVA (roadmap item 10 — recorrência, ainda não implementado)
-            # não deve passar por `activate_subscription`, que rejeitaria
-            # com `ConflictError` por não ser PENDENTE — daí a checagem
-            # aqui antes de chamar, em vez de deixar o service rejeitar.
+            # O ramo depende do status atual da assinatura: um APROVADO
+            # pode ser tanto o primeiro pagamento (ativação, PROMPT 05)
+            # quanto a confirmação de uma cobrança de renovação (PROMPT 10
+            # — roadmap item 10, implementado nesta sessão) de uma
+            # assinatura que já estava ATIVA. Cada um vai para o service
+            # certo — chamar `activate_subscription` numa assinatura já
+            # ATIVA (ou `renew_subscription_system` numa ainda PENDENTE)
+            # levantaria `ConflictError`, daí a checagem aqui antes de
+            # chamar, em vez de deixar o service rejeitar.
             subscription = await self._subscriptions.get_by_id(payment.subscription_id)
-            if subscription is not None and subscription.status == SubscriptionStatus.PENDENTE:
-                await self._subscription_service.activate_subscription(payment.subscription_id)
+            if subscription is not None:
+                if subscription.status == SubscriptionStatus.PENDENTE:
+                    await self._subscription_service.activate_subscription(payment.subscription_id)
+                elif subscription.status == SubscriptionStatus.ATIVA:
+                    await self._subscription_service.renew_subscription_system(
+                        payment.subscription_id, payment_id=payment.id
+                    )
+                elif subscription.status == SubscriptionStatus.INADIMPLENTE:
+                    # PROMPT 11 (dunning): um evento APROVADO para uma
+                    # assinatura já INADIMPLENTE é uma recobrança bem-sucedida
+                    # (caminho de um provedor assíncrono real — o driver
+                    # console síncrono de hoje é aplicado diretamente pelo
+                    # job de dunning, sem passar por aqui, mesmo raciocínio
+                    # de ATIVA/renew_subscription_system já documentado
+                    # acima e no docstring de
+                    # app/workers/subscription_dunning.py).
+                    await self._subscription_service.recover_from_dunning(
+                        payment.subscription_id, payment_id=payment.id
+                    )
 
         return payment
 
