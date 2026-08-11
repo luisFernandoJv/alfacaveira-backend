@@ -98,7 +98,13 @@ class TestRunOnceRenewsDueSubscriptions:
 
         result = await run_once(session, now=now)
 
-        assert result == {"charged": 1, "finalized_cancellations": 0}
+        # CORRIGIDO: adicionar reminders_sent: 0
+        assert result == {
+            "charged": 1,
+            "finalized_cancellations": 0,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         assert len(gateway.calls) == 1
         assert subs.store[sub.id].status == SubscriptionStatus.ATIVA
         assert subs.store[sub.id].current_period_end > now
@@ -128,8 +134,19 @@ class TestRunOnceRenewsDueSubscriptions:
         period_after_first_run = subs.store[sub.id].current_period_end
         second = await run_once(session, now=now)
 
-        assert first == {"charged": 1, "finalized_cancellations": 0}
-        assert second == {"charged": 0, "finalized_cancellations": 0}
+        # CORRIGIDO: adicionar reminders_sent: 0 em ambas as asserções
+        assert first == {
+            "charged": 1,
+            "finalized_cancellations": 0,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
+        assert second == {
+            "charged": 0,
+            "finalized_cancellations": 0,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         assert len(gateway.calls) == 1
         assert len(payments.store) == 1
         assert subs.store[sub.id].current_period_end == period_after_first_run
@@ -152,7 +169,13 @@ class TestRunOnceRenewsDueSubscriptions:
 
         result = await run_once(session, now=now)
 
-        assert result == {"charged": 0, "finalized_cancellations": 0}
+        # CORRIGIDO: adicionar reminders_sent: 0
+        assert result == {
+            "charged": 0,
+            "finalized_cancellations": 0,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         assert len(gateway.calls) == 0
 
     async def test_does_not_charge_subscription_scheduled_for_cancellation(self, repos):
@@ -173,7 +196,13 @@ class TestRunOnceRenewsDueSubscriptions:
 
         result = await run_once(session, now=now)
 
-        assert result == {"charged": 0, "finalized_cancellations": 1}
+        # CORRIGIDO: adicionar reminders_sent: 0
+        assert result == {
+            "charged": 0,
+            "finalized_cancellations": 1,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         assert len(gateway.calls) == 0
         assert subs.store[sub.id].status == SubscriptionStatus.CANCELADA
 
@@ -192,11 +221,22 @@ class TestRunOnceRenewsDueSubscriptions:
         first = await run_once(session, now=now)
         second = await run_once(session, now=now)
 
-        assert first == {"charged": 0, "finalized_cancellations": 1}
+        # CORRIGIDO: adicionar reminders_sent: 0 em ambas as asserções
+        assert first == {
+            "charged": 0,
+            "finalized_cancellations": 1,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         # Segunda execução: a assinatura já está CANCELADA, então nem
         # `list_scheduled_cancellations_due` (filtra status == ATIVA) nem
         # `list_due_for_renewal` a selecionam mais.
-        assert second == {"charged": 0, "finalized_cancellations": 0}
+        assert second == {
+            "charged": 0,
+            "finalized_cancellations": 0,
+            "downgrades_applied": 0,
+            "reminders_sent": 0,
+        }
         cancel_entries = [
             e
             for e in session.added

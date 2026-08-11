@@ -1,4 +1,4 @@
-"""Envio de e-mail transacional (hoje: apenas recuperação de senha).
+"""Envio de e-mail transacional (hoje: recuperação de senha + notificações de assinatura).
 
 Decisão de design (etapa de recuperação de senha):
 
@@ -27,6 +27,7 @@ import smtplib
 import ssl
 from asyncio import to_thread
 from email.message import EmailMessage
+from typing import Any, Dict, Optional
 
 import structlog
 
@@ -36,6 +37,10 @@ logger = structlog.get_logger(__name__)
 
 
 class EmailService:
+    # ==================================================================== #
+    # Método existente: recuperação de senha                               #
+    # ==================================================================== #
+
     async def send_password_reset_email(self, *, to_email: str, to_name: str, reset_url: str) -> None:
         subject = "Redefinição de senha — Foco Policial"
         text_body, html_body = _render_password_reset_email(to_name=to_name, reset_url=reset_url)
@@ -46,6 +51,198 @@ class EmailService:
             )
         else:
             self._send_via_console(to_email=to_email, subject=subject, text_body=text_body)
+
+    # ==================================================================== #
+    # NOVO MÉTODO: envio genérico de e-mails transacionais (PROMPT 13)     #
+    # ==================================================================== #
+
+    async def send_email(
+        self,
+        *,
+        to_email: str,
+        to_name: str,
+        subject: str,
+        template_name: str,
+        context: Dict[str, Any],
+    ) -> None:
+        """Envia um e-mail transacional usando um template nomeado.
+
+        Args:
+            to_email: Endereço de e-mail do destinatário
+            to_name: Nome completo do destinatário
+            subject: Assunto do e-mail
+            template_name: Nome do template (ex: 'payment_approved')
+            context: Dicionário com variáveis para o template
+
+        O template é renderizado com o contexto fornecido, e o primeiro nome
+        do destinatário é automaticamente adicionado ao contexto como 'first_name'.
+        """
+        first_name = to_name.split(" ")[0] if to_name else ""
+        context_with_name = {"first_name": first_name, **context}
+
+        text_body, html_body = self._render_transactional_template(
+            template_name=template_name,
+            context=context_with_name,
+        )
+
+        if text_body is None or html_body is None:
+            logger.error(
+                "email.template_not_found_or_invalid",
+                template_name=template_name,
+                to=to_email,
+            )
+            return
+
+        if settings.EMAIL_DRIVER == "smtp":
+            await self._send_via_smtp(
+                to_email=to_email,
+                subject=subject,
+                text_body=text_body,
+                html_body=html_body,
+            )
+        else:
+            self._send_via_console(
+                to_email=to_email,
+                subject=subject,
+                text_body=text_body,
+            )
+
+    def _render_transactional_template(
+        self,
+        template_name: str,
+        context: Dict[str, Any],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Renderiza um template transacional.
+
+        Retorna (text_body, html_body) ou (None, None) se o template não existir.
+        """
+        templates = {
+            # Eventos de pagamento
+            "payment_approved": (
+                "Olá {first_name}!\n\n"
+                "Seu pagamento para o plano {plan_name} (R$ {amount:.2f}) foi aprovado. "
+                "Agora você tem acesso a todos os recursos do plano.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu pagamento para o plano <strong>{plan_name}</strong> (R$ {amount:.2f}) "
+                "foi aprovado. Agora você tem acesso a todos os recursos do plano.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "payment_failed": (
+                "Olá {first_name}!\n\n"
+                "Houve um problema com o pagamento do plano {plan_name}. "
+                "Por favor, verifique seus dados de pagamento no portal do assinante.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Houve um problema com o pagamento do plano <strong>{plan_name}</strong>. "
+                "Por favor, verifique seus dados de pagamento no portal do assinante.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            # Eventos de renovação
+            "renewal_success": (
+                "Olá {first_name}!\n\n"
+                "Seu plano {plan_name} foi renovado com sucesso! "
+                "A próxima cobrança será em {next_renewal}.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano <strong>{plan_name}</strong> foi renovado com sucesso! "
+                "A próxima cobrança será em <strong>{next_renewal}</strong>.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "renewal_reminder": (
+                "Olá {first_name}!\n\n"
+                "Seu plano {plan_name} será renovado em {days_left} dia(s), "
+                "no valor de R$ {amount:.2f}. "
+                "Se você não quiser renovar, cancele antes dessa data no portal do assinante.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano <strong>{plan_name}</strong> será renovado em "
+                "<strong>{days_left}</strong> dia(s), no valor de R$ {amount:.2f}.</p>"
+                "<p>Se você não quiser renovar, cancele antes dessa data no portal do assinante.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            # Eventos de gerenciamento
+            "cancellation": (
+                "Olá {first_name}!\n\n"
+                "Seu plano {plan_name} foi cancelado. Você terá acesso até {expiration_date}.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano <strong>{plan_name}</strong> foi cancelado. "
+                "Você terá acesso até <strong>{expiration_date}</strong>.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "reactivation": (
+                "Olá {first_name}!\n\n"
+                "Seu plano {plan_name} foi reativado. A cobrança continuará normalmente.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano <strong>{plan_name}</strong> foi reativado. "
+                "A cobrança continuará normalmente.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "plan_change": (
+                "Olá {first_name}!\n\n"
+                "Seu plano foi alterado de {old_plan} para {new_plan}. "
+                "A próxima cobrança será de R$ {new_amount:.2f}.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano foi alterado de <strong>{old_plan}</strong> para "
+                "<strong>{new_plan}</strong>. A próxima cobrança será de R$ {new_amount:.2f}.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            # Eventos de dunning (inadimplência)
+            "dunning_recovered": (
+                "Olá {first_name}!\n\n"
+                "Uma cobrança pendente do seu plano {plan_name} foi regularizada. "
+                "Seu acesso está normalizado.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Uma cobrança pendente do seu plano <strong>{plan_name}</strong> foi regularizada. "
+                "Seu acesso está normalizado.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "dunning_retry_failed": (
+                "Olá {first_name}!\n\n"
+                "A cobrança do seu plano {plan_name} falhou novamente. "
+                "Atualize seus dados de pagamento para evitar a perda de acesso.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>A cobrança do seu plano <strong>{plan_name}</strong> falhou novamente. "
+                "Atualize seus dados de pagamento para evitar a perda de acesso.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+            "dunning_expired": (
+                "Olá {first_name}!\n\n"
+                "Seu plano {plan_name} foi expirado por falta de pagamento. "
+                "Acesse o portal para regularizar sua assinatura.\n\n"
+                "Equipe Foco Policial",
+                "<p>Olá <strong>{first_name}</strong>!</p>"
+                "<p>Seu plano <strong>{plan_name}</strong> foi expirado por falta de pagamento. "
+                "Acesse o portal para regularizar sua assinatura.</p>"
+                "<p>Equipe Foco Policial</p>",
+            ),
+        }
+
+        template = templates.get(template_name)
+        if template is None:
+            return None, None
+
+        try:
+            text_body = template[0].format(**context)
+            html_body = template[1].format(**context)
+            return text_body, html_body
+        except KeyError as e:
+            logger.error(
+                "email.template_missing_key",
+                template_name=template_name,
+                missing_key=str(e),
+                context=context,
+            )
+            return None, None
+
+    # ==================================================================== #
+    # Métodos privados de envio (console e SMTP)                           #
+    # ==================================================================== #
 
     def _send_via_console(self, *, to_email: str, subject: str, text_body: str) -> None:
         logger.info(
@@ -81,6 +278,11 @@ class EmailService:
             # (por segurança, a resposta é sempre genérica — ver AuthService).
             # A falha real fica registrada no log para observabilidade.
             logger.error("email.send_failed", to=to_email, error=str(exc))
+
+
+# ======================================================================== #
+# Função auxiliar: renderização do e-mail de recuperação de senha          #
+# ======================================================================== #
 
 
 def _render_password_reset_email(*, to_name: str, reset_url: str) -> tuple[str, str]:

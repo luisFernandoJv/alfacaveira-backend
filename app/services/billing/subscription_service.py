@@ -31,27 +31,41 @@ de webhook, não uma requisição autenticada de usuário (mesmo padrão já
 existente para `mark_payment_failed` antes desta sessão).
 """
 
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import UTC, datetime, timedelta 
 
 from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.database.uow import UnitOfWork
+from app.models.billing.plan import Plan
 from app.models.billing.subscription import Subscription
 from app.models.billing.subscription_history import SubscriptionHistory
-from app.models.enums import BillingPeriod, SubscriptionHistoryReason, SubscriptionStatus
+from app.models.enums import (
+    BillingPeriod,
+    PaymentStatus,
+    SubscriptionHistoryReason,
+    SubscriptionStatus,
+)
 from app.repositories.billing.plan_repository import PlanRepository
 from app.repositories.billing.subscription_history_repository import SubscriptionHistoryRepository
 from app.repositories.billing.subscription_repository import SubscriptionRepository
+from app.repositories.identity.user_repository import UserRepository
+from app.services.billing.notification_service import SubscriptionNotificationService
 
 _PERIOD_LENGTH: dict[BillingPeriod, timedelta] = {
     BillingPeriod.MENSAL: timedelta(days=30),
     BillingPeriod.SEMESTRAL: timedelta(days=182),
     BillingPeriod.ANUAL: timedelta(days=365),
 }
+
+# --- PROMPT 12: Upgrade/Downgrade com pró-rata ------------------------- #
+# Valor mínimo para considerar uma cobrança pró-rata (1 centavo)
+_MIN_PRORATED_AMOUNT_CENTS = 1
 
 
 class SubscriptionService:
@@ -60,6 +74,8 @@ class SubscriptionService:
         self._subscriptions = SubscriptionRepository(session)
         self._plans = PlanRepository(session)
         self._history = SubscriptionHistoryRepository(session)
+        self._users = UserRepository(session)
+        self._notification = SubscriptionNotificationService()
 
     # ------------------------------------------------------------------ #
     # Leitura
@@ -213,6 +229,11 @@ class SubscriptionService:
             current = await self._subscriptions.get_by_id_with_plan(subscription_id)
             return current if current is not None else subscription
 
+        # --- NOTIFICAÇÃO: Pagamento aprovado (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_payment_approved(user, subscription)
+
         return subscription
 
     async def cancel_subscription(
@@ -292,7 +313,15 @@ class SubscriptionService:
         # duplicar `SubscriptionHistory`; o retorno abaixo reflete o
         # estado atual (já cancelado pela chamada vencedora) em ambos os
         # casos.
-        return await self.get_subscription(subscription_id, user_id)
+        final_subscription = await self.get_subscription(subscription_id, user_id)
+
+        # --- NOTIFICAÇÃO: Cancelamento (PROMPT 13) ---
+        if applied and final_subscription.status == SubscriptionStatus.CANCELADA:
+            user = await self._users.get_by_id(user_id)
+            if user:
+                await self._notification.notify_cancellation(user, final_subscription)
+
+        return final_subscription
 
     async def reactivate_subscription(self, subscription_id: uuid.UUID, user_id: uuid.UUID) -> Subscription:
         """Desfaz um cancelamento agendado (`cancel_at_period_end`) antes do
@@ -346,7 +375,15 @@ class SubscriptionService:
         # `applied is False`: outra chamada concorrente já reativou entre
         # a leitura e o CAS (ver ADR-019) — idempotente, mesmo padrão de
         # `cancel_subscription` acima.
-        return await self.get_subscription(subscription_id, user_id)
+        final_subscription = await self.get_subscription(subscription_id, user_id)
+
+        # --- NOTIFICAÇÃO: Reativação (PROMPT 13) ---
+        if applied:
+            user = await self._users.get_by_id(user_id)
+            if user:
+                await self._notification.notify_reactivation(user, final_subscription)
+
+        return final_subscription
 
     async def renew_subscription(
         self, subscription_id: uuid.UUID, user_id: uuid.UUID, payment_id: uuid.UUID
@@ -389,7 +426,7 @@ class SubscriptionService:
         idempotência por `payment_id` e histórico é idêntica.
         """
         subscription = await self.get_subscription(subscription_id, user_id)
-        return await self._renew_by_subscription(subscription, payment_id)
+        return await self._renew_by_subscription(subscription, payment_id, user_id=user_id)
 
     async def renew_subscription_system(
         self, subscription_id: uuid.UUID, payment_id: uuid.UUID
@@ -405,10 +442,10 @@ class SubscriptionService:
         subscription = await self._subscriptions.get_by_id_with_plan(subscription_id)
         if subscription is None:
             raise NotFoundError("Assinatura não encontrada.")
-        return await self._renew_by_subscription(subscription, payment_id)
+        return await self._renew_by_subscription(subscription, payment_id, user_id=None)
 
     async def _renew_by_subscription(
-        self, subscription: Subscription, payment_id: uuid.UUID
+        self, subscription: Subscription, payment_id: uuid.UUID, user_id: uuid.UUID | None = None
     ) -> Subscription:
         """Corpo comum de `renew_subscription`/`renew_subscription_system`
         (PROMPT 10). Recebe a `Subscription` já resolvida pelo chamador —
@@ -432,6 +469,8 @@ class SubscriptionService:
         old_period_end = subscription.current_period_end
         new_period_start = old_period_end
         new_period_end = old_period_end + period_length
+
+        applied = False
 
         try:
             async with UnitOfWork(self._session):
@@ -507,92 +546,270 @@ class SubscriptionService:
             current = await self._subscriptions.get_by_id_with_plan(subscription_id)
             return current if current is not None else subscription
 
+        # --- NOTIFICAÇÃO: Renovação bem-sucedida (PROMPT 13) ---
+        if user_id is not None:
+            user = await self._users.get_by_id(user_id)
+        else:
+            user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_renewal_success(user, subscription)
+
         return subscription
 
-    async def change_plan(
-        self, subscription_id: uuid.UUID, user_id: uuid.UUID, new_plan_id: uuid.UUID
-    ) -> Subscription:
-        """Upgrade ou downgrade — decidido automaticamente comparando
-        `price_cents` do plano atual com o novo.
+    # ==================================================================== #
+    # Upgrade / Downgrade / Pró-rata (PROMPT 12)                          #
+    # ==================================================================== #
 
-        ADR-023 (análise do achado do ADR-022 aplicada a `change_plan`):
-        ao contrário de `renew_subscription`, a duplicação real descrita
-        no ADR-022 **não se materializa** aqui sem mudança de código,
-        porque duas proteções já existentes cobrem os dois sub-casos:
-
-        1. Duas chamadas para o MESMO plano-alvo, verdadeiramente
-           concorrentes (mesma leitura): o `CAS` abaixo (`expected` inclui
-           `plan_id`) garante que só uma escreve — a outra perde o CAS e
-           devolve o estado atual, sem duplicar `SubscriptionHistory`
-           (mesmo padrão de `renew_subscription`/ADR-019).
-        2. Duas chamadas para o MESMO plano-alvo, sequenciais (a segunda
-           lê **depois** do commit da primeira, cenário do ADR-022): a
-           segunda já enxerga `subscription.plan_id == new_plan.id` e cai
-           no guard `raise ConflictError("A assinatura já está neste
-           plano.")` logo abaixo — falha explícita, não duplicação
-           silenciosa.
-
-        O único caso não coberto — uma segunda chamada para um plano-alvo
-        **diferente** do último aplicado, chegando logo em seguida — não é
-        tecnicamente distinguível de uma correção legítima do usuário
-        ("errei, quero o outro plano") sem uma chave de evento que o
-        endpoint hoje não recebe (`idempotency_key`, opção (b) do ADR-022,
-        que exigiria mudar o contrato do endpoint — fora do escopo desta
-        sessão). Por isso nenhum código novo foi adicionado aqui: as
-        proteções existentes já eliminam o risco financeiro de duplicação
-        que o ADR-022 levantou para `change_plan`; o que resta é uma
-        decisão de produto/UX (bloquear trocas em sequência rápida?), não
-        um bug de concorrência. Ver ADR-023 para o raciocínio completo.
+    def _calculate_prorated_amount(
+        self,
+        current_price_cents: int,
+        new_price_cents: int,
+        current_period_end: datetime,
+        plan_duration_days: int,
+        now: datetime | None = None,
+    ) -> int:
+        """Calcula o valor pró-rata da diferença entre planos.
+        
+        Retorna em centavos (int), arredondado para cima (ceil).
         """
-        subscription = await self.get_subscription(subscription_id, user_id)
-        if subscription.status != SubscriptionStatus.ATIVA:
-            raise ConflictError("Apenas assinaturas ativas podem trocar de plano.")
+        if now is None:
+            now = _utcnow()
+        
+        if new_price_cents <= current_price_cents:
+            return 0
+        
+        remaining_seconds = (current_period_end - now).total_seconds()
+        if remaining_seconds <= 0:
+            return 0
+        
+        total_seconds = plan_duration_days * 24 * 60 * 60
+        prorated_fraction = remaining_seconds / total_seconds
+        
+        difference_cents = new_price_cents - current_price_cents
+        prorated_amount_cents = difference_cents * prorated_fraction
+        
+        # Arredondar para cima (ceil) para evitar cobrar menos que o devido
+        return math.ceil(prorated_amount_cents)
 
-        new_plan = await self._plans.get_by_id(new_plan_id)
-        if new_plan is None or not new_plan.is_active:
-            raise NotFoundError("Plano não encontrado ou inativo.")
-        if new_plan.id == subscription.plan_id:
-            raise ConflictError("A assinatura já está neste plano.")
-
-        reason = (
-            SubscriptionHistoryReason.UPGRADE
-            if new_plan.price_cents > subscription.plan.price_cents
-            else SubscriptionHistoryReason.DOWNGRADE
-        )
+    async def _apply_plan_change(
+        self,
+        subscription: Subscription,
+        new_plan: Plan,
+        reason: SubscriptionHistoryReason,
+        payment_id: uuid.UUID | None = None,
+    ) -> Subscription:
+        """Aplica a troca de plano, atualiza o período e registra histórico."""
+        subscription_id = subscription.id
         old_plan_id = subscription.plan_id
+        old_plan_name = subscription.plan.name  # Guardar para notificação
+        
+        # Se for upgrade, recalcula o período a partir de agora
+        if reason == SubscriptionHistoryReason.UPGRADE:
+            now = _utcnow()
+            period_length = _PERIOD_LENGTH[new_plan.billing_period]
+            new_period_start = now
+            new_period_end = now + period_length
+        else:
+            # Downgrade ou troca sem cobrança: mantém o período atual
+            new_period_start = subscription.current_period_start
+            new_period_end = subscription.current_period_end
+
+        applied = False
 
         async with UnitOfWork(self._session):
-            # `expected` inclui `plan_id` (não só `status`): duas trocas
-            # de plano concorrentes para a mesma assinatura devem deixar
-            # só a primeira vencer — a segunda, se recalculada contra o
-            # `old_plan_id` já obsoleto, perde o CAS em vez de sobrescrever
-            # a troca já aplicada (ver ADR-019).
             applied = await self._subscriptions.compare_and_swap(
                 subscription_id,
                 expected={
                     "status": SubscriptionStatus.ATIVA,
                     "plan_id": old_plan_id,
                 },
-                values={"plan_id": new_plan.id},
+                values={
+                    "plan_id": new_plan.id,
+                    "current_period_start": new_period_start,
+                    "current_period_end": new_period_end,
+                    # Limpa qualquer downgrade agendado
+                    "pending_plan_id": None,
+                    "pending_plan_effective_at": None,
+                },
             )
             if applied:
                 subscription.plan_id = new_plan.id
+                subscription.current_period_start = new_period_start
+                subscription.current_period_end = new_period_end
+                subscription.pending_plan_id = None
+                subscription.pending_plan_effective_at = None
+                
                 self._session.add(
                     SubscriptionHistory(
                         subscription_id=subscription.id,
                         from_plan_id=old_plan_id,
                         to_plan_id=new_plan.id,
-                        from_status=SubscriptionStatus.ATIVA,
-                        to_status=SubscriptionStatus.ATIVA,
+                        from_status=subscription.status,
+                        to_status=subscription.status,
                         reason=reason,
+                        payment_id=payment_id,
                     )
                 )
                 await self._session.flush()
+        
+        if not applied:
+            current = await self._subscriptions.get_by_id_with_plan(subscription_id)
+            return current if current is not None else subscription
 
-        # `applied is False`: outra troca de plano concorrente já mudou
-        # `plan_id` entre a leitura e o CAS — idempotente, devolve o plano
-        # já gravado pela chamada vencedora em vez de duplicar histórico.
-        return await self.get_subscription(subscription_id, user_id)
+        # --- NOTIFICAÇÃO: Mudança de plano (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_plan_change(user, subscription, old_plan_name)
+
+        return subscription
+
+    async def _change_plan_upgrade(
+        self,
+        subscription: Subscription,
+        new_plan: Plan,
+        user_id: uuid.UUID,
+    ) -> Subscription:
+        """Upgrade: cobra a diferença pró-rata imediatamente."""
+        
+        # Upgrade sobrescreve a intenção de cancelar
+        if subscription.cancel_at_period_end:
+            async with UnitOfWork(self._session):
+                subscription.cancel_at_period_end = False
+                await self._session.flush()
+        
+        prorated_amount_cents = self._calculate_prorated_amount(
+            current_price_cents=subscription.plan.price_cents,
+            new_price_cents=new_plan.price_cents,
+            current_period_end=subscription.current_period_end,
+            plan_duration_days=_PERIOD_LENGTH[subscription.plan.billing_period].days,
+        )
+        
+        if prorated_amount_cents < _MIN_PRORATED_AMOUNT_CENTS:
+            # Não precisa cobrar (ex.: upgrade no último dia do período)
+            return await self._apply_plan_change(
+                subscription, new_plan, SubscriptionHistoryReason.UPGRADE
+            )
+        
+        # Criar Payment para a diferença
+        from app.services.billing.payment_service import PaymentService
+        payment_service = PaymentService(self._session)
+        payment = await payment_service.charge_prorated(
+            subscription_id=subscription.id,
+            amount_cents=prorated_amount_cents,
+            description=f"Upgrade: {subscription.plan.name} → {new_plan.name} (pró-rata)",
+        )
+        
+        if payment.status == PaymentStatus.APROVADO:
+            return await self._apply_plan_change(
+                subscription, new_plan, SubscriptionHistoryReason.UPGRADE, payment_id=payment.id
+            )
+        elif payment.status == PaymentStatus.PENDENTE:
+            # Gateway assíncrono: aguardar confirmação via webhook
+            # A assinatura permanece no plano atual até a confirmação
+            # O PaymentService.process_webhook_event chamará _apply_plan_change
+            # quando receber a confirmação
+            return subscription
+        else:
+            # RECUSADO ou ESTORNADO
+            raise ConflictError(
+                f"O pagamento do upgrade não foi aprovado. Tente novamente. "
+                f"Status: {payment.status.value}"
+            )
+
+    async def _change_plan_downgrade(
+        self,
+        subscription: Subscription,
+        new_plan: Plan,
+    ) -> Subscription:
+        """Downgrade: agenda para o próximo ciclo de cobrança."""
+        
+        # Se já tem um downgrade agendado, substitui
+        async with UnitOfWork(self._session):
+            subscription.pending_plan_id = new_plan.id
+            subscription.pending_plan_effective_at = subscription.current_period_end
+            await self._session.flush()
+            
+            self._session.add(
+                SubscriptionHistory(
+                    subscription_id=subscription.id,
+                    from_plan_id=subscription.plan_id,
+                    to_plan_id=new_plan.id,
+                    from_status=subscription.status,
+                    to_status=subscription.status,
+                    reason=SubscriptionHistoryReason.DOWNGRADE,
+                )
+            )
+            await self._session.flush()
+        
+        return subscription
+
+    async def change_plan(
+        self,
+        subscription_id: uuid.UUID,
+        user_id: uuid.UUID,
+        new_plan_id: uuid.UUID,
+    ) -> Subscription:
+        """Upgrade com cobrança imediata da diferença pró-rata,
+        ou downgrade agendado para o próximo ciclo de cobrança."""
+        
+        subscription = await self.get_subscription(subscription_id, user_id)
+        if subscription.status != SubscriptionStatus.ATIVA:
+            raise ConflictError("Apenas assinaturas ativas podem trocar de plano.")
+        
+        new_plan = await self._plans.get_by_id(new_plan_id)
+        if new_plan is None or not new_plan.is_active:
+            raise NotFoundError("Plano não encontrado ou inativo.")
+        if new_plan.id == subscription.plan_id:
+            raise ConflictError("A assinatura já está neste plano.")
+        
+        # Se já tem um downgrade agendado, limpa
+        if subscription.pending_plan_id is not None:
+            async with UnitOfWork(self._session):
+                subscription.pending_plan_id = None
+                subscription.pending_plan_effective_at = None
+                await self._session.flush()
+        
+        is_upgrade = new_plan.price_cents > subscription.plan.price_cents
+        
+        if is_upgrade:
+            return await self._change_plan_upgrade(subscription, new_plan, user_id)
+        else:
+            return await self._change_plan_downgrade(subscription, new_plan)
+
+    async def apply_pending_downgrade(self, subscription_id: uuid.UUID) -> Subscription:
+        """Aplica um downgrade agendado, se houver e se a data já tiver chegado.
+        
+        Chamado pelo worker de renovação automática.
+        """
+        subscription = await self._subscriptions.get_by_id_with_plan(subscription_id)
+        if subscription is None:
+            raise NotFoundError("Assinatura não encontrada.")
+        
+        if subscription.pending_plan_id is None:
+            return subscription
+        
+        now = _utcnow()
+        if (subscription.pending_plan_effective_at is not None and
+            subscription.pending_plan_effective_at > now):
+            return subscription
+        
+        pending_plan = await self._plans.get_by_id(subscription.pending_plan_id)
+        if pending_plan is None:
+            # Plano foi deletado: limpa o agendamento
+            async with UnitOfWork(self._session):
+                subscription.pending_plan_id = None
+                subscription.pending_plan_effective_at = None
+                await self._session.flush()
+            return subscription
+        
+        # Aplica a troca sem cobrança (downgrade)
+        return await self._apply_plan_change(
+            subscription, pending_plan, SubscriptionHistoryReason.DOWNGRADE
+        )
+
+    # ==================================================================== #
+    # Dunning (PROMPT 11)                                                  #
+    # ==================================================================== #
 
     async def mark_payment_failed(self, subscription_id: uuid.UUID) -> Subscription:
         """Chamado por `PaymentService` quando um pagamento é recusado ou
@@ -663,6 +880,8 @@ class SubscriptionService:
                 days=settings.DUNNING_GRACE_PERIOD_DAYS
             )
 
+        applied = False
+
         async with UnitOfWork(self._session):
             applied = await self._subscriptions.compare_and_swap(
                 subscription_id,
@@ -695,6 +914,15 @@ class SubscriptionService:
             # atual em vez do objeto potencialmente desatualizado.
             current = await self._subscriptions.get_by_id(subscription_id)
             return current if current is not None else subscription
+
+        # --- NOTIFICAÇÃO: Falha de pagamento (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user and new_status == SubscriptionStatus.INADIMPLENTE:
+            await self._notification.notify_payment_failed(user, subscription)
+        elif user and new_status == SubscriptionStatus.CANCELADA:
+            # Falha do pagamento inicial de ativação: já tem notificação de cancelamento
+            # que será enviada pelo método cancel_subscription (não chamado aqui)
+            pass
 
         return subscription
 
@@ -739,6 +967,8 @@ class SubscriptionService:
             else _utcnow() + timedelta(days=settings.DUNNING_RETRY_INTERVAL_DAYS)
         )
 
+        applied = False
+
         async with UnitOfWork(self._session):
             applied = await self._subscriptions.compare_and_swap(
                 subscription_id,
@@ -769,6 +999,11 @@ class SubscriptionService:
         if not applied:
             current = await self._subscriptions.get_by_id(subscription_id)
             return current if current is not None else subscription
+
+        # --- NOTIFICAÇÃO: Retry de dunning falhou (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_dunning_retry_failed(user, subscription)
 
         return subscription
 
@@ -817,6 +1052,8 @@ class SubscriptionService:
         now = _utcnow()
         new_period_start = now
         new_period_end = now + period_length
+
+        applied = False
 
         try:
             async with UnitOfWork(self._session):
@@ -867,6 +1104,11 @@ class SubscriptionService:
             current = await self._subscriptions.get_by_id_with_plan(subscription_id)
             return current if current is not None else subscription
 
+        # --- NOTIFICAÇÃO: Recuperação de dunning (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_dunning_recovered(user, subscription)
+
         return subscription
 
     async def expire_from_dunning(self, subscription_id: uuid.UUID) -> Subscription:
@@ -893,6 +1135,8 @@ class SubscriptionService:
             return subscription
         if subscription.status != SubscriptionStatus.INADIMPLENTE:
             raise ConflictError("Apenas assinaturas inadimplentes podem expirar por dunning.")
+
+        applied = False
 
         async with UnitOfWork(self._session):
             applied = await self._subscriptions.compare_and_swap(
@@ -921,6 +1165,11 @@ class SubscriptionService:
         if not applied:
             current = await self._subscriptions.get_by_id(subscription_id)
             return current if current is not None else subscription
+
+        # --- NOTIFICAÇÃO: Expiração por dunning (PROMPT 13) ---
+        user = await self._users.get_by_id(subscription.user_id)
+        if user:
+            await self._notification.notify_dunning_expired(user, subscription)
 
         return subscription
 
@@ -1017,6 +1266,8 @@ class SubscriptionService:
         if subscription.status != SubscriptionStatus.ATIVA or not subscription.cancel_at_period_end:
             raise ConflictError("Esta assinatura não está agendada para cancelamento.")
 
+        applied = False
+
         async with UnitOfWork(self._session):
             applied = await self._subscriptions.compare_and_swap(
                 subscription_id,
@@ -1043,6 +1294,11 @@ class SubscriptionService:
         if not applied:
             current = await self._subscriptions.get_by_id_with_plan(subscription_id)
             return current if current is not None else subscription
+
+        # --- NOTIFICAÇÃO: Cancelamento (já enviada por cancel_subscription,
+        # mas se o cancelamento foi agendado e só efetivado agora, o e-mail
+        # já foi enviado no momento do agendamento. Não enviar novamente.
+        # A notificação de cancelamento é enviada em cancel_subscription. ---
 
         return subscription
 

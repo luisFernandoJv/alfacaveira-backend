@@ -151,6 +151,43 @@ class SubscriptionRepository(BaseRepository[Subscription]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    # ==================================================================== #
+    # PROMPT 12: Downgrade agendado                                        #
+    # ==================================================================== #
+
+    async def list_due_for_downgrade(self, now: datetime) -> list[Subscription]:
+        """Assinaturas ATIVA com downgrade agendado cuja data já chegou.
+
+        Usado pelo worker de renovação para aplicar downgrades no momento
+        exato em que o período atual termina.
+
+        Filtra:
+        - `status == ATIVA` (downgrade só faz sentido em assinaturas ativas)
+        - `pending_plan_id IS NOT NULL` (há um downgrade agendado)
+        - `pending_plan_effective_at IS NOT NULL` (data definida)
+        - `pending_plan_effective_at <= now` (data já chegou)
+
+        Retorna ordenado pela data de efetivação (mais antiga primeiro),
+        para que downgrades mais urgentes sejam processados primeiro.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.status == SubscriptionStatus.ATIVA,
+                Subscription.pending_plan_id.is_not(None),
+                Subscription.pending_plan_effective_at.is_not(None),
+                Subscription.pending_plan_effective_at <= now,
+            )
+            .options(_WITH_PLAN)
+            .order_by(Subscription.pending_plan_effective_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    # ==================================================================== #
+    # Dunning (PROMPT 11)                                                  #
+    # ==================================================================== #
+
     async def list_due_for_dunning_retry(
         self, now: datetime, *, max_attempts: int
     ) -> list[Subscription]:
@@ -203,6 +240,10 @@ class SubscriptionRepository(BaseRepository[Subscription]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+
+    # ==================================================================== #
+    # CAS (Compare-And-Swap)                                               #
+    # ==================================================================== #
 
     async def compare_and_swap(
         self,
@@ -284,3 +325,25 @@ class SubscriptionRepository(BaseRepository[Subscription]):
             expected={"status": expected_status},
             values=values,
         )
+
+    async def list_due_for_renewal_reminder(self, now: datetime, days_before: int) -> list[Subscription]:
+            """Assinaturas ATIVA que vencerão em `days_before` dias e ainda não
+            receberam o lembrete para este período.
+            """
+            target_date = now + timedelta(days=days_before)
+            start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1)
+    
+            stmt = (
+                select(Subscription)
+                .where(
+                    Subscription.status == SubscriptionStatus.ATIVA,
+                    Subscription.current_period_end >= start_of_day,
+                    Subscription.current_period_end < end_of_day,
+                    Subscription.cancel_at_period_end.is_(False),
+                    Subscription.renewal_reminder_sent_at.is_(None),
+                )
+                .options(_WITH_PLAN)
+            )
+            result = await self.session.execute(stmt)
+            return list(result.scalars().unique().all())

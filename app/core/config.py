@@ -154,6 +154,8 @@ class Settings(BaseSettings):
     # driver real e sem segredo configurado.
     PAYMENT_WEBHOOK_SECRET: str = Field(default="")
 
+    
+
     @model_validator(mode="after")
     def _validate_production_webhook_secret(self) -> "Settings":
         """Em produção, um driver de pagamento real exige PAYMENT_WEBHOOK_SECRET
@@ -178,6 +180,62 @@ class Settings(BaseSettings):
             )
         return self
 
+    # app/core/config.py (adicionar ao final da classe Settings)
+
+    # --- Notificações transacionais (PROMPT 13) --------------------------- #
+    # Flags de ativação por tipo de evento
+    NOTIFY_PAYMENT_APPROVED: bool = Field(default=True)
+    NOTIFY_PAYMENT_FAILED: bool = Field(default=True)
+    NOTIFY_RENEWAL_SUCCESS: bool = Field(default=True)
+    NOTIFY_RENEWAL_REMINDER: bool = Field(default=True)
+    NOTIFY_CANCELLATION: bool = Field(default=True)
+    NOTIFY_REACTIVATION: bool = Field(default=True)
+    NOTIFY_PLAN_CHANGE: bool = Field(default=True)
+    NOTIFY_DUNNING_RECOVERED: bool = Field(default=True)
+    NOTIFY_DUNNING_RETRY_FAILED: bool = Field(default=True)
+    NOTIFY_DUNNING_EXPIRED: bool = Field(default=True)
+
+    # Dias de antecedência para aviso de renovação
+    RENEWAL_REMINDER_DAYS_BEFORE: int = Field(default=3, ge=1, le=7)
+
+    # Adicionar ao final da classe Settings
+
+    # Scheduler / Workers
+    SCHEDULER_ENABLED: bool = Field(
+        default=True,
+        description="Habilita o scheduler in-process. Desabilite em workers secundários.",
+    )
+    SCHEDULER_LOCK_TTL_SECONDS: int = Field(
+        default=300,
+        ge=30,
+        description="TTL do lock distribuído para jobs em segundos.",
+    )
+
+        # Adicionar ao final da classe Settings
+
+    # Cache
+    CACHE_ENABLED: bool = Field(
+        default=True,
+        description="Habilita o cache distribuído via Redis.",
+    )
+    CACHE_DEFAULT_TTL_SECONDS: int = Field(
+        default=3600,
+        ge=60,
+        description="TTL padrão para cache em segundos.",
+    )
+    CACHE_PLANS_TTL_SECONDS: int = Field(
+        default=3600,
+        ge=60,
+        description="TTL para cache de planos em segundos.",
+    )
+    CACHE_USER_TTL_SECONDS: int = Field(
+        default=300,
+        ge=60,
+        description="TTL para cache de usuários em segundos.",
+    )
+
+    
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -186,3 +244,4 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+

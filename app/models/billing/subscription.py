@@ -62,8 +62,29 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True, default=None
     )
 
-    plan: Mapped["Plan"] = relationship(back_populates="subscriptions")
+    # --- Upgrade/Downgrade (PROMPT 12, roadmap item 12) ------------------ #
+    # `pending_plan_id` guarda o plano para o qual a assinatura será
+    # trocada no próximo ciclo de cobrança (usado para downgrade).
+    # NULL quando não há downgrade agendado.
+    pending_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Data em que o downgrade entra em vigor (normalmente `current_period_end`).
+    # NULL quando não há downgrade agendado.
+    pending_plan_effective_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
+    # --- Relacionamentos ------------------------------------------------- #
+    plan: Mapped["Plan"] = relationship(foreign_keys=[plan_id], back_populates="subscriptions")
+    pending_plan: Mapped["Plan | None"] = relationship(foreign_keys=[pending_plan_id])
     payments: Mapped[list["Payment"]] = relationship(back_populates="subscription")
     history: Mapped[list["SubscriptionHistory"]] = relationship(
         back_populates="subscription", order_by="SubscriptionHistory.created_at.desc()"
+    )
+
+    # Timestamp do último lembrete enviado para este período.
+    # NULL = nunca enviado; usado para não enviar mais de uma vez por período.
+    renewal_reminder_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
     )

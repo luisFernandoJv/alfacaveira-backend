@@ -34,11 +34,13 @@ import pytest
 from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.enums import BillingPeriod, SubscriptionHistoryReason, SubscriptionStatus
+from app.services.billing import payment_service as payment_service_module
 from app.services.billing import subscription_service as subscription_service_module
 from app.services.billing.subscription_service import SubscriptionService
 from tests.unit.billing.factories import make_plan, make_subscription
 from tests.unit.billing.fakes import (
     FakeAsyncSession,
+    FakePaymentRepository,
     FakePlanRepository,
     FakeSubscriptionHistoryRepository,
     FakeSubscriptionRepository,
@@ -58,6 +60,18 @@ def repos(monkeypatch: pytest.MonkeyPatch):
         subscription_service_module,
         "SubscriptionHistoryRepository",
         FakeSubscriptionHistoryRepository,
+    )
+    # PROMPT 12: `change_plan` para um upgrade instancia `PaymentService`
+    # internamente (`_change_plan_upgrade`), que importa `SubscriptionRepository`
+    # e `PaymentRepository` do próprio módulo `payment_service` — patchear só
+    # `subscription_service_module` não é suficiente (mesmo achado já
+    # documentado em `test_payment_service.py::repos`). Sem isto,
+    # `PaymentService` usa o repositório real, que chama `session.execute()`
+    # contra a `FakeAsyncSession` (sem banco de verdade) e nunca encontra a
+    # assinatura semeada neste teste.
+    monkeypatch.setattr(payment_service_module, "SubscriptionRepository", lambda session: subs)
+    monkeypatch.setattr(
+        payment_service_module, "PaymentRepository", lambda session: FakePaymentRepository()
     )
     return subs, plans
 
@@ -514,7 +528,10 @@ class TestChangePlan:
 
         history_entries = [e for e in service._session.added if hasattr(e, "reason")]
         assert history_entries[-1].reason == SubscriptionHistoryReason.DOWNGRADE
-        assert result.plan_id == new_plan.id
+        # PROMPT 12: downgrade é agendado para o fim do ciclo atual, não
+        # aplicado imediatamente — o plano corrente não muda na hora.
+        assert result.plan_id == old_plan.id
+        assert result.pending_plan_id == new_plan.id
 
     async def test_rejects_change_to_same_plan(self, repos, service):
         subs, plans = repos
@@ -1154,3 +1171,231 @@ class TestConcurrencyGeneralizedCas:
         assert subs.store[sub.id].plan_id == new_plan.id
         history_entries = [e for e in service._session.added if hasattr(e, "reason")]
         assert len(history_entries) == 1
+
+
+# ==================================================================== #
+# PROMPT 12: Upgrade, Downgrade e Pró-rata                            #
+# ==================================================================== #
+
+
+class TestUpgradeDowngradeProrata:
+    """Testes do PROMPT 12 — Upgrade, downgrade e pró-rata."""
+
+    async def test_upgrade_approved_applies_immediately(self, repos, service):
+        """Upgrade com cobrança aprovada → plano trocado, período recalculado."""
+        subs, plans = repos
+        old_plan = make_plan(slug="standard", price_cents=2990, billing_period=BillingPeriod.MENSAL)
+        new_plan = make_plan(slug="pro", price_cents=4990, billing_period=BillingPeriod.MENSAL)
+        plans.seed(old_plan, new_plan)
+
+        now = datetime.now(UTC)
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=old_plan)
+        sub.current_period_end = now + timedelta(days=15)
+        subs.seed(sub)
+
+        # O gateway fake sempre aprova, então o upgrade deve ser aplicado
+        result = await service.change_plan(sub.id, sub.user_id, new_plan.id)
+
+        assert result.plan_id == new_plan.id
+        assert result.current_period_end > now
+        # O período deve ter sido recalculado a partir de agora
+        assert result.current_period_start == result.current_period_end - timedelta(days=30)
+
+    async def test_upgrade_cancels_scheduled_cancellation(self, repos, service):
+        """Upgrade sobrescreve cancel_at_period_end=True."""
+        subs, plans = repos
+        old_plan = make_plan(slug="standard", price_cents=2990)
+        new_plan = make_plan(slug="pro", price_cents=4990)
+        plans.seed(old_plan, new_plan)
+
+        sub = make_subscription(
+            status=SubscriptionStatus.ATIVA,
+            plan=old_plan,
+            cancel_at_period_end=True,
+        )
+        subs.seed(sub)
+
+        result = await service.change_plan(sub.id, sub.user_id, new_plan.id)
+
+        assert result.plan_id == new_plan.id
+        assert result.cancel_at_period_end is False
+
+    async def test_downgrade_schedules_for_next_cycle(self, repos, service):
+        """Downgrade → agenda `pending_plan_id` e mantém plano atual."""
+        subs, plans = repos
+        old_plan = make_plan(slug="pro", price_cents=4990)
+        new_plan = make_plan(slug="standard", price_cents=2990)
+        plans.seed(old_plan, new_plan)
+
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=old_plan)
+        subs.seed(sub)
+
+        result = await service.change_plan(sub.id, sub.user_id, new_plan.id)
+
+        assert result.plan_id == old_plan.id  # Plano atual mantido
+        assert result.pending_plan_id == new_plan.id
+        assert result.pending_plan_effective_at == result.current_period_end
+
+    async def test_downgrade_replaces_existing_downgrade(self, repos, service):
+        """Novo downgrade substitui o anterior."""
+        subs, plans = repos
+        plan_a = make_plan(slug="pro", price_cents=4990)
+        plan_b = make_plan(slug="standard", price_cents=2990)
+        plan_c = make_plan(slug="free", price_cents=0)
+        plans.seed(plan_a, plan_b, plan_c)
+
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=plan_a)
+        sub.pending_plan_id = plan_b.id
+        sub.pending_plan_effective_at = sub.current_period_end
+        subs.seed(sub)
+
+        result = await service.change_plan(sub.id, sub.user_id, plan_c.id)
+
+        assert result.pending_plan_id == plan_c.id
+        # O effective_at deve ter sido atualizado para o novo current_period_end
+        assert result.pending_plan_effective_at == result.current_period_end
+
+    async def test_downgrade_applied_on_apply_pending(self, repos, service):
+        """Downgrade agendado é aplicado por apply_pending_downgrade."""
+        subs, plans = repos
+        old_plan = make_plan(slug="pro", price_cents=4990)
+        new_plan = make_plan(slug="standard", price_cents=2990)
+        plans.seed(old_plan, new_plan)
+
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=old_plan)
+        sub.pending_plan_id = new_plan.id
+        subs.seed(sub)
+
+        # Simula que o período (e portanto a data agendada de efetivação do
+        # downgrade, que segue `current_period_end`) já terminou. Setar os
+        # dois juntos evita um `pending_plan_effective_at` órfão apontando
+        # para o antigo `current_period_end` (que faria
+        # `apply_pending_downgrade` devolver a assinatura sem aplicar nada,
+        # por achar que o período ainda não acabou).
+        sub.current_period_end = datetime.now(UTC) - timedelta(days=1)
+        sub.pending_plan_effective_at = sub.current_period_end
+
+        result = await service.apply_pending_downgrade(sub.id)
+
+        assert result.plan_id == new_plan.id
+        assert result.pending_plan_id is None
+        assert result.pending_plan_effective_at is None
+
+    async def test_downgrade_not_applied_before_effective_date(self, repos, service):
+        """Downgrade não é aplicado antes da data de efetivação."""
+        subs, plans = repos
+        old_plan = make_plan(slug="pro", price_cents=4990)
+        new_plan = make_plan(slug="standard", price_cents=2990)
+        plans.seed(old_plan, new_plan)
+
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=old_plan)
+        sub.pending_plan_id = new_plan.id
+        sub.pending_plan_effective_at = datetime.now(UTC) + timedelta(days=5)  # Futuro
+        subs.seed(sub)
+
+        result = await service.apply_pending_downgrade(sub.id)
+
+        # Nada deve mudar
+        assert result.plan_id == old_plan.id
+        assert result.pending_plan_id == new_plan.id
+
+    async def test_prorated_calculation(self, service):
+        """Cálculo pró-rata está correto."""
+        now = datetime.now(UTC)
+        current_period_end = now + timedelta(days=15)
+
+        amount = service._calculate_prorated_amount(
+            current_price_cents=2990,
+            new_price_cents=4990,
+            current_period_end=current_period_end,
+            plan_duration_days=30,
+            now=now,
+        )
+
+        # (4990 - 2990) / 30 * 15 = 2000 / 30 * 15 = 1000
+        # Arredondado para cima (ceil) = 1000
+        assert amount == 1000
+
+    async def test_prorated_calculation_ceil(self, service):
+        """Arredondamento para cima (ceil) funciona."""
+        now = datetime.now(UTC)
+        current_period_end = now + timedelta(days=10)
+
+        amount = service._calculate_prorated_amount(
+            current_price_cents=2990,
+            new_price_cents=4990,
+            current_period_end=current_period_end,
+            plan_duration_days=30,
+            now=now,
+        )
+
+        # (4990 - 2990) / 30 * 10 = 2000 / 30 * 10 = 666.666...
+        # Arredondado para cima (ceil) = 667
+        assert amount == 667
+
+    async def test_prorated_calculation_no_difference(self, service):
+        """Sem diferença de preço → retorna 0."""
+        now = datetime.now(UTC)
+        current_period_end = now + timedelta(days=15)
+
+        amount = service._calculate_prorated_amount(
+            current_price_cents=2990,
+            new_price_cents=2990,  # Mesmo preço
+            current_period_end=current_period_end,
+            plan_duration_days=30,
+            now=now,
+        )
+
+        assert amount == 0
+
+    async def test_prorated_calculation_no_remaining_time(self, service):
+        """Sem tempo restante → retorna 0."""
+        now = datetime.now(UTC)
+        current_period_end = now  # Já vencido
+
+        amount = service._calculate_prorated_amount(
+            current_price_cents=2990,
+            new_price_cents=4990,
+            current_period_end=current_period_end,
+            plan_duration_days=30,
+            now=now,
+        )
+
+        assert amount == 0
+
+    async def test_upgrade_no_cost_on_last_day(self, repos, service):
+        """Upgrade no último dia do período não cobra nada."""
+        subs, plans = repos
+        old_plan = make_plan(slug="standard", price_cents=2990)
+        new_plan = make_plan(slug="pro", price_cents=4990)
+        plans.seed(old_plan, new_plan)
+
+        now = datetime.now(UTC)
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=old_plan)
+        sub.current_period_end = now + timedelta(seconds=1)  # Praticamente vencido
+        subs.seed(sub)
+
+        result = await service.change_plan(sub.id, sub.user_id, new_plan.id)
+
+        assert result.plan_id == new_plan.id
+        # O período deve ter sido recalculado a partir de agora
+        assert result.current_period_end > now
+
+    async def test_upgrade_clears_existing_downgrade(self, repos, service):
+        """Upgrade limpa qualquer downgrade agendado existente."""
+        subs, plans = repos
+        plan_a = make_plan(slug="standard", price_cents=2990)
+        plan_b = make_plan(slug="free", price_cents=0)
+        plan_c = make_plan(slug="pro", price_cents=4990)
+        plans.seed(plan_a, plan_b, plan_c)
+
+        sub = make_subscription(status=SubscriptionStatus.ATIVA, plan=plan_a)
+        sub.pending_plan_id = plan_b.id  # Downgrade agendado para free
+        sub.pending_plan_effective_at = sub.current_period_end
+        subs.seed(sub)
+
+        result = await service.change_plan(sub.id, sub.user_id, plan_c.id)
+
+        assert result.plan_id == plan_c.id
+        assert result.pending_plan_id is None
+        assert result.pending_plan_effective_at is None

@@ -35,6 +35,7 @@ from tests.unit.billing.fakes import (
     FakePlanRepository,
     FakeSubscriptionHistoryRepository,
     FakeSubscriptionRepository,
+    FakeUserRepository,  # <-- ADICIONADO
 )
 
 
@@ -71,13 +72,22 @@ def repos(monkeypatch: pytest.MonkeyPatch):
     payments = FakePaymentRepository()
     subs = FakeSubscriptionRepository()
     plans = FakePlanRepository()
+    users = FakeUserRepository()  # <-- ADICIONADO
+
     monkeypatch.setattr(payment_service_module, "PaymentRepository", lambda session: payments)
     monkeypatch.setattr(payment_service_module, "SubscriptionRepository", lambda session: subs)
+
     # PaymentService compõe SubscriptionService internamente (mesma sessão) —
     # precisa dos mesmos dublês para que `mark_payment_failed` enxergue a
     # mesma assinatura semeada no teste.
     monkeypatch.setattr(subscription_service_module, "SubscriptionRepository", lambda session: subs)
     monkeypatch.setattr(subscription_service_module, "PlanRepository", lambda session: plans)
+    # PROMPT 13: SubscriptionService agora tem hooks de notificação que usam UserRepository
+    monkeypatch.setattr(
+        subscription_service_module,
+        "UserRepository",
+        lambda session: users,
+    )
     # PROMPT 10: um APROVADO sobre assinatura já ATIVA agora também aciona
     # `renew_subscription_system`, que consulta `SubscriptionHistoryRepository`
     # (idempotência por `payment_id`) — precisa do mesmo fake que

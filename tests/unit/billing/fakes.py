@@ -11,22 +11,26 @@ depender de infra externa (ver docs/HANDOFF.md, pendência 6 —
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
+from typing import Any
 
 from app.models.enums import SubscriptionStatus
 
 
 class FakeAsyncSession:
-    """Cobre só o que os services chamam diretamente em `self._session`
-    (`.add`, `.flush`) e o que `UnitOfWork` chama ao sair do bloco
-    (`.commit`, `.rollback`)."""
+    """Cobre o que os services chamam em self._session (.add, .flush, .commit, .rollback, .execute, .get)."""
 
     def __init__(self) -> None:
         self.added: list[object] = []
         self.commit_count = 0
         self.rollback_count = 0
+        self._store: dict[tuple[type, uuid.UUID], object] = {}
 
     def add(self, entity: object) -> None:
         self.added.append(entity)
+        if hasattr(entity, "id") and entity.id is not None:
+            key = (type(entity), entity.id)
+            self._store[key] = entity
 
     async def flush(self) -> None:
         return None
@@ -36,6 +40,21 @@ class FakeAsyncSession:
 
     async def rollback(self) -> None:
         self.rollback_count += 1
+
+    async def execute(self, stmt: object) -> object:
+        from unittest.mock import MagicMock
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none = MagicMock(return_value=None)
+        mock_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        mock_result.unique = MagicMock(return_value=mock_result)
+        mock_result.first = MagicMock(return_value=None)
+        mock_result.all = MagicMock(return_value=[])
+        return mock_result
+
+    async def get(self, model: type, entity_id: uuid.UUID) -> object | None:
+        key = (model, entity_id)
+        return self._store.get(key)
 
 
 class FakeSubscriptionRepository:
@@ -56,9 +75,6 @@ class FakeSubscriptionRepository:
         return None
 
     async def get_pending_by_user(self, user_id: uuid.UUID):
-        """Espelha `SubscriptionRepository.get_pending_by_user` real
-        (PROMPT 05 / ADR-014) — usado por `create_subscription` para
-        rejeitar uma segunda assinatura PENDENTE do mesmo usuário."""
         for s in self.store.values():
             if s.user_id == user_id and s.status == SubscriptionStatus.PENDENTE:
                 return s
@@ -79,9 +95,7 @@ class FakeSubscriptionRepository:
     async def get_by_id(self, subscription_id: uuid.UUID):
         return self.store.get(subscription_id)
 
-    async def list_due_for_renewal(self, now):
-        """Espelha `SubscriptionRepository.list_due_for_renewal` real
-        (PROMPT 10) — usado pelo job de renovação automática."""
+    async def list_due_for_renewal(self, now: datetime):
         return sorted(
             (
                 s
@@ -93,10 +107,7 @@ class FakeSubscriptionRepository:
             key=lambda s: s.current_period_end,
         )
 
-    async def list_scheduled_cancellations_due(self, now):
-        """Espelha `SubscriptionRepository.list_scheduled_cancellations_due`
-        real (PROMPT 10) — usado pelo job de renovação automática para
-        efetivar cancelamentos agendados vencidos."""
+    async def list_scheduled_cancellations_due(self, now: datetime):
         return sorted(
             (
                 s
@@ -108,9 +119,7 @@ class FakeSubscriptionRepository:
             key=lambda s: s.current_period_end,
         )
 
-    async def list_due_for_dunning_retry(self, now, *, max_attempts: int):
-        """Espelha `SubscriptionRepository.list_due_for_dunning_retry` real
-        (PROMPT 11) — usado pelo job de dunning."""
+    async def list_due_for_dunning_retry(self, now: datetime, *, max_attempts: int):
         return sorted(
             (
                 s
@@ -123,10 +132,7 @@ class FakeSubscriptionRepository:
             key=lambda s: s.dunning_next_retry_at,
         )
 
-    async def list_due_for_dunning_expiration(self, now):
-        """Espelha `SubscriptionRepository.list_due_for_dunning_expiration`
-        real (PROMPT 11) — usado pelo job de dunning para expirar
-        assinaturas cujo grace period terminou."""
+    async def list_due_for_dunning_expiration(self, now: datetime):
         return sorted(
             (
                 s
@@ -137,6 +143,28 @@ class FakeSubscriptionRepository:
             ),
             key=lambda s: s.dunning_grace_period_ends_at,
         )
+
+    async def list_due_for_renewal_reminder(self, now: datetime, days_before: int):
+        target_date = now + timedelta(days=days_before)
+        start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = start_of_day + timedelta(days=1)
+
+        return sorted(
+            (
+                s
+                for s in self.store.values()
+                if s.status == SubscriptionStatus.ATIVA
+                and s.current_period_end >= start_of_day
+                and s.current_period_end < end_of_day
+                and not s.cancel_at_period_end
+                and s.renewal_reminder_sent_at is None
+            ),
+            key=lambda s: s.current_period_end,
+        )
+
+    async def mark_renewal_reminder_sent(self, subscription_id: uuid.UUID, now: datetime) -> None:
+        if subscription_id in self.store:
+            self.store[subscription_id].renewal_reminder_sent_at = now
 
     async def add(self, entity: object):
         self.store[entity.id] = entity
@@ -149,13 +177,6 @@ class FakeSubscriptionRepository:
         expected: dict[str, object],
         values: dict[str, object],
     ) -> bool:
-        """Espelha `SubscriptionRepository.compare_and_swap` real
-        (ADR-019). Não há `await` entre a checagem e a escrita — mesmo
-        raciocínio de atomicidade do ponto de vista do loop de eventos já
-        documentado em `compare_and_swap_status` abaixo, agora
-        generalizado para qualquer coluna em `expected`/`values`, não só
-        `status`.
-        """
         sub = self.store.get(subscription_id)
         if sub is None:
             return False
@@ -175,17 +196,6 @@ class FakeSubscriptionRepository:
         period_start=None,
         period_end=None,
     ) -> bool:
-        """Espelha `SubscriptionRepository.compare_and_swap_status` real
-        (roadmap item 7, ADR-017/ADR-018) — desde o ADR-019, atalho fino
-        sobre `compare_and_swap` acima, mesmo espírito do real. Reproduz a
-        corrida e a correção de forma determinística em `asyncio.gather`
-        sem precisar de banco real (mesma técnica do `asyncio.sleep(0)` já
-        usada em `TestMarkPaymentFailedConcurrencyFinding`, mas aplicada
-        do lado que decide se a escrita acontece, não do lado da leitura).
-
-        `period_start`/`period_end` opcionais espelham o mesmo par no
-        repositório real (ADR-018, usado por `activate_subscription`).
-        """
         values: dict[str, object] = {"status": new_status}
         if period_start is not None:
             values["current_period_start"] = period_start
@@ -200,14 +210,7 @@ class FakeSubscriptionRepository:
 
 class FakeSubscriptionHistoryRepository:
     """Substitui `SubscriptionHistoryRepository` nos módulos de service via
-    monkeypatch (ADR-023). Não guarda estado próprio — lê diretamente de
-    `session.added` (a mesma `FakeAsyncSession` usada pelo service), porque
-    `SubscriptionService` grava entradas de histórico via
-    `self._session.add(SubscriptionHistory(...))`, não via este
-    repositório. Isto mantém as duas visões (o que foi adicionado à sessão
-    e o que este repositório "vê" ao consultar) sempre em sincronia entre
-    chamadas sucessivas dentro do mesmo teste, sem duplicar armazenamento.
-    """
+    monkeypatch (ADR-023)."""
 
     def __init__(self, session: object) -> None:
         self._session = session
@@ -231,9 +234,6 @@ class FakeSubscriptionHistoryRepository:
         ]
         if not candidates:
             return None
-        # `session.added` preserva ordem de inserção — a última é a mais
-        # recente (mesmo espírito de `ORDER BY created_at DESC LIMIT 1` do
-        # repositório real).
         return candidates[-1]
 
 
@@ -289,10 +289,6 @@ class FakePaymentRepository:
     async def compare_and_swap_status(
         self, payment_id: uuid.UUID, *, expected_status, new_status, paid_at=None
     ) -> bool:
-        """Espelha `PaymentRepository.compare_and_swap_status` real
-        (roadmap item 7, ADR-017) — ver o comentário equivalente em
-        `FakeSubscriptionRepository.compare_and_swap_status` sobre por
-        que isto é seguro sem banco real."""
         payment = self.store.get(payment_id)
         if payment is None or payment.status != expected_status:
             return False
@@ -300,3 +296,82 @@ class FakePaymentRepository:
         if paid_at is not None:
             payment.paid_at = paid_at
         return True
+
+
+class FakeUserRepository:
+    """Fake para UserRepository (PROMPT 13)."""
+
+    def __init__(self, session: object = None) -> None:
+        self.store: dict[uuid.UUID, object] = {}
+
+    def seed(self, *users: object) -> None:
+        for u in users:
+            if hasattr(u, "id"):
+                self.store[u.id] = u
+
+    async def get_by_id(self, user_id: uuid.UUID):
+        return self.store.get(user_id)
+
+    async def get_by_email(self, email: str):
+        for u in self.store.values():
+            if hasattr(u, "email") and u.email == email:
+                return u
+        return None
+
+
+class FakeSubscriptionNotificationService:
+    """Fake para SubscriptionNotificationService (PROMPT 13)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def _add_call(self, event: str, user, subscription, **kwargs) -> None:
+        self.calls.append({
+            "event": event,
+            "user": user,
+            "subscription": subscription,
+            **kwargs,
+        })
+
+    async def notify_payment_approved(self, user, subscription):
+        self._add_call("payment_approved", user, subscription)
+
+    async def notify_payment_failed(self, user, subscription):
+        self._add_call("payment_failed", user, subscription)
+
+    async def notify_renewal_success(self, user, subscription):
+        self._add_call("renewal_success", user, subscription)
+
+    async def notify_renewal_reminder(self, user, subscription):
+        self._add_call("renewal_reminder", user, subscription)
+
+    async def notify_cancellation(self, user, subscription):
+        self._add_call("cancellation", user, subscription)
+
+    async def notify_reactivation(self, user, subscription):
+        self._add_call("reactivation", user, subscription)
+
+    async def notify_plan_change(self, user, subscription, old_plan_name: str):
+        self._add_call("plan_change", user, subscription, old_plan_name=old_plan_name)
+
+    async def notify_dunning_recovered(self, user, subscription):
+        self._add_call("dunning_recovered", user, subscription)
+
+    async def notify_dunning_retry_failed(self, user, subscription):
+        self._add_call("dunning_retry_failed", user, subscription)
+
+    async def notify_dunning_expired(self, user, subscription):
+        self._add_call("dunning_expired", user, subscription)
+
+    def clear(self) -> None:
+        self.calls = []
+
+    def assert_called_with(self, event: str, **kwargs) -> None:
+        for call in self.calls:
+            if call["event"] == event:
+                for key, value in kwargs.items():
+                    if call.get(key) != value:
+                        break
+                else:
+                    return
+        raise AssertionError(f"Chamada com evento '{event}' não encontrada em {self.calls}")

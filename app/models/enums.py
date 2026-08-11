@@ -121,3 +121,24 @@ class SubscriptionHistoryReason(str, enum.Enum):
     # foi aprovada — volta para ATIVA e o período é avançado (mesmo efeito
     # de uma renovação normal).
     RECUPERADA_DUNNING = "recuperada_dunning"
+    # PROMPT 12 (Upgrade/Downgrade): upgrade pendente de confirmação de
+    # pagamento (gateway assíncrono). A assinatura permanece no plano atual
+    # até a confirmação; quando o webhook APROVADO chega, a transição é
+    # registrada como UPGRADE (não UPGRADE_PENDENTE). Este valor é usado
+    # apenas para rastrear o estado intermediário, se necessário.
+    UPGRADE_PENDENTE = "upgrade_pendente"
+
+    # app/models/enums.py (adicionar ao final)
+
+class SubscriptionEmailEvent(str, enum.Enum):
+    """Eventos que disparam e-mails transacionais de assinatura."""
+    PAYMENT_APPROVED = "payment_approved"
+    PAYMENT_FAILED = "payment_failed"
+    RENEWAL_SUCCESS = "renewal_success"
+    RENEWAL_REMINDER = "renewal_reminder"
+    CANCELLATION = "cancellation"
+    REACTIVATION = "reactivation"
+    PLAN_CHANGE = "plan_change"
+    DUNNING_RECOVERED = "dunning_recovered"
+    DUNNING_RETRY_FAILED = "dunning_retry_failed"
+    DUNNING_EXPIRED = "dunning_expired"
