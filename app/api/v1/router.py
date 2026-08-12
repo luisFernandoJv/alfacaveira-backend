@@ -1,11 +1,7 @@
-"""Router agregador da API v1.
-
-Reúne os routers de cada bounded context conforme cada módulo é
-implementado (Etapas 5 em diante: Autenticação, Usuários, Questões, ...).
-"""
+"""Router agregador da API v1."""
 
 from fastapi import APIRouter
-
+from app.api.v1.content.exam_papers import router as exam_papers_router
 from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
 from app.api.v1.assessment.exam_templates import router as exam_templates_router
 from app.api.v1.billing.plans import router as billing_plans_router
@@ -18,6 +14,12 @@ from app.api.v1.identity.auth import router as auth_router
 from app.api.v1.identity.users import router as users_router
 from app.api.v1.practice.attempts import router as attempts_router
 from app.api.v1.practice.training_sessions import router as training_sessions_router
+from app.api.v1.practice.reviews import router as reviews_router
+from app.api.v1.analytics.ranking import router as ranking_router
+from app.api.v1.platform.comments import router as comments_router
+from app.api.v1.platform.notifications import router as notifications_router
+from app.api.v1.analytics.user_stats import router as user_stats_router
+from app.api.v1.content.notebooks import router as notebooks_router
 
 api_router = APIRouter()
 
@@ -44,4 +46,54 @@ api_router.include_router(
     billing_webhooks_router, prefix="/billing/webhooks", tags=["billing"]
 )
 
-# Etapa 10+: api_router.include_router(...)
+# Reviews
+api_router.include_router(
+    reviews_router,
+    prefix="/reviews",
+    tags=["reviews"],
+)
+
+api_router.include_router(
+    exam_papers_router,
+    prefix="/exam-papers",
+    tags=["exam-papers"],
+)
+
+api_router.include_router(
+    ranking_router,
+    prefix="/ranking",
+    tags=["ranking"],
+)
+
+api_router.include_router(
+    comments_router,
+    prefix="/comments",
+    tags=["comments"],
+)
+
+api_router.include_router(
+    notifications_router,
+    prefix="/notifications",
+    tags=["notifications"],
+)
+
+# 🔥 ADICIONAR ROUTER DE ANALYTICS
+api_router.include_router(
+    user_stats_router,
+    prefix="/analytics",
+    tags=["analytics"],
+)
+
+api_router.include_router(
+    comments_router,
+    prefix="/comments",
+    tags=["comments"],
+)
+
+api_router.include_router(
+    notifications_router,
+    prefix="/notifications",
+    tags=["notifications"],
+)
+
+api_router.include_router(notebooks_router, prefix="/notebooks", tags=["notebooks"])

@@ -142,3 +142,56 @@ class SubscriptionEmailEvent(str, enum.Enum):
     DUNNING_RECOVERED = "dunning_recovered"
     DUNNING_RETRY_FAILED = "dunning_retry_failed"
     DUNNING_EXPIRED = "dunning_expired"
+
+# app/models/enums.py (adicionar)
+
+# Adicionar ao final do arquivo app/models/enums.py
+
+class ReviewStatus(str, enum.Enum):
+    PENDENTE = "pendente"
+    EM_ANDAMENTO = "em_andamento"
+    CONCLUIDA = "concluida"
+    PULAR = "pular"
+
+
+class ReviewPriority(str, enum.Enum):
+    ALTA = "alta"
+    MEDIA = "media"
+    BAIXA = "baixa"
+
+class CommentStatus(str, enum.Enum):
+    """Status de um comentário."""
+    PUBLICADO = "publicado"
+    PENDENTE = "pendente"
+    DENUNCIADO = "denunciado"
+    REMOVIDO = "removido"
+    BLOQUEADO = "bloqueado"
+
+
+class CommentVoteType(str, enum.Enum):
+    """Tipo de voto em um comentário."""
+    UP = "up"
+    DOWN = "down"
+
+
+
+# app/models/enums.py (adicionar)
+
+# app/models/enums.py (adicionar no final do arquivo)
+
+class NotificationType(str, enum.Enum):
+    """Tipos de notificação."""
+    NEW_COMMENT = "new_comment"
+    NEW_REPLY = "new_reply"
+    COMMENT_VOTE = "comment_vote"
+    MENTION = "mention"
+    SYSTEM = "system"
+    PAYMENT = "payment"
+    RENEWAL = "renewal"
+
+
+class NotificationStatus(str, enum.Enum):
+    """Status da notificação."""
+    UNREAD = "unread"
+    READ = "read"
+    ARCHIVED = "archived"

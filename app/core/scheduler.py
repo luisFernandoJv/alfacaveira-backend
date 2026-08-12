@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.workers.analytics_aggregator import run as run_analytics_aggregator
 from app.workers.subscription_dunning import run as run_subscription_dunning
 from app.workers.subscription_renewal import run as run_subscription_renewal
+from app.workers.ranking_updater import update_rankings
 
 logger = structlog.get_logger(__name__)
 
@@ -129,6 +130,16 @@ def start_scheduler() -> None:
             coalesce=True,
             max_instances=1,
             misfire_grace_time=600,
+        )
+
+        scheduler.add_job(
+            update_rankings,
+            trigger=IntervalTrigger(minutes=30),
+            id="ranking_updater",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=300,
         )
         logger.info(
             "subscription_renewal.scheduler_job_registered",
