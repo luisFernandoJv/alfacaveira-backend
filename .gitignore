@@ -32,3 +32,21 @@ build/
 
 # Docker
 .docker/
+
+# 🔧 CORREÇÃO (auditoria — achado de segurança P0): estes três artefatos
+# foram encontrados versionados na raiz do backend, nenhum deles coberto
+# pelas regras acima:
+# - cookies.txt: gerado por `curl -c cookies.txt` em teste manual de login,
+#   contém um refresh token de sessão real em texto puro.
+# - dump.rdb: dump binário do Redis local (pode conter chaves de cache,
+#   rate-limit e sessão de qualquer ambiente onde foi gerado).
+# - .coverage: artefato local do pytest-cov, não deveria ser versionado.
+# Ação manual pendente (fora do escopo de um .gitignore): se estes arquivos
+# já foram commitados alguma vez, `git rm --cached` não é suficiente —
+# é preciso reescrever o histórico (git filter-repo / BFG) e revogar/rotacionar
+# qualquer credencial ou token que tenha aparecido neles.
+cookies.txt
+dump.rdb
+*.rdb
+.coverage
+.coverage.*

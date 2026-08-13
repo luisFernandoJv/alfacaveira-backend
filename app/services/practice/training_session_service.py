@@ -1,11 +1,9 @@
-"""Regras de negócio de sessões de treino: criação a partir de filtros,
-consulta (histórico + detalhe) e finalização.
-"""
-
+# app/services/practice/training_session_service.py
 import uuid
 from datetime import UTC, datetime
 from typing import Optional
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
@@ -17,8 +15,11 @@ from app.repositories.content.question_repository import QuestionFilters, Questi
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
 from app.repositories.learning.notebook_repository import NotebookRepository
+from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
 from app.schemas.practice.training_session import TrainingSessionCreateRequest
 from app.services.billing.feature_gate_service import FeatureGateService
+
+logger = structlog.get_logger(__name__)
 
 
 def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
@@ -46,21 +47,28 @@ class TrainingSessionService:
         self._questions = QuestionRepository(session)
         self._attempts = QuestionAttemptRepository(session)
         self._notebooks = NotebookRepository(session)
+        self._notebook_questions = NotebookQuestionRepository(session)
         self._feature_gate = FeatureGateService(session)
 
     async def create_session(
         self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
     ) -> TrainingSession:
-        """Cria uma sessão de treino a partir de filtros ou de uma lista explícita de questões."""
-        
+        """Cria uma sessão de treino a partir de filtros, lista explícita ou caderno."""
+        logger.info(
+            "training_session.create.start",
+            user_id=str(user_id),
+            has_notebook_id=bool(data.notebook_id),
+            has_question_ids=bool(data.question_ids),
+        )
+
         # Se for criar a partir de um caderno, usa as questões do caderno
         if data.notebook_id:
             return await self._create_session_from_notebook(user_id, data.notebook_id, data)
-        
+
         # Se for criar a partir de uma lista explícita de IDs
         if data.question_ids:
             return await self._create_session_from_question_ids(user_id, data.question_ids, data)
-        
+
         # Caso contrário, usa os filtros tradicionais
         return await self._create_session_from_filters(user_id, data)
 
@@ -106,7 +114,7 @@ class TrainingSessionService:
 
         # Buscar as questões pelos IDs
         questions = await self._questions.list_by_ids(question_ids)
-        
+
         # Verificar se todas as questões foram encontradas
         found_ids = {q.id for q in questions}
         missing = [str(qid) for qid in question_ids if qid not in found_ids]
@@ -119,27 +127,35 @@ class TrainingSessionService:
         self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
     ) -> TrainingSession:
         """Cria sessão a partir de um caderno específico."""
+        logger.info("notebook_session.start", notebook_id=str(notebook_id), user_id=str(user_id))
+
         # Verificar ownership do caderno
         notebook = await self._notebooks.get_owned(notebook_id, user_id)
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
 
         # Buscar questões do caderno
-        notebook_questions, _ = await self._notebooks._questions.list_by_notebook(
+        notebook_questions, _ = await self._notebook_questions.list_by_notebook(
             notebook_id=notebook_id,
             user_id=user_id,
             limit=1000,  # Limite alto para não truncar
         )
-        
+
+        logger.info(
+            "notebook_session.questions_found",
+            notebook_id=str(notebook_id),
+            count=len(notebook_questions),
+        )
+
         if not notebook_questions:
             raise NotFoundError("Este caderno não possui questões para estudar.")
 
         # Extrair os IDs das questões
         question_ids = [nq.question_id for nq in notebook_questions]
-        
+
         # Buscar as questões completas
         questions = await self._questions.list_by_ids(question_ids)
-        
+
         # Verificar quota
         answered_today = await self._attempts.count_answered_today(
             user_id, session_type=SessionType.TREINO
@@ -151,22 +167,28 @@ class TrainingSessionService:
         # Criar uma cópia do data para não modificar o original
         session_data = data.model_copy()
         session_data.quantity = len(questions)
-        
+
         return await self._persist_session(user_id, questions, session_data)
 
     async def _persist_session(
-        self, 
-        user_id: uuid.UUID, 
-        questions: list[Question], 
-        data: TrainingSessionCreateRequest
+        self,
+        user_id: uuid.UUID,
+        questions: list[Question],
+        data: TrainingSessionCreateRequest,
     ) -> TrainingSession:
         """Persiste a sessão no banco de dados."""
+        logger.info(
+            "session.persist.start",
+            user_id=str(user_id),
+            question_count=len(questions),
+        )
+
         now = datetime.now(UTC)
-        
+
         # Limitar quantidade
         quantity = min(data.quantity, len(questions))
         selected_questions = questions[:quantity]
-        
+
         training_session = TrainingSession(
             user_id=user_id,
             filters_snapshot=_filters_snapshot(data),
@@ -181,12 +203,12 @@ class TrainingSessionService:
 
         async with UnitOfWork(self._session):
             await self._sessions.add(training_session)
+            logger.info("session.persist.committed", session_id=str(training_session.id))
 
         return await self.get_session(training_session.id, user_id)
 
     async def get_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> TrainingSession:
         training_session = await self._sessions.get_with_questions(session_id)
-        # `NotFoundError` também para sessão de outro usuário — não expõe existência.
         if training_session is None or training_session.user_id != user_id:
             raise NotFoundError("Sessão de treino não encontrada.")
         return training_session
@@ -219,14 +241,6 @@ class TrainingSessionService:
     async def update_position(
         self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
     ) -> TrainingSession:
-        """Atualiza a posição (índice da questão) que o aluno está vendo.
-
-        `get_session` já garante que a sessão pertence a `user_id` (levanta
-        `NotFoundError` — nunca `ForbiddenError` — para não revelar a
-        existência de sessões de outros usuários, mesmo padrão do resto do
-        service). Nunca confia em nada além do `user_id` resolvido via
-        `CurrentUser` no endpoint.
-        """
         training_session = await self.get_session(session_id, user_id)
         if current_question_index >= training_session.total_questions:
             raise ValidationDomainError(

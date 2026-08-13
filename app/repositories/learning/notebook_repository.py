@@ -17,12 +17,6 @@ _RELATIONS = (
     selectinload(Notebook.tags),
 )
 
-# 🔥 CORREÇÃO: `get_with_questions` só carregava `NotebookQuestion.question`
-# de forma rasa. Como `NotebookDetailResponse.questions` é
-# `list[QuestionListItem]` (exige discipline/subject/topic/exam_board/
-# exam_edition/organization/tags), faltava aprofundar o eager-load — mesmo
-# bug de `MissingGreenlet` do endpoint de adicionar questão, só que aqui
-# ele quebraria em GET /notebooks/{id}.
 _QUESTION_DETAIL_RELATIONS = (
     selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.discipline),
     selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.subject),
@@ -44,7 +38,7 @@ class NotebookRepository(BaseRepository[Notebook]):
         notebook_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Notebook | None:
-        """Busca um caderno restrito ao dono."""
+        """Busca um caderno restrito ao dono com relações carregadas."""
         stmt = (
             select(Notebook)
             .where(

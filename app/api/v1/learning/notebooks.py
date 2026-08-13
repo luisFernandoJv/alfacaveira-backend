@@ -218,11 +218,22 @@ async def create_notebook(
         folder_id=body.folder_id,
         tag_ids=body.tag_ids,
     )
-    
-    # 🔥 CORREÇÃO: Adicionar question_count como atributo
-    notebook._question_count = 0
-    
-    return Envelope(data=NotebookResponse.model_validate(notebook))
+
+    # Construção manual para evitar MissingGreenlet
+    response_data = NotebookResponse(
+        id=notebook.id,
+        user_id=notebook.user_id,
+        name=notebook.name,
+        description=notebook.description,
+        folder_id=notebook.folder_id,
+        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
+        is_favorite=notebook.is_favorite,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+    )
+    response_data._question_count = 0
+
+    return Envelope(data=response_data)
 
 
 @router.get("/{notebook_id}", response_model=Envelope[NotebookDetailResponse])
@@ -233,16 +244,13 @@ async def get_notebook(
 ) -> Envelope[NotebookDetailResponse]:
     """Detalhe de um caderno."""
     notebook = await notebook_service.get_notebook(notebook_id, current_user.id)
-    
-    # 🔥 CORREÇÃO: Extrair as questões do NotebookQuestion para o formato esperado
-    # O repositório carrega notebook.questions como lista de NotebookQuestion
-    # Cada NotebookQuestion tem um atributo 'question' que é a Question real
+
+    # Extrair questões
     questions = []
     for nq in notebook.questions:
         if nq.question:
             questions.append(nq.question)
-    
-    # 🔥 CORREÇÃO: Construir o response manualmente com os dados extraídos
+
     response = NotebookDetailResponse(
         id=notebook.id,
         user_id=notebook.user_id,
@@ -255,10 +263,8 @@ async def get_notebook(
         updated_at=notebook.updated_at,
         questions=[QuestionListItem.model_validate(q) for q in questions],
     )
-    
-    # 🔥 CORREÇÃO: Adicionar question_count como atributo para o computed_field
     response._question_count = len(questions)
-    
+
     return Envelope(data=response)
 
 
@@ -279,11 +285,22 @@ async def update_notebook(
         is_favorite=body.is_favorite,
         tag_ids=body.tag_ids,
     )
-    
-    # 🔥 CORREÇÃO: Adicionar question_count como atributo
-    notebook._question_count = await notebook_service._notebooks.count_questions(notebook_id)
-    
-    return Envelope(data=NotebookResponse.model_validate(notebook))
+
+    # Construção manual para evitar MissingGreenlet
+    response_data = NotebookResponse(
+        id=notebook.id,
+        user_id=notebook.user_id,
+        name=notebook.name,
+        description=notebook.description,
+        folder_id=notebook.folder_id,
+        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
+        is_favorite=notebook.is_favorite,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+    )
+    response_data._question_count = notebook._question_count if hasattr(notebook, "_question_count") else 0
+
+    return Envelope(data=response_data)
 
 
 @router.patch("/{notebook_id}/favorite", response_model=Envelope[NotebookResponse])
@@ -299,10 +316,9 @@ async def toggle_favorite(
         user_id=current_user.id,
         is_favorite=body.is_favorite,
     )
-    
-    # 🔥 CORREÇÃO: Adicionar question_count como atributo
+
     notebook._question_count = await notebook_service._notebooks.count_questions(notebook_id)
-    
+
     return Envelope(data=NotebookResponse.model_validate(notebook))
 
 
@@ -376,9 +392,6 @@ async def add_question_to_notebook(
         user_id=current_user.id,
         question_id=body.question_id,
     )
-    
-    # 🔥 CORREÇÃO: Recarregar com relações completas se necessário
-    # O service já retorna com as relações carregadas via _RELATIONS
     return Envelope(data=NotebookQuestionResponse.model_validate(notebook_question))
 
 

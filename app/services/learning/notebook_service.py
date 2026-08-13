@@ -153,9 +153,6 @@ class NotebookService:
             favorite=favorite,
             search=search,
         )
-        # `NotebookResponse.question_count` cai no fallback `_question_count`
-        # quando `questions` não está carregado (list_by_user não traz essa
-        # relação, de propósito, para não pagar N+1 numa listagem).
         for notebook in notebooks:
             notebook._question_count = await self._notebooks.count_questions(notebook.id)
         return notebooks, total
@@ -165,15 +162,7 @@ class NotebookService:
         notebook_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Notebook:
-        """Busca um caderno específico, com as questões carregadas.
-
-        🔥 CORREÇÃO: usa `get_with_questions` (não `get_owned`). O endpoint
-        `GET /notebooks/{id}` serializa para `NotebookDetailResponse`, que
-        exige `questions: list[QuestionListItem]`. Com `get_owned`, essa
-        relação não vinha carregada e o Pydantic tentava lazy-load fora do
-        contexto assíncrono da sessão ao montar a resposta — mesma classe de
-        erro (`MissingGreenlet`) que quebrava `POST /{id}/questions`.
-        """
+        """Busca um caderno específico, com as questões carregadas."""
         notebook = await self._notebooks.get_with_questions(notebook_id, user_id)
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
@@ -190,6 +179,14 @@ class NotebookService:
         tag_ids: Optional[list[uuid.UUID]] = None,
     ) -> Notebook:
         """Cria um novo caderno."""
+        # Verificar feature gate
+        has_feature = await self._feature_gate.has_feature(user_id, FeatureKey.NOTEBOOKS)
+        if not has_feature:
+            raise ForbiddenError(
+                "Seu plano atual não inclui a criação de cadernos. "
+                "Faça upgrade para o plano Standard ou Pro."
+            )
+
         existing = await self._notebooks.get_by_name(user_id, name.strip())
         if existing:
             raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
@@ -216,19 +213,18 @@ class NotebookService:
         async with UnitOfWork(self._session):
             await self._notebooks.add(notebook)
 
-        # 🔥 CORREÇÃO: `notebook` aqui é a instância criada em memória, sem
-        # `folder`/`tags` carregados via `selectinload` (só o objeto puro
-        # que foi passado pro `session.add()`). `NotebookResponse.folder` é
-        # um campo declarado no schema, e o Pydantic acessa esse atributo
-        # ao montar a resposta — mesma classe de bug `MissingGreenlet` já
-        # documentada em `get_notebook`/`add_question`/`move_questions`
-        # (relação não carregada + lazy-load fora do contexto assíncrono).
-        # `get_owned` já usa `_RELATIONS` (`selectinload(Notebook.folder)`,
-        # `selectinload(Notebook.tags)`), então reaproveitamos o mesmo
-        # caminho em vez de duplicar eager-loading aqui.
-        notebook = await self._notebooks.get_owned(notebook.id, user_id)
+        # 🔥 CRÍTICO: Refresh do objeto e recarregar relações para evitar
+        # MissingGreenlet quando o router acessar notebook.folder/tags.
+        await self._session.refresh(notebook)
 
-        # Caderno novo: sem questões ainda.
+        if notebook.folder_id:
+            folder = await self._folders.get_owned(notebook.folder_id, user_id)
+            notebook.folder = folder
+
+        if tag_ids:
+            tags = await self._tags.list_by_ids(tag_ids)
+            notebook.tags = tags
+
         notebook._question_count = 0
         return notebook
 
@@ -243,6 +239,7 @@ class NotebookService:
         tag_ids: Optional[list[uuid.UUID]] = None,
     ) -> Notebook:
         """Atualiza um caderno."""
+        # Buscar com relações já carregadas
         notebook = await self._notebooks.get_owned(notebook_id, user_id)
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
@@ -274,6 +271,20 @@ class NotebookService:
 
         async with UnitOfWork(self._session):
             await self._session.flush()
+
+            # 🔥 CRÍTICO: Refresh do objeto para recarregar todas as colunas
+            # do banco, incluindo updated_at que é atualizado pelo trigger
+            await self._session.refresh(notebook)
+
+            # Recarregar relações explicitamente
+            if notebook.folder_id:
+                folder = await self._folders.get_owned(notebook.folder_id, user_id)
+                notebook.folder = folder
+
+            # Recarregar tags
+            if tag_ids is not None:
+                tags = await self._tags.list_by_ids(tag_ids)
+                notebook.tags = tags
 
         notebook._question_count = await self._notebooks.count_questions(notebook_id)
         return notebook
@@ -352,8 +363,6 @@ class NotebookService:
         async with UnitOfWork(self._session):
             await self._questions.add(notebook_question)
 
-        # 🔥 Recarrega com `question` (e sua árvore de relações) já
-        # carregados — ver correção em `notebook_question_repository.py`.
         return await self._questions.get_owned(notebook_id, question_id, user_id)
 
     async def add_questions_bulk(
@@ -390,14 +399,6 @@ class NotebookService:
         if len(questions) != len(to_add):
             raise NotFoundError("Uma ou mais questões não foram encontradas.")
 
-        # 🔥 CORREÇÃO: mesma classe de bug do `remove_question` — faltava
-        # `UnitOfWork` aqui. `bulk_create()` só faz `session.add()` +
-        # `flush()` no repositório (necessário para popular os `id`s antes
-        # do SELECT de recarga), mas nunca comita. Sem o commit explícito,
-        # a API respondia 201 com as questões "adicionadas", porém eram
-        # descartadas ao fechar a sessão no fim da requisição — mesmo
-        # sintoma do bug de `remove_question`, só que na direção oposta
-        # (perdia adição em vez de perder remoção).
         async with UnitOfWork(self._session):
             result = await self._questions.bulk_create(notebook_id, to_add)
         return result
@@ -413,14 +414,6 @@ class NotebookService:
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
 
-        # 🔥 CORREÇÃO: faltava envolver a exclusão em UnitOfWork. `get_db()`
-        # (app/database/session.py) só dá rollback em caso de exceção — quem
-        # comita é exclusivamente `UnitOfWork.__aexit__`. Sem isso, o DELETE
-        # executava e retornava sucesso (204) para o frontend, mas era
-        # descartado ao fechar a sessão no fim da requisição: a questão
-        # "voltava" a aparecer no próximo GET porque nunca saiu do banco de
-        # fato. Todo outro método de escrita deste service já usava
-        # UnitOfWork — este era o único que ficou de fora.
         async with UnitOfWork(self._session):
             removed = await self._questions.delete_by_notebook_and_question(
                 notebook_id, question_id
@@ -471,22 +464,9 @@ class NotebookService:
                         notebook_id=target_notebook_id,
                         question_id=qid,
                     )
-                    # 🔥 CORREÇÃO: antes chamava `self._session.add(nq)`
-                    # diretamente, contornando o repositório. Além de quebrar
-                    # o `id` do objeto (só é atribuído no `flush`, e o
-                    # `moved_ids.append(nq.id)` seguinte lia `None`), isso
-                    # também violava a regra de não duplicar responsabilidade
-                    # do repositório (prompt master, item 8/59). Usar
-                    # `self._questions.add(...)` garante `id` populado e é o
-                    # mesmo caminho já testável via fakes.
                     await self._questions.add(nq)
                     moved_ids.append(nq.id)
 
-        # 🔥 CORREÇÃO: os objetos `NotebookQuestion` criados em memória acima
-        # não têm `.question` carregado (nunca foram consultados via SELECT
-        # com `selectinload`). Retorná-los direto para o endpoint estourava
-        # `MissingGreenlet` na serialização, igual ao bug de `add_question`.
-        # Recarregamos em uma única query, já com a árvore de relações.
         return await self._questions.list_by_ids_with_relations(moved_ids)
 
     async def copy_questions(
@@ -513,13 +493,7 @@ class NotebookService:
             user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
         )
 
-        # 🔥 CORREÇÃO: o filtro de duplicatas antes só rodava dentro do
-        # `if quota_limit is not None`. Com quota ilimitada (o caso comum),
-        # copiar uma questão que já existe no caderno de destino ia direto
-        # pro `bulk_create` e estourava a UNIQUE(notebook_id, question_id)
-        # do banco como IntegrityError não tratada (500), em vez de ser
-        # simplesmente ignorada — que é o comportamento esperado ao copiar
-        # (a seção 21/29 do escopo original já previa isso).
+        # Remover duplicatas
         to_add = []
         for qid in question_ids:
             if not await self._questions.exists(target_notebook_id, qid):
@@ -533,10 +507,6 @@ class NotebookService:
                 f"Limite de {quota_limit} questões no caderno destino seria excedido."
             )
 
-        # 🔥 CORREÇÃO: faltava UnitOfWork — mesma classe de bug de
-        # `remove_question`/`add_questions_bulk`. Sem isso a cópia
-        # "funcionava" na resposta HTTP mas era descartada ao fechar a
-        # sessão no fim da requisição.
         async with UnitOfWork(self._session):
             result = await self._questions.bulk_create(target_notebook_id, to_add)
         return result

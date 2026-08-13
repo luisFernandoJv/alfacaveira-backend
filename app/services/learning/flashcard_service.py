@@ -232,12 +232,33 @@ class FlashcardService:
         ]
 
     async def _streak_days(self, user_id: uuid.UUID) -> int:
-        """Dias consecutivos (incluindo hoje) com pelo menos uma revisão."""
-        reviews = await self._reviews.count_reviewed_today(user_id)
-        # Sequência simplificada: hoje conta como dia 1 se houve revisão;
-        # o histórico completo de streak é mantido pelo módulo de analytics
-        # (`UserDailyStat`), fora do escopo deste service.
-        return 1 if reviews > 0 else 0
+        """Dias consecutivos (incluindo hoje ou ontem) com pelo menos uma revisão.
+
+        Antes desta correção, o método era um placeholder que só retornava
+        0 ou 1 (nunca refletia sequências reais de vários dias). A sequência
+        de estudos "de verdade" já existe no módulo de analytics
+        (`StudyStreak`/`_recompute_streaks`), mas ela é alimentada só por
+        `user_daily_stats.questions_answered` — ou seja, por questões
+        respondidas, não por revisões de flashcard. Reaproveitar aquele
+        streak aqui faria o streak de flashcards ficar zerado para quem só
+        estuda por flashcard, o que seria pior que o bug atual.
+
+        Por isso o cálculo é feito aqui, no próprio contexto de
+        aprendizagem, com a mesma lógica de sequência consecutiva usada em
+        `_recompute_streaks` (analytics), mas a partir das datas reais de
+        `flashcard_reviews.last_reviewed_at`.
+        """
+        review_dates = await self._reviews.list_review_dates(user_id)
+        if not review_dates:
+            return 0
+
+        current_run = 1
+        for previous, current in zip(review_dates, review_dates[1:]):
+            current_run = current_run + 1 if (current - previous).days == 1 else 1
+
+        last_date = review_dates[-1]
+        today = date.today()
+        return current_run if (today - last_date).days <= 1 else 0
 
 
 def _new_review_state(flashcard_id: uuid.UUID, user_id: uuid.UUID) -> FlashcardReview:

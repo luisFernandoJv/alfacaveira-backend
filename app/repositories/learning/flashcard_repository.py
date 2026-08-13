@@ -195,3 +195,25 @@ class FlashcardReviewRepository(BaseRepository[FlashcardReview]):
         )
         result = await self.session.execute(stmt)
         return {str(grade): count for grade, count in result.all() if grade is not None}
+
+    async def list_review_dates(self, user_id: uuid.UUID) -> list[date]:
+        """Datas distintas (mais antiga → mais recente) em que o usuário revisou
+        ao menos um flashcard.
+
+        Fonte de dados para o cálculo do streak de flashcards em
+        `FlashcardService._streak_days`. Mesma ideia do worker de analytics
+        (`_recompute_streaks`), mas escopada ao contexto de aprendizagem —
+        não depende de `user_daily_stats`, que hoje só agrega questões
+        respondidas e não enxerga revisões de flashcard.
+        """
+        stmt = (
+            select(func.date(FlashcardReview.last_reviewed_at))
+            .where(
+                FlashcardReview.user_id == user_id,
+                FlashcardReview.last_reviewed_at.is_not(None),
+            )
+            .distinct()
+            .order_by(func.date(FlashcardReview.last_reviewed_at))
+        )
+        result = await self.session.execute(stmt)
+        return [row[0] for row in result.all()]

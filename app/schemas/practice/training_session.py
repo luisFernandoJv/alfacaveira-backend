@@ -1,3 +1,4 @@
+# app/schemas/practice/training_session.py
 """Schemas de request/response de sessões de treino."""
 
 import uuid
@@ -16,11 +17,7 @@ from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, To
 
 
 class TrainingSessionCreateRequest(BaseModel):
-    """Filtros usados para montar a sessão + quantidade de questões desejada.
-
-    Espelha `QuestionFilters` (content), exceto `status`/`search`, que não
-    fazem sentido para montar um treino (treino só usa questões publicadas).
-    """
+    """Filtros usados para montar a sessão + quantidade de questões desejada."""
 
     discipline_id: uuid.UUID | None = None
     subject_id: uuid.UUID | None = None
@@ -33,13 +30,12 @@ class TrainingSessionCreateRequest(BaseModel):
     tag_id: uuid.UUID | None = None
     quantity: int = Field(default=10, ge=1, le=100)
     
-    # 🔥 NOVO: Lista explícita de IDs de questões para criar a sessão
-    # Se fornecido, ignora todos os outros filtros
     question_ids: list[uuid.UUID] | None = Field(
         default=None,
         max_length=100,
         description="Lista explícita de IDs de questões para montar a sessão"
     )
+    # 🔥 CORREÇÃO: Adicionar notebook_id
     notebook_id: uuid.UUID | None = Field(
         default=None,
         description="ID do caderno para criar sessão a partir das questões do caderno"
@@ -47,14 +43,7 @@ class TrainingSessionCreateRequest(BaseModel):
 
 
 class TrainingSessionQuestionResponse(BaseModel):
-    """Questão dentro de uma sessão, na ordem de apresentação — sem gabarito.
-
-    Inclui os metadados de prova (banca, edição, órgão, ano, tags) para que a
-    tela de resolução não precise de uma segunda chamada para exibi-los.
-    """
-
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     statement: str
     discipline: DisciplineResponse
@@ -72,10 +61,7 @@ class TrainingSessionQuestionResponse(BaseModel):
 
 
 class TrainingSessionListItem(BaseModel):
-    """Item de listagem do histórico de sessões do usuário."""
-
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     total_questions: int
     correct_count: int
@@ -85,8 +71,6 @@ class TrainingSessionListItem(BaseModel):
 
 
 class TrainingSessionDetailResponse(BaseModel):
-    """Detalhe de uma sessão: metadados + questões na ordem, sem gabarito."""
-
     id: uuid.UUID
     total_questions: int
     correct_count: int
@@ -97,16 +81,10 @@ class TrainingSessionDetailResponse(BaseModel):
 
 
 class TrainingSessionPositionUpdateRequest(BaseModel):
-    """Nova posição (índice da questão) que o aluno está vendo na sessão."""
-
     current_question_index: int = Field(ge=0)
 
 
 class TrainingSessionPositionResponse(BaseModel):
-    """Confirmação da posição salva — resposta enxuta, sem recarregar as
-    questões inteiras da sessão a cada troca de posição."""
-
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     current_question_index: int
