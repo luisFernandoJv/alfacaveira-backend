@@ -4,6 +4,7 @@ consulta (histórico + detalhe) e finalização.
 
 import uuid
 from datetime import UTC, datetime
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +16,10 @@ from app.models.practice.training_session import TrainingSession, TrainingSessio
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.repositories.learning.notebook_repository import NotebookRepository
 from app.schemas.practice.training_session import TrainingSessionCreateRequest
 from app.services.billing.feature_gate_service import FeatureGateService
+
 
 def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
     """Snapshot (JSONB) dos filtros usados para montar a sessão."""
@@ -31,6 +34,8 @@ def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
         "difficulty": data.difficulty.value if data.difficulty else None,
         "tag_id": str(data.tag_id) if data.tag_id else None,
         "quantity": data.quantity,
+        "question_ids": [str(qid) for qid in (data.question_ids or [])],
+        "notebook_id": str(data.notebook_id) if data.notebook_id else None,
     }
 
 
@@ -40,11 +45,29 @@ class TrainingSessionService:
         self._sessions = TrainingSessionRepository(session)
         self._questions = QuestionRepository(session)
         self._attempts = QuestionAttemptRepository(session)
+        self._notebooks = NotebookRepository(session)
         self._feature_gate = FeatureGateService(session)
 
     async def create_session(
         self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
     ) -> TrainingSession:
+        """Cria uma sessão de treino a partir de filtros ou de uma lista explícita de questões."""
+        
+        # Se for criar a partir de um caderno, usa as questões do caderno
+        if data.notebook_id:
+            return await self._create_session_from_notebook(user_id, data.notebook_id, data)
+        
+        # Se for criar a partir de uma lista explícita de IDs
+        if data.question_ids:
+            return await self._create_session_from_question_ids(user_id, data.question_ids, data)
+        
+        # Caso contrário, usa os filtros tradicionais
+        return await self._create_session_from_filters(user_id, data)
+
+    async def _create_session_from_filters(
+        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de filtros (comportamento original)."""
         answered_today = await self._attempts.count_answered_today(
             user_id, session_type=SessionType.TREINO
         )
@@ -68,17 +91,92 @@ class TrainingSessionService:
         if not questions:
             raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
 
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_question_ids(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID], data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de uma lista explícita de IDs de questões."""
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Buscar as questões pelos IDs
+        questions = await self._questions.list_by_ids(question_ids)
+        
+        # Verificar se todas as questões foram encontradas
+        found_ids = {q.id for q in questions}
+        missing = [str(qid) for qid in question_ids if qid not in found_ids]
+        if missing:
+            raise NotFoundError(f"Questões não encontradas: {', '.join(missing[:5])}")
+
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_notebook(
+        self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de um caderno específico."""
+        # Verificar ownership do caderno
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        # Buscar questões do caderno
+        notebook_questions, _ = await self._notebooks._questions.list_by_notebook(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            limit=1000,  # Limite alto para não truncar
+        )
+        
+        if not notebook_questions:
+            raise NotFoundError("Este caderno não possui questões para estudar.")
+
+        # Extrair os IDs das questões
+        question_ids = [nq.question_id for nq in notebook_questions]
+        
+        # Buscar as questões completas
+        questions = await self._questions.list_by_ids(question_ids)
+        
+        # Verificar quota
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Criar uma cópia do data para não modificar o original
+        session_data = data.model_copy()
+        session_data.quantity = len(questions)
+        
+        return await self._persist_session(user_id, questions, session_data)
+
+    async def _persist_session(
+        self, 
+        user_id: uuid.UUID, 
+        questions: list[Question], 
+        data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Persiste a sessão no banco de dados."""
         now = datetime.now(UTC)
+        
+        # Limitar quantidade
+        quantity = min(data.quantity, len(questions))
+        selected_questions = questions[:quantity]
+        
         training_session = TrainingSession(
             user_id=user_id,
             filters_snapshot=_filters_snapshot(data),
-            total_questions=len(questions),
+            total_questions=len(selected_questions),
             correct_count=0,
             started_at=now,
         )
         training_session.questions = [
             TrainingSessionQuestion(question_id=question.id, position=position)
-            for position, question in enumerate(questions)
+            for position, question in enumerate(selected_questions)
         ]
 
         async with UnitOfWork(self._session):

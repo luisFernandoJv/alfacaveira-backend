@@ -112,7 +112,38 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 request, call_next, policy, reason=repr(exc)
             )
 
-        return await call_next(request)
+        # 🔥 CORREÇÃO: `call_next(request)` estava FORA do try/except acima.
+        # O try/except só protegia as chamadas ao Redis — qualquer exceção
+        # que escapasse do processamento downstream real (router/service),
+        # inclusive falhas conhecidas do `Starlette.BaseHTTPMiddleware`
+        # durante o streaming interno da resposta, não passava pelo
+        # `@app.exception_handler(Exception)` genérico do FastAPI e ia
+        # parar direto no `ServerErrorMiddleware` do Starlette — que
+        # devolve texto puro, não JSON. Do lado do cliente isso aparece
+        # como corpo não-parseável (`response.json()` falhando), mesmo
+        # com o handler genérico já implementado e funcionando para
+        # exceções levantadas dentro do próprio endpoint.
+        try:
+            return await call_next(request)
+        except Exception as exc:  # noqa: BLE001 - qualquer falha downstream
+            # Não fazemos `raise` aqui: relançar deixaria a exceção seguir
+            # para o `ServerErrorMiddleware` do Starlette (texto puro, sem
+            # JSON) exatamente como antes — o que estamos corrigindo é
+            # justamente essa fuga. Devolvemos o mesmo formato de envelope
+            # de erro que `@app.exception_handler(Exception)` usaria.
+            logger.error(
+                "rate_limit.downstream_unhandled_exception",
+                policy=policy.name,
+                path=request.url.path,
+                error=repr(exc),
+                error_type=type(exc).__name__,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=error_envelope(
+                    "internal_error", "Erro interno do servidor."
+                ),
+            )
 
     async def _on_backend_unavailable(
         self,

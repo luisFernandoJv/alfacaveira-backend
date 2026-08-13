@@ -25,6 +25,7 @@ import traceback
 
 import structlog
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.responses import error_envelope
@@ -74,6 +75,38 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=error_envelope(code=exc.code, message=exc.message),
+        )
+
+    # 🔥 CORREÇÃO: handler para RequestValidationError (erros de validação
+    # do Pydantic no corpo/query/path da request). Sem isso, o FastAPI usa
+    # seu handler embutido, que devolve {"detail": [...]}  — um formato
+    # diferente do envelope {data, meta, error} usado no resto da API.
+    # O frontend (`lib/api.ts`) só lê `body.error.message`, então todo 422
+    # virava a mensagem genérica "Erro 422 ao chamar {path}", escondendo
+    # qual campo falhou e por quê.
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        first = exc.errors()[0] if exc.errors() else None
+        if first is not None:
+            # loc costuma ser algo como ("body", "name") ou ("query", "limit")
+            field = ".".join(str(part) for part in first["loc"][1:]) or str(
+                first["loc"][-1]
+            )
+            message = f"{field}: {first['msg']}" if field else first["msg"]
+        else:
+            message = "Dados inválidos na requisição."
+
+        logger.warning(
+            "validation_error",
+            path=request.url.path,
+            method=request.method,
+            errors=exc.errors(),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=error_envelope(code="validation_error", message=message),
         )
 
     # 🔥 CORREÇÃO CRÍTICA: handler genérico. Sem isso, qualquer exceção

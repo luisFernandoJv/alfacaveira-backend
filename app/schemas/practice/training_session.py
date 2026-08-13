@@ -32,6 +32,18 @@ class TrainingSessionCreateRequest(BaseModel):
     difficulty: QuestionDifficulty | None = None
     tag_id: uuid.UUID | None = None
     quantity: int = Field(default=10, ge=1, le=100)
+    
+    # 🔥 NOVO: Lista explícita de IDs de questões para criar a sessão
+    # Se fornecido, ignora todos os outros filtros
+    question_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=100,
+        description="Lista explícita de IDs de questões para montar a sessão"
+    )
+    notebook_id: uuid.UUID | None = Field(
+        default=None,
+        description="ID do caderno para criar sessão a partir das questões do caderno"
+    )
 
 
 class TrainingSessionQuestionResponse(BaseModel):

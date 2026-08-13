@@ -100,6 +100,14 @@ async def create_training_session(
     current_user: CurrentUser,
     training_session_service: TrainingSessionServiceDep,
 ) -> Envelope[TrainingSessionDetailResponse]:
+    """
+    Cria uma sessão de treino.
+
+    Pode ser criada de três formas:
+    1. Por filtros (discipline_id, subject_id, etc.) - comportamento original
+    2. Por lista explícita de IDs (question_ids)
+    3. Por caderno (notebook_id) - cria sessão com todas as questões do caderno
+    """
     training_session = await training_session_service.create_session(current_user.id, body)
     detail = await _build_detail(training_session_service, current_user.id, training_session)
     return Envelope(data=detail)
