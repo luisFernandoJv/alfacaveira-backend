@@ -1,170 +1,37 @@
-"""Seed de dados de teste para desenvolvimento local.
+# scripts/seed_pm_ma_portugues_questions.py
+"""Seed de 10 questões de Língua Portuguesa (banca CEBRASPE), extraídas do
+caderno 'Língua Portuguesa para PM MA - 2026' (fonte: PDF enviado pelo
+usuário). Cobre os tópicos: Fatos da Língua Portuguesa, Acentuação e Uso
+do Hífen.
 
-Popula o banco com:
-- 1 usuário admin (para logar e testar o CRUD de questões)
-- 1 usuário aluno comum (para testar o fluxo público)
-- Taxonomia mínima (disciplinas -> assuntos -> subassuntos)
-- 1 banca examinadora, 1 órgão, 1 edição de concurso
-- Algumas questões publicadas, com alternativas
+As explicações abaixo não vêm do PDF (que traz só o gabarito oficial, sem
+comentário) — são escritas do zero aqui, com a regra gramatical que
+justifica cada gabarito.
 
-Uso (dentro do container ou com o venv/poetry ativo, apontando para o
-mesmo DATABASE_URL do .env):
+Uso (dentro do container ou com PYTHONPATH=/app):
 
-    poetry run python scripts/seed_test_data.py
+    PYTHONPATH=/app python scripts/seed_pm_ma_portugues_questions.py
 
-ou, rodando dentro do container da API:
+Pré-requisito: rodar scripts/seed_test_data.py antes (cria a disciplina
+"Português" e o usuário admin usado como `created_by`).
 
-    docker compose exec api python scripts/seed_test_data.py
-
-É idempotente: pode rodar mais de uma vez, ele verifica se os registros
-já existem antes de criar (por slug/email únicos).
+É idempotente: casa questões existentes pelo enunciado exato.
 """
 
 import asyncio
 
-from app.database.session import AsyncSessionFactory
-from app.models.billing.plan import Plan
-from app.models.content.exam_source import ExamBoard, ExamEdition, Organization
-from app.models.content.question import Question, QuestionAlternative
-from app.models.content.taxonomy import Discipline, Subject, Topic
-from app.models.enums import BillingPeriod, FeatureKey, FeatureKind, QuestionDifficulty, QuestionStatus
-from app.models.identity.user import User, UserProfile
-from app.repositories.billing.feature_repository import FeatureRepository
-from app.security.password import hash_password
-from app.services.billing.feature_gate_service import FREE_PLAN_SLUG
-from app.services.billing.plan_service import PlanService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# --- catálogo de features (Etapa 5) -------------------------------------- #
-# Uma linha por FeatureKey do enum (`app/models/enums.py`), sincronizado com
-# os valores criados em `migrations/versions/0005_billing_features.py`.
-# `kind` decide se `PlanFeature.quota_limit` é relevante (QUOTA) ou se a
-# feature é liga/desliga (BOOLEAN).
-FEATURE_CATALOG: list[tuple[FeatureKey, FeatureKind, str, str]] = [
-    (FeatureKey.DAILY_QUESTIONS, FeatureKind.QUOTA, "Questões por dia", "Quantidade de questões que o usuário pode responder por dia."),
-    (FeatureKey.NOTEBOOKS, FeatureKind.BOOLEAN, "Cadernos de questões", "Acesso à criação de cadernos de questões personalizados."),
-    (FeatureKey.NOTEBOOK_MAX_QUESTIONS, FeatureKind.QUOTA, "Questões por caderno", "Limite de questões por caderno de questões."),
-    (FeatureKey.SIMULADOS, FeatureKind.BOOLEAN, "Simulados", "Acesso à realização de simulados cronometrados."),
-    (FeatureKey.FLASHCARDS, FeatureKind.BOOLEAN, "Flashcards", "Acesso ao módulo de flashcards com revisão espaçada."),
-    (FeatureKey.ESTATISTICAS, FeatureKind.BOOLEAN, "Estatísticas básicas", "Acesso às estatísticas básicas de desempenho."),
-    (FeatureKey.DASHBOARD_COMPLETO, FeatureKind.BOOLEAN, "Dashboard completo", "Acesso ao dashboard completo de acompanhamento de estudos."),
-    (FeatureKey.AI_EXPLICACAO_QUESTAO, FeatureKind.BOOLEAN, "Explicação de questão por IA", "Explicação de questões geradas por IA."),
-    (FeatureKey.AI_RESUMOS, FeatureKind.BOOLEAN, "Resumos por IA", "Geração de resumos de conteúdo por IA."),
-    (FeatureKey.AI_CRONOGRAMA, FeatureKind.BOOLEAN, "Cronograma por IA", "Geração de cronograma de estudos por IA."),
-    (FeatureKey.AI_ANALISE_DESEMPENHO, FeatureKind.BOOLEAN, "Análise de desempenho por IA", "Análise de desempenho gerada por IA."),
-    (FeatureKey.ANALYTICS_AVANCADO, FeatureKind.BOOLEAN, "Analytics avançado", "Métricas avançadas de desempenho e evolução."),
-]
-
-# --- planos base (Etapa 5) ------------------------------------------------ #
-# `quota_limit=None` em uma feature QUOTA significa "ilimitado" (ver
-# docstring de `PlanFeature`). Features BOOLEAN não devem receber quota_limit
-# (o service levanta `ValidationDomainError` se isso acontecer).
-PLAN_CATALOG: list[dict] = [
-    {
-        "slug": FREE_PLAN_SLUG,
-        "name": "Free",
-        "price_cents": 0,
-        "billing_period": BillingPeriod.MENSAL,
-        "features": {
-            FeatureKey.DAILY_QUESTIONS: 5,
-            FeatureKey.FLASHCARDS: None,
-            FeatureKey.ESTATISTICAS: None,
-        },
-    },
-    {
-        "slug": "standard",
-        "name": "Standard",
-        "price_cents": 2990,
-        "billing_period": BillingPeriod.MENSAL,
-        "features": {
-            FeatureKey.DAILY_QUESTIONS: None,
-            FeatureKey.NOTEBOOKS: None,
-            FeatureKey.NOTEBOOK_MAX_QUESTIONS: 50,
-            FeatureKey.SIMULADOS: None,
-            FeatureKey.FLASHCARDS: None,
-            FeatureKey.ESTATISTICAS: None,
-            FeatureKey.DASHBOARD_COMPLETO: None,
-        },
-    },
-    {
-        "slug": "pro",
-        "name": "Pro",
-        "price_cents": 4990,
-        "billing_period": BillingPeriod.MENSAL,
-        "features": {
-            FeatureKey.DAILY_QUESTIONS: None,
-            FeatureKey.NOTEBOOKS: None,
-            FeatureKey.NOTEBOOK_MAX_QUESTIONS: None,
-            FeatureKey.SIMULADOS: None,
-            FeatureKey.FLASHCARDS: None,
-            FeatureKey.ESTATISTICAS: None,
-            FeatureKey.DASHBOARD_COMPLETO: None,
-            FeatureKey.AI_EXPLICACAO_QUESTAO: None,
-            FeatureKey.AI_RESUMOS: None,
-            FeatureKey.AI_CRONOGRAMA: None,
-            FeatureKey.AI_ANALISE_DESEMPENHO: None,
-            FeatureKey.ANALYTICS_AVANCADO: None,
-        },
-    },
-]
+from app.database.session import AsyncSessionFactory
+from app.models.content.exam_source import ExamBoard, ExamEdition, Organization
+from app.models.content.question import Question, QuestionAlternative
+from app.models.content.taxonomy import Discipline, Subject
+from app.models.enums import QuestionDifficulty, QuestionStatus
+from app.models.identity.user import User
 
 
-async def seed_feature_catalog(session: AsyncSession, plan_service: PlanService) -> None:
-    """Cria o catálogo de `Feature` (uma linha por `FeatureKey`), se ainda
-    não existir. Precisa rodar antes do seed de planos: `set_plan_feature`
-    levanta `NotFoundError` para uma `FeatureKey` sem `Feature` cadastrada.
-    """
-    features = FeatureRepository(session)
-    for key, kind, name, description in FEATURE_CATALOG:
-        existing = await features.get_by_key(key)
-        if existing is not None:
-            continue
-        await plan_service.create_feature(key=key, kind=kind, name=name, description=description)
-
-
-async def seed_plans(session: AsyncSession, plan_service: PlanService) -> None:
-    """Cria os planos base (free/standard/pro) e associa as features do
-    catálogo via `PlanService.set_plan_feature` — nunca escrevendo direto em
-    `Plan.features` (JSONB), que é gerenciado pelo service.
-    """
-    for spec in PLAN_CATALOG:
-        result = await session.execute(select(Plan).where(Plan.slug == spec["slug"]))
-        plan = result.scalar_one_or_none()
-        if plan is None:
-            plan = await plan_service.create_plan(
-                name=spec["name"],
-                slug=spec["slug"],
-                price_cents=spec["price_cents"],
-                billing_period=spec["billing_period"],
-            )
-
-        for feature_key, quota_limit in spec["features"].items():
-            await plan_service.set_plan_feature(
-                plan_id=plan.id, feature_key=feature_key, quota_limit=quota_limit
-            )
-
-
-async def get_or_create_user(
-    session: AsyncSession, *, email: str, full_name: str, is_admin: bool, password: str
-) -> User:
-    result = await session.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    if user:
-        return user
-
-    user = User(
-        email=email,
-        password_hash=hash_password(password),
-        full_name=full_name,
-        is_admin=is_admin,
-        is_active=True,
-    )
-    session.add(user)
-    await session.flush()
-    session.add(UserProfile(user_id=user.id, target_exam="Polícia Penal RN"))
-    return user
-
+# --- helpers idempotentes (mesmo padrão de scripts/seed_test_data.py) ---- #
 
 async def get_or_create_discipline(session: AsyncSession, *, name: str, slug: str) -> Discipline:
     result = await session.execute(select(Discipline).where(Discipline.slug == slug))
@@ -190,20 +57,7 @@ async def get_or_create_subject(
     return obj
 
 
-async def get_or_create_topic(session: AsyncSession, *, subject: Subject, name: str, slug: str) -> Topic:
-    result = await session.execute(select(Topic).where(Topic.slug == slug))
-    obj = result.scalar_one_or_none()
-    if obj:
-        return obj
-    obj = Topic(subject_id=subject.id, name=name, slug=slug)
-    session.add(obj)
-    await session.flush()
-    return obj
-
-
-async def get_or_create_exam_board(
-    session: AsyncSession, *, name: str, acronym: str, slug: str
-) -> ExamBoard:
+async def get_or_create_exam_board(session: AsyncSession, *, name: str, acronym: str, slug: str) -> ExamBoard:
     result = await session.execute(select(ExamBoard).where(ExamBoard.slug == slug))
     obj = result.scalar_one_or_none()
     if obj:
@@ -214,9 +68,7 @@ async def get_or_create_exam_board(
     return obj
 
 
-async def get_or_create_organization(
-    session: AsyncSession, *, name: str, acronym: str, slug: str
-) -> Organization:
+async def get_or_create_organization(session: AsyncSession, *, name: str, acronym: str, slug: str) -> Organization:
     result = await session.execute(select(Organization).where(Organization.slug == slug))
     obj = result.scalar_one_or_none()
     if obj:
@@ -257,7 +109,6 @@ async def create_question(
     *,
     discipline: Discipline,
     subject: Subject | None,
-    topic: Topic | None,
     exam_board: ExamBoard,
     exam_edition: ExamEdition | None,
     organization: Organization | None,
@@ -266,9 +117,8 @@ async def create_question(
     statement: str,
     explanation: str,
     alternatives: list[tuple[str, str, bool]],
-    created_by: "uuid.UUID | None" = None,
+    created_by,
 ) -> Question:
-    # Evita duplicar em reruns: casa pelo enunciado exato.
     result = await session.execute(select(Question).where(Question.statement == statement))
     existing = result.scalar_one_or_none()
     if existing:
@@ -279,7 +129,7 @@ async def create_question(
     question = Question(
         discipline_id=discipline.id,
         subject_id=subject.id if subject else None,
-        topic_id=topic.id if topic else None,
+        topic_id=None,
         exam_board_id=exam_board.id,
         exam_edition_id=exam_edition.id if exam_edition else None,
         organization_id=organization.id if organization else None,
@@ -306,138 +156,491 @@ async def create_question(
 
 async def main() -> None:
     async with AsyncSessionFactory() as session:
-        # --- billing: catálogo de features + planos base (Etapa 5) ---
-        # Precisa rodar antes de qualquer outra coisa que dependa de
-        # `FeatureGateService.get_effective_plan` (ex.: qualquer endpoint
-        # autenticado que verifique quota/feature) — sem o plano FREE
-        # seedado, `GET /billing/subscriptions/me/plan` levanta `NotFoundError`
-        # pra qualquer usuário sem assinatura ativa (comportamento intencional).
-        plan_service = PlanService(session)
-        await seed_feature_catalog(session, plan_service)
-        await seed_plans(session, plan_service)
-
-        # --- usuários ---
-        admin = await get_or_create_user(
-            session,
-            email="admin@focopolicial.com.br",
-            full_name="Admin Foco Policial",
-            is_admin=True,
-            password="Admin@123456",
+        # --- usuário admin (para created_by) ---
+        admin_result = await session.execute(
+            select(User).where(User.email == "admin@focopolicial.com.br")
         )
-        await get_or_create_user(
-            session,
-            email="aluno@focopolicial.com.br",
-            full_name="Aluno Teste",
-            is_admin=False,
-            password="Aluno@123456",
-        )
+        admin = admin_result.scalar_one_or_none()
+        if admin is None:
+            raise RuntimeError(
+                "Usuário admin@focopolicial.com.br não encontrado. "
+                "Rode scripts/seed_test_data.py primeiro."
+            )
 
         # --- taxonomia ---
-        direito_penal = await get_or_create_discipline(
-            session, name="Direito Penal", slug="direito-penal"
-        )
-        crimes_pessoa = await get_or_create_subject(
-            session, discipline=direito_penal, name="Crimes contra a pessoa", slug="crimes-contra-a-pessoa"
-        )
-        homicidio = await get_or_create_topic(
-            session, subject=crimes_pessoa, name="Homicídio", slug="homicidio"
-        )
-
         portugues = await get_or_create_discipline(session, name="Português", slug="portugues")
-        interpretacao = await get_or_create_subject(
-            session, discipline=portugues, name="Interpretação de texto", slug="interpretacao-de-texto"
+        fatos_lingua = await get_or_create_subject(
+            session,
+            discipline=portugues,
+            name="Fatos da Língua Portuguesa",
+            slug="fatos-da-lingua-portuguesa",
+        )
+        acentuacao = await get_or_create_subject(
+            session, discipline=portugues, name="Acentuação", slug="acentuacao"
         )
 
-        # --- origem da questão ---
+        # --- banca ---
         cebraspe = await get_or_create_exam_board(
             session, name="CEBRASPE", acronym="CEBRASPE", slug="cebraspe"
         )
-        pp_rn = await get_or_create_organization(
-            session, name="Polícia Penal do Rio Grande do Norte", acronym="PP-RN", slug="pp-rn"
+
+        # --- órgãos e edições ---
+        pc_ro = await get_or_create_organization(
+            session, name="Polícia Civil de Rondônia", acronym="PC-RO", slug="pc-ro"
         )
-        edicao_2026 = await get_or_create_exam_edition(
+        edicao_pc_ro_tec_necro_2022 = await get_or_create_exam_edition(
             session,
-            organization=pp_rn,
+            organization=pc_ro,
             exam_board=cebraspe,
-            year=2026,
-            name="Concurso Polícia Penal RN 2026",
-            slug="pp-rn-2026",
+            year=2022,
+            name="Tec Necro (PC RO)/PC RO/2022",
+            slug="pc-ro-tec-necro-2022",
+        )
+        edicao_pc_ro_dati_pol_2022 = await get_or_create_exam_edition(
+            session,
+            organization=pc_ro,
+            exam_board=cebraspe,
+            year=2022,
+            name="Dati Pol (PC RO)/PC RO/2022",
+            slug="pc-ro-dati-pol-2022",
         )
 
-        # --- questões de exemplo ---
-        await create_question(
+        ipaam = await get_or_create_organization(
             session,
-            discipline=direito_penal,
-            subject=crimes_pessoa,
-            topic=homicidio,
-            exam_board=cebraspe,
-            exam_edition=edicao_2026,
-            organization=pp_rn,
-            year=2026,
-            difficulty=QuestionDifficulty.MEDIA,
-            statement=(
-                "Considerando o Código Penal, julgue: o homicídio qualificado "
-                "por motivo torpe admite a incidência de causa de diminuição "
-                "de pena por relevante valor moral na mesma conduta."
-            ),
-            explanation=(
-                "Errado: motivo torpe (qualificadora) e relevante valor moral "
-                "(privilégio) são incompatíveis entre si, pois ambos dizem "
-                "respeito ao motivo do crime."
-            ),
-            alternatives=[
-                ("A", "Certo", False),
-                ("B", "Errado", True),
-            ],
-            created_by=admin.id,
+            name="Instituto de Proteção Ambiental do Amazonas",
+            acronym="IPAAM",
+            slug="ipaam",
         )
-        await create_question(
+        edicao_ipaam_2026 = await get_or_create_exam_edition(
             session,
-            discipline=direito_penal,
-            subject=crimes_pessoa,
-            topic=homicidio,
+            organization=ipaam,
             exam_board=cebraspe,
-            exam_edition=edicao_2026,
-            organization=pp_rn,
             year=2026,
-            difficulty=QuestionDifficulty.FACIL,
-            statement="O homicídio simples está previsto em qual artigo do Código Penal?",
-            explanation="O homicídio simples está previsto no art. 121, caput, do Código Penal.",
-            alternatives=[
-                ("A", "Art. 121, caput", True),
-                ("B", "Art. 129, caput", False),
-                ("C", "Art. 155, caput", False),
-                ("D", "Art. 157, caput", False),
-            ],
-            created_by=admin.id,
+            name="Ass Amb (Ipaam)/IPAAM/2026",
+            slug="ipaam-ass-amb-2026",
         )
+
+        cbm_pa = await get_or_create_organization(
+            session, name="Corpo de Bombeiros Militar do Pará", acronym="CBM-PA", slug="cbm-pa"
+        )
+        edicao_cbm_pa_2024 = await get_or_create_exam_edition(
+            session,
+            organization=cbm_pa,
+            exam_board=cebraspe,
+            year=2024,
+            name="Of BM (CBM PA)/CBM PA/Combatente/2024",
+            slug="cbm-pa-of-bm-combatente-2024",
+        )
+
+        itaipu = await get_or_create_organization(
+            session, name="Itaipu Binacional", acronym="ITAIPU", slug="itaipu"
+        )
+        edicao_itaipu_2024 = await get_or_create_exam_edition(
+            session,
+            organization=itaipu,
+            exam_board=cebraspe,
+            year=2024,
+            name="Prof NU Jr (ITAIPU)/ITAIPU/Advogado/2024",
+            slug="itaipu-prof-nu-jr-advogado-2024",
+        )
+
+        pref_joinville = await get_or_create_organization(
+            session, name="Prefeitura de Joinville", acronym="Pref Joinville", slug="pref-joinville"
+        )
+        edicao_joinville_2024 = await get_or_create_exam_edition(
+            session,
+            organization=pref_joinville,
+            exam_board=cebraspe,
+            year=2024,
+            name="Aux (Pref Joinville)/Pref Joinville/Educador/2024",
+            slug="pref-joinville-aux-educador-2024",
+        )
+
+        pref_camacari = await get_or_create_organization(
+            session, name="Prefeitura de Camaçari", acronym="Pref Camaçari", slug="pref-camacari"
+        )
+        edicao_camacari_2024 = await get_or_create_exam_edition(
+            session,
+            organization=pref_camacari,
+            exam_board=cebraspe,
+            year=2024,
+            name="Prof (Pref Camaçari)/Pref Camaçari/Língua Portuguesa/2024",
+            slug="pref-camacari-prof-lingua-portuguesa-2024",
+        )
+
+        cbm_to = await get_or_create_organization(
+            session, name="Corpo de Bombeiros Militar do Tocantins", acronym="CBM-TO", slug="cbm-to"
+        )
+        edicao_cbm_to_2023 = await get_or_create_exam_edition(
+            session,
+            organization=cbm_to,
+            exam_board=cebraspe,
+            year=2023,
+            name="Sold (CBM TO)/CBM TO/2023",
+            slug="cbm-to-soldado-2023",
+        )
+
+        pm_sc = await get_or_create_organization(
+            session, name="Polícia Militar de Santa Catarina", acronym="PM-SC", slug="pm-sc"
+        )
+        edicao_pm_sc_2023 = await get_or_create_exam_edition(
+            session,
+            organization=pm_sc,
+            exam_board=cebraspe,
+            year=2023,
+            name="Of (PM SC)/PM SC/2023",
+            slug="pm-sc-oficial-2023",
+        )
+
+        sesi_sp = await get_or_create_organization(
+            session,
+            name="Serviço Social da Indústria de São Paulo",
+            acronym="SESI-SP",
+            slug="sesi-sp",
+        )
+        edicao_sesi_sp_2023 = await get_or_create_exam_edition(
+            session,
+            organization=sesi_sp,
+            exam_board=cebraspe,
+            year=2023,
+            name="PEB (SESI SP)/SESI SP/Grupo II/Língua Portuguesa/2023",
+            slug="sesi-sp-peb-grupo-2-2023",
+        )
+
+        # --- questões ---
+
+        # 1) Tec Necro (PC RO)/PC RO/2022 — Fatos da Língua Portuguesa
         await create_question(
             session,
             discipline=portugues,
-            subject=interpretacao,
-            topic=None,
+            subject=fatos_lingua,
             exam_board=cebraspe,
-            exam_edition=edicao_2026,
-            organization=pp_rn,
+            exam_edition=edicao_pc_ro_tec_necro_2022,
+            organization=pc_ro,
+            year=2022,
+            difficulty=QuestionDifficulty.MEDIA,
+            statement=(
+                'Estariam mantidos a correção gramatical e os sentidos do texto caso o sinal '
+                'de dois pontos empregado após "trabalhador" (último parágrafo do texto '
+                'CG4A1-II) fosse substituído por uma vírgula seguida da expressão'
+            ),
+            explanation=(
+                '"Porque" (conjunção explicativa, escrita junta e sem acento) é a forma que '
+                'introduz uma justificativa, preservando a relação de causa/explicação que o '
+                'dois-pontos original expressava. As demais opções não cumprem essa função '
+                'sintático-semântica no contexto.'
+            ),
+            alternatives=[
+                ("A", "por quê.", False),
+                ("B", "porque.", True),
+                ("C", "assim.", False),
+                ("D", "conquanto.", False),
+                ("E", "por isso.", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 2) Ass Amb (Ipaam)/IPAAM/2026 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_ipaam_2026,
+            organization=ipaam,
             year=2026,
             difficulty=QuestionDifficulty.MEDIA,
             statement=(
-                "Em textos dissertativo-argumentativos, a tese central deve, via "
-                "de regra, ser apresentada logo na introdução."
+                "Assinale a opção em que todas as palavras destacadas do texto CG2A1 são "
+                "acentuadas de acordo com a mesma regra de acentuação gráfica."
             ),
-            explanation="Certo: é a estrutura clássica de texto dissertativo-argumentativo.",
+            explanation=(
+                '"Referências", "memoráveis" e "ciência" são todas acentuadas pela regra das '
+                "paroxítonas terminadas em ditongo crescente/-l ou por hiato com i tônico "
+                "seguido de consoante na mesma sílaba, mantendo a mesma justificativa "
+                "gramatical entre as três — diferente das demais alternativas, que misturam "
+                "palavras de regras distintas de acentuação."
+            ),
             alternatives=[
-                ("A", "Certo", True),
-                ("B", "Errado", False),
+                ("A", "\u201ccientífica\u201d; \u201eacessível\u201f; \u201ediálogo\u201f (último parágrafo)", False),
+                ("B", "\u201cnotícias\u201d; \u201cdifíceis\u201d; \u201cfácil\u201d (primeiro parágrafo)", False),
+                ("C", "\u201ereferências\u201f; \u201ememoráveis\u201f; \u201eciência\u201f (terceiro parágrafo)", True),
+                ("D", "\u201cfrancês\u201d; \u201ereferência\u201f; \u201ecaía\u201f (quarto parágrafo)", False),
+                ("E", "\"científicos\u201f; \u201eimpenetráveis\u201f; \u201eciência\u201f (segundo parágrafo)", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 3) Of BM (CBM PA)/CBM PA/Combatente/2024 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_cbm_pa_2024,
+            organization=cbm_pa,
+            year=2024,
+            difficulty=QuestionDifficulty.DIFICIL,
+            statement=(
+                "Acerca do texto 1A1-I, assinale a opção correta, em relação à ortografia, à "
+                "acentuação, ao emprego do sinal indicativo de crase e aos processos de "
+                "formação de palavras."
+            ),
+            explanation=(
+                '"Psicológica" e "únicas" são proparoxítonas, categoria em que todo vocábulo '
+                "recebe acento gráfico obrigatoriamente — essa é a única alternativa que "
+                "descreve corretamente a regra de acentuação aplicável às duas palavras "
+                "citadas."
+            ),
+            alternatives=[
+                (
+                    "A",
+                    '\u201cpré-modernos\u201d (quarto período) é formado por composição por justaposição.',
+                    False,
+                ),
+                (
+                    "B",
+                    'A inserção do sinal indicativo de crase no "a" de "a situações" (primeiro '
+                    "período) manteria a correção gramatical e o sentido original do texto.",
+                    False,
+                ),
+                (
+                    "C",
+                    '\u201cdiretamente\u201d (primeiro período) é um advérbio formado por derivação '
+                    "parassintética.",
+                    False,
+                ),
+                (
+                    "D",
+                    'Os vocábulos "diária" (terceiro período) e "países" (quarto período) são '
+                    "acentuados de acordo com a mesma regra de acentuação.",
+                    False,
+                ),
+                (
+                    "E",
+                    'Os vocábulos "psicológica" (primeiro período) e "únicas" (segundo período) '
+                    "são proparoxítonos e por isso recebem acento agudo.",
+                    True,
+                ),
+            ],
+            created_by=admin.id,
+        )
+
+        # 4) Prof NU Jr (ITAIPU)/ITAIPU/Advogado/2024 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_itaipu_2024,
+            organization=itaipu,
+            year=2024,
+            difficulty=QuestionDifficulty.MEDIA,
+            statement=(
+                'Empregado no texto CB2A1, o vocábulo "eólica" acentua-se devido à mesma '
+                "regra de acentuação que determina o emprego do acento na palavra"
+            ),
+            explanation=(
+                '"Eólica" e "pássaros" são ambas proparoxítonas, categoria acentuada '
+                "graficamente em todos os casos, sem exceção — é essa a regra comum entre as "
+                "duas."
+            ),
+            alternatives=[
+                ("A", "renovável.", False),
+                ("B", "elevará.", False),
+                ("C", "pássaros.", True),
+                ("D", "carvão.", False),
+                ("E", "ruído.", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 5) Aux (Pref Joinville)/Pref Joinville/Educador/2024 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_joinville_2024,
+            organization=pref_joinville,
+            year=2024,
+            difficulty=QuestionDifficulty.MEDIA,
+            statement=(
+                "Assinale a opção em que as palavras apresentas são acentuadas graficamente "
+                "porque são paroxítonas em que a vogal i ou u tônica forma hiato com a vogal "
+                "da sílaba anterior."
+            ),
+            explanation=(
+                '"Países" e "prejuízos" são paroxítonas em que o i/u tônico forma hiato com a '
+                "vogal anterior, recebendo acento por essa regra específica — diferente de "
+                '"incluído", "heróis" e "inúmeros", que seguem outras regras de acentuação.'
+            ),
+            alternatives=[
+                ("A", "\u201cincluído\u201d e \u201cinúmeros\u201d", False),
+                ("B", "\u201cpaíses\u201d e \u201cprejuízos\u201d", True),
+                ("C", "\u201cheróis\u201d e \u201cpaíses\u201d", False),
+                ("D", "\u201cprejuízos\u201d e \u201cheróis\u201d", False),
+                ("E", "\u201cinúmeros\u201d e \u201cconteúdos\u201d", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 6) Prof (Pref Camaçari)/Pref Camaçari/Língua Portuguesa/2024 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_camacari_2024,
+            organization=pref_camacari,
+            year=2024,
+            difficulty=QuestionDifficulty.MEDIA,
+            statement="São acentuadas devido à mesma regra ortográfica as palavras",
+            explanation=(
+                '"Linguística" e "indígena" são ambas proparoxítonas, acentuadas '
+                "graficamente pela mesma regra (toda proparoxítona é acentuada) — as demais "
+                "alternativas combinam palavras de categorias tônicas diferentes."
+            ),
+            alternatives=[
+                ("A", "bebês e cães.", False),
+                ("B", "também e direções.", False),
+                ("C", "identificável e telegráfico.", False),
+                ("D", "propósito e inteligíveis.", False),
+                ("E", "linguística e indígena.", True),
+            ],
+            created_by=admin.id,
+        )
+
+        # 7) Sold (CBM TO)/CBM TO/2023 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_cbm_to_2023,
+            organization=cbm_to,
+            year=2023,
+            difficulty=QuestionDifficulty.MEDIA,
+            statement=(
+                'No texto 2A1-I, o acento gráfico é o que simboliza a flexão de plural na '
+                "palavra"
+            ),
+            explanation=(
+                '"Têm" recebe acento circunflexo justamente para diferenciar a 3ª pessoa do '
+                'plural ("eles têm") da 3ª pessoa do singular ("ele tem") — é o chamado '
+                "acento diferencial de número, previsto para os verbos ter e vir e seus "
+                "derivados."
+            ),
+            alternatives=[
+                ("A", '\u201ctêm\u201d, em \u201ctêm um corpo e têm uma alma\u201d.', True),
+                ("B", '\u201cpôs\u201d, em \u201cpôs os pés no asfalto\u201d.', False),
+                ("C", '\u201cHá\u201d, em \u201cHá corpos perfeitos com almas feias\u201d.', False),
+                (
+                    "D",
+                    '\u201cartesãos\u201d, em \u201cviolinos rústicos fabricados por artesãos '
+                    "desconhecidos\u201d.",
+                    False,
+                ),
+            ],
+            created_by=admin.id,
+        )
+
+        # 8) Of (PM SC)/PM SC/2023 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_pm_sc_2023,
+            organization=pm_sc,
+            year=2023,
+            difficulty=QuestionDifficulty.DIFICIL,
+            statement=(
+                "No texto 1A9-I, são acentuados graficamente de acordo com a mesma regra de "
+                "acentuação gráfica os vocábulos\n"
+                "I \u201ccarcerária\u201d e \u201cestratégias\u201d.\n"
+                "II \u201cAlém\u201d e \u201cJá\u201d.\n"
+                "III \u201cpolítica\u201d e \u201cjurídicos\u201d.\n"
+                "IV \u201cé\u201d e \u201cà\u201d.\n"
+                "Estão certos apenas os itens"
+            ),
+            explanation=(
+                "Os itens I e III reúnem paroxítonas terminadas em ditongo/-a e "
+                "proparoxítonas acentuadas pela mesma lógica dentro de cada par; II e IV "
+                "misturam palavras cujo acento obedece a razões diferentes (acento "
+                "diferencial e monossílabos tônicos, por exemplo), não cabendo na mesma regra."
+            ),
+            alternatives=[
+                ("A", "I e III.", True),
+                ("B", "II e III.", False),
+                ("C", "II e IV.", False),
+                ("D", "I, II e IV.", False),
+                ("E", "I, III e IV.", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 9) PEB (SESI SP)/SESI SP/Grupo II/Língua Portuguesa/2023 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_sesi_sp_2023,
+            organization=sesi_sp,
+            year=2023,
+            difficulty=QuestionDifficulty.FACIL,
+            statement=(
+                'O vocábulo "parâmetros", presente no último parágrafo do texto 11A1, é '
+                "acentuado por ser uma palavra"
+            ),
+            explanation=(
+                '"Parâmetros" é proparoxítona (PA-RÂ-me-tros), categoria que recebe acento '
+                "gráfico obrigatoriamente em todos os casos, sem exceção."
+            ),
+            alternatives=[
+                ("A", "com sílaba tônica aberta.", False),
+                ("B", "paroxítona terminada em os.", False),
+                ("C", "oxítona terminada em os.", False),
+                ("D", "proparoxítona.", True),
+                ("E", "paroxítona terminada em s.", False),
+            ],
+            created_by=admin.id,
+        )
+
+        # 10) Dati Pol (PC RO)/PC RO/2022 — Acentuação
+        await create_question(
+            session,
+            discipline=portugues,
+            subject=acentuacao,
+            exam_board=cebraspe,
+            exam_edition=edicao_pc_ro_dati_pol_2022,
+            organization=pc_ro,
+            year=2022,
+            difficulty=QuestionDifficulty.DIFICIL,
+            statement=(
+                "Assinale a opção em que as palavras destacadas do texto são acentuadas "
+                "graficamente de acordo com a mesma regra de acentuação gráfica."
+            ),
+            explanation=(
+                '"Contribuíram" e "substituídos" são acentuadas pela mesma regra do hiato '
+                "tônico (i tônico formando hiato com a vogal anterior, seguido ou não de "
+                "-ram/-dos) — diferente das demais combinações, que misturam essa regra com a "
+                "de proparoxítonas ou paroxítonas terminadas em -l."
+            ),
+            alternatives=[
+                ("A", "\u201crentável\u201d e \u201cépoca\u201d", False),
+                ("B", "\u201csubstituídos\u201d e \u201cvários\u201d", False),
+                ("C", "\u201ccontribuíram\u201d e \u201ceconômico\u201d", False),
+                ("D", "\u201ccontribuíram\u201d e \u201csubstituídos\u201d", True),
+                ("E", "\u201ctambém\u201d e \u201chistórico\u201d", False),
             ],
             created_by=admin.id,
         )
 
         await session.commit()
 
-    print("Seed concluído.")
-    print("  Admin:  admin@focopolicial.com.br / Admin@123456")
-    print("  Aluno:  aluno@focopolicial.com.br / Aluno@123456")
+    print("Seed de questões de Português (CEBRASPE) concluído: 10 questões.")
 
 
 if __name__ == "__main__":
