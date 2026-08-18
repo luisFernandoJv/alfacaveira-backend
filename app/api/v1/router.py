@@ -23,6 +23,7 @@ from app.api.v1.platform.notifications import router as notifications_router
 from app.api.v1.analytics.user_stats import router as user_stats_router
 from app.api.v1.learning.notebooks import router as notebooks_router
 from app.api.v1.learning.flashcards import router as flashcards_router
+from app.api.v1.admin import router as admin_router
 
 api_router = APIRouter()
 
@@ -128,3 +129,5 @@ api_router.include_router(
     prefix="/flashcards",
     tags=["flashcards"],
 )
+
+api_router.include_router(admin_router, prefix="/admin", tags=["admin"])

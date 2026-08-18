@@ -8,7 +8,7 @@ outros contextos), por isso já carrega o plano com suas features via
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
@@ -347,3 +347,19 @@ class SubscriptionRepository(BaseRepository[Subscription]):
             )
             result = await self.session.execute(stmt)
             return list(result.scalars().unique().all())
+
+    async def mark_renewal_reminder_sent(self, subscription_id: uuid.UUID, now: datetime) -> None:
+        """Marca o lembrete de renovação como enviado para este período.
+
+        Movido de `SubscriptionHistoryRepository` (auditoria de lint,
+        2026-08-15): estava quebrado lá (módulo não importava `update`
+        nem `Subscription`) e é chamado em `subscription_renewal.py` sobre
+        a instância de `SubscriptionRepository`, não de
+        `SubscriptionHistoryRepository`.
+        """
+        stmt = (
+            update(Subscription)
+            .where(Subscription.id == subscription_id)
+            .values(renewal_reminder_sent_at=now)
+        )
+        await self.session.execute(stmt)

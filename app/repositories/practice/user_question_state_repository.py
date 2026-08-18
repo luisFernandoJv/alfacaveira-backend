@@ -43,6 +43,25 @@ class UserQuestionStateRepository(BaseRepository[UserQuestionState]):
         await self.session.flush()
         return result.scalar_one()
 
+    async def get_favorited_ids(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Subconjunto de `question_ids` que o usuário marcou como favorito.
+
+        ETAPA 3 (sessão 6): usado por `QuestionService.list_questions` para
+        preencher `is_favorite` na listagem, numa única query em lote (evita
+        N+1 — mesmo padrão de `QuestionRepository.list_by_ids`).
+        """
+        if not question_ids:
+            return set()
+        stmt = select(UserQuestionState.question_id).where(
+            UserQuestionState.user_id == user_id,
+            UserQuestionState.question_id.in_(question_ids),
+            UserQuestionState.is_favorite.is_(True),
+        )
+        result = await self.session.execute(stmt)
+        return set(result.scalars().all())
+
     async def list_favorites(
         self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
     ) -> list[UserQuestionState]:

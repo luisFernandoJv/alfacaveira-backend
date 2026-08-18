@@ -31,6 +31,15 @@ class ExamTemplateCreateRequest(BaseModel):
     question_count: int = Field(default=10, ge=1, le=100)
     time_limit_minutes: int | None = Field(default=None, ge=1)
     is_public: bool = False
+    # ETAPA (2026-08-15): suporta "Banco de Questões → Selecionar → Criar
+    # Simulado" (Fase 6 do roadmap). Quando informado, o molde usa
+    # exatamente essas questões (na ordem enviada) em vez de sortear por
+    # filtro — os demais filtros acima são ignorados nesse caso.
+    # `question_count`, se enviado, também é ignorado: o service usa
+    # `len(question_ids)`. Limite de 100 é o mesmo de `question_count`
+    # (`ge=1, le=100`), validado no service (lista, não permite bound direto
+    # no `Field` do jeito limpo que o `le` faz para `int`).
+    question_ids: list[uuid.UUID] | None = None
 
 
 class ExamTemplateListItem(BaseModel):

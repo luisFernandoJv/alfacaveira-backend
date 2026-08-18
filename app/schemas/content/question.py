@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import QuestionDifficulty, QuestionStatus
+from app.models.enums import QuestionAnswerStatus, QuestionDifficulty, QuestionStatus
 from app.schemas.content.exam_source import (
     ExamBoardResponse,
     ExamEditionResponse,
@@ -147,6 +147,16 @@ class QuestionListItem(BaseModel):
     status: QuestionStatus
     tags: list[QuestionTagResponse]
     created_at: datetime
+
+    # ETAPA 3 (sessão 6): estado do usuário autenticado para esta questão.
+    # Não são colunas de `Question` — `QuestionService.list_questions`
+    # calcula em lote (a partir de `UserQuestionState`/`QuestionAttempt`) e
+    # atribui como atributo transiente no objeto ORM antes de serializar.
+    # Default aqui é só uma rede de segurança para o caso (não esperado) de
+    # o atributo não ter sido setado; a fonte de verdade é sempre o cálculo
+    # do service.
+    is_favorite: bool = False
+    answer_status: QuestionAnswerStatus = QuestionAnswerStatus.NAO_RESPONDIDA
 
 
 class QuestionDetailResponse(BaseModel):

@@ -11,10 +11,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
+from app.schemas.platform.question_report import QuestionReportCreateRequest, QuestionReportResponse
+from app.services.platform.question_report_service import QuestionReportService
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
-from app.models.enums import QuestionDifficulty, QuestionStatus
+from app.models.enums import QuestionAnswerStatus, QuestionDifficulty, QuestionStatus
 from app.repositories.content.question_repository import QuestionFilters
 from app.schemas.content.question import (
     QuestionCreateRequest,
@@ -38,7 +41,7 @@ QuestionServiceDep = Annotated[QuestionService, Depends(get_question_service)]
 
 @router.get("", response_model=Envelope[list[QuestionListItem]])
 async def list_questions(
-    _current_user: CurrentUser,
+    current_user: CurrentUser,
     question_service: QuestionServiceDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: Annotated[str | None, Query()] = None,
@@ -55,6 +58,14 @@ async def list_questions(
     question_status: Annotated[
         QuestionStatus | None, Query(alias="status")
     ] = QuestionStatus.PUBLICADA,
+    answer_status: Annotated[
+        QuestionAnswerStatus | None,
+        Query(description="Filtra pelo status de resposta do usuário autenticado."),
+    ] = None,
+    favorite_only: Annotated[
+        bool | None,
+        Query(description="Se true, retorna somente questões favoritadas pelo usuário autenticado."),
+    ] = None,
 ) -> Envelope[list[QuestionListItem]]:
     page = CursorPage(limit=limit, cursor=cursor)
     decoded_cursor = page.decode_cursor()
@@ -72,17 +83,24 @@ async def list_questions(
         status=question_status,
         tag_id=tag_id,
         search=search,
+        answer_status=answer_status,
+        favorite_only=favorite_only,
     )
     questions = await question_service.list_questions(
-        limit=limit, cursor_id=cursor_id, filters=filters
+        limit=limit, cursor_id=cursor_id, filters=filters, user_id=current_user.id
     )
+    # Contagem total filtrada (sem paginar), para o contador em tempo real
+    # do Banco de Questões ("N questões encontradas"). Sequencial de
+    # propósito — mesma `AsyncSession`, que não é concorrente (ver
+    # `QuestionService._session_gather`).
+    total = await question_service.count_questions(filters=filters, user_id=current_user.id)
     next_cursor = (
         CursorPage.encode_cursor(str(questions[-1].id)) if len(questions) == limit else None
     )
 
     return Envelope(
         data=[QuestionListItem.model_validate(q) for q in questions],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None, total=total),
     )
 
 
@@ -137,3 +155,20 @@ async def delete_question(
     question_service: QuestionServiceDep,
 ) -> None:
     await question_service.delete_question(question_id, admin.id)
+
+
+@router.post(
+    "/{question_id}/report",
+    response_model=Envelope[QuestionReportResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def report_question(
+    question_id: uuid.UUID,
+    body: QuestionReportCreateRequest,
+    current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Envelope[QuestionReportResponse]:
+    """Reporta um problema em uma questão."""
+    service = QuestionReportService(session)
+    report = await service.create_report(current_user.id, question_id, body)
+    return Envelope(data=QuestionReportResponse.model_validate(report))

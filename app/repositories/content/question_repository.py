@@ -4,6 +4,26 @@ Listagem pública filtrável + busca full-text, paginação cursor-based (mesmo
 padrão de `UserRepository.list_paginated`, Etapa 6) e carregamento antecipado
 (`selectinload`) das relações usadas pelos schemas de resposta, para evitar
 N+1 nas listagens.
+
+ETAPA 4 (auditoria Banco de Questões, 2026-08-14): `answer_status` (certas/
+erradas/não respondidas) migrou de filtro client-side (`hooks/
+use-question-filters.ts` no frontend) para filtro real de servidor, via
+subquery contra `question_attempts` — mesma semântica já usada em
+`QuestionAttemptRepository.get_correct_status_map` (bool_or por questão:
+acertou se acertou em QUALQUER tentativa). `favorite` continua client-side
+nesta etapa — não migrado junto por depender de estado otimista no
+frontend (ver comentário em `use-question-filters.ts`); registrado como
+próxima dívida, não implementado aqui para não misturar duas mudanças de
+contrato numa unidade só.
+
+ETAPA 5 (2026-08-14): `favorite_only` ("somente favoritos") migrado de
+filtro client-side para filtro real de servidor, via subquery contra
+`user_question_states` — mesmo padrão de `answer_status` (ETAPA 4). O
+estado otimista do clique na estrela (`hooks/use-favorites.ts`) NÃO foi
+tocado: a estrela continua respondendo instantaneamente porque reflete
+`favoriteIds` local, independente desta query. Só a LISTA filtrada por
+"somente favoritos" passou a vir do backend (corrige a limitação anterior
+de só filtrar dentro da página já carregada).
 """
 
 import uuid
@@ -13,7 +33,9 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import selectinload
 
 from app.models.content.question import Question
-from app.models.enums import QuestionDifficulty, QuestionStatus
+from app.models.enums import QuestionAnswerStatus, QuestionDifficulty, QuestionStatus
+from app.models.practice.question_attempt import QuestionAttempt
+from app.models.practice.user_question_state import UserQuestionState
 from app.repositories.base import BaseRepository
 
 _RELATIONS = (
@@ -43,6 +65,15 @@ class QuestionFilters:
     status: QuestionStatus | None = None
     tag_id: uuid.UUID | None = None
     search: str | None = None
+    # ETAPA 4: filtro real de servidor por status de resposta do usuário
+    # autenticado. Exige `user_id` — sem ele, o filtro é ignorado (ver
+    # `_apply_filters`), igual ao comportamento anterior (sem filtro).
+    answer_status: QuestionAnswerStatus | None = None
+    # ETAPA 5: filtro real de servidor por "somente favoritos" do usuário
+    # autenticado. Mesma regra de `answer_status`: exige `user_id`, senão é
+    # ignorado.
+    favorite_only: bool | None = None
+    user_id: uuid.UUID | None = None
 
 
 class QuestionRepository(BaseRepository[Question]):
@@ -77,6 +108,33 @@ class QuestionRepository(BaseRepository[Question]):
             stmt = stmt.where(
                 Question.search_vector.op("@@")(func.plainto_tsquery("portuguese", filters.search))
             )
+        if filters.answer_status is not None and filters.user_id is not None:
+            if filters.answer_status == QuestionAnswerStatus.NAO_RESPONDIDA:
+                answered_subq = select(QuestionAttempt.question_id).where(
+                    QuestionAttempt.user_id == filters.user_id,
+                )
+                stmt = stmt.where(Question.id.notin_(answered_subq))
+            else:
+                # Mesma semântica de `QuestionAttemptRepository.get_correct_status_map`:
+                # "acertou" = acertou em QUALQUER tentativa; "errou" = tem
+                # tentativa(s), mas nunca acertou.
+                correct_target = filters.answer_status == QuestionAnswerStatus.ACERTOU
+                status_subq = (
+                    select(QuestionAttempt.question_id)
+                    .where(QuestionAttempt.user_id == filters.user_id)
+                    .group_by(QuestionAttempt.question_id)
+                    .having(func.bool_or(QuestionAttempt.is_correct).is_(correct_target))
+                )
+                stmt = stmt.where(Question.id.in_(status_subq))
+        if filters.favorite_only and filters.user_id is not None:
+            # Mesmo índice parcial já usado por `UserQuestionStateRepository
+            # .list_favorites`/`get_favorited_ids` (`ix_uqs_favorites`,
+            # `WHERE is_favorite = true`) — não precisa de índice novo.
+            favorite_subq = select(UserQuestionState.question_id).where(
+                UserQuestionState.user_id == filters.user_id,
+                UserQuestionState.is_favorite.is_(True),
+            )
+            stmt = stmt.where(Question.id.in_(favorite_subq))
         return stmt
 
     async def get_with_relations(self, question_id: uuid.UUID) -> Question | None:
@@ -95,6 +153,22 @@ class QuestionRepository(BaseRepository[Question]):
         stmt = select(Question).where(Question.id.in_(question_ids)).options(*_RELATIONS)
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+
+    async def count(self, filters: QuestionFilters) -> int:
+        """Conta questões que casam com os filtros, sem paginar.
+
+        Reaproveita `_apply_filters` — mesmo WHERE de `list_paginated`,
+        trocando `SELECT *` por `func.count()`, então não carrega linhas,
+        só a contagem. Usado para alimentar `meta.total` em
+        `GET /api/v1/questions` (contador em tempo real no Banco de
+        Questões). Ver `06_QUESTIONS_ENGINE.md` §4, opção (a) — reavaliar
+        com `EXPLAIN ANALYZE` se a listagem ficar lenta com o crescimento
+        da tabela.
+        """
+        stmt = select(func.count(Question.id))
+        stmt = self._apply_filters(stmt, filters)  # type: ignore[arg-type]
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def list_random(self, filters: QuestionFilters, limit: int) -> list[Question]:
         """Seleciona até `limit` questões aleatórias que casam com os filtros.

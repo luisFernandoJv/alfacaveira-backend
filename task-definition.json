@@ -1,0 +1,61 @@
+{
+  "family": "concurso-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::240462142513:role/concurso-ecs-execution-role",
+  "runtimePlatform": {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "concurso-backend",
+      "image": "240462142513.dkr.ecr.sa-east-1.amazonaws.com/concurso-backend:latest",
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp" }
+      ],
+      "essential": true,
+      "environment": [
+        { "name": "APP_ENV", "value": "production" },
+        { "name": "DEBUG", "value": "false" },
+        { "name": "API_V1_PREFIX", "value": "/api/v1" },
+        { "name": "JWT_ALGORITHM", "value": "HS256" },
+        { "name": "ACCESS_TOKEN_EXPIRE_MINUTES", "value": "15" },
+        { "name": "REFRESH_TOKEN_EXPIRE_DAYS", "value": "30" },
+        { "name": "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "value": "60" },
+        { "name": "FRONTEND_URL", "value": "https://placeholder.amplifyapp.com" },
+        { "name": "CORS_ORIGINS", "value": "[\"https://placeholder.amplifyapp.com\"]" },
+        { "name": "EMAIL_DRIVER", "value": "console" },
+        { "name": "RATE_LIMIT_PER_MINUTE", "value": "60" },
+        { "name": "RATE_LIMIT_LOGIN_PER_MINUTE", "value": "5" },
+        { "name": "RATE_LIMIT_REGISTER_PER_MINUTE", "value": "5" },
+        { "name": "RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE", "value": "3" },
+        { "name": "RATE_LIMIT_RESET_PASSWORD_PER_MINUTE", "value": "5" },
+        { "name": "RATE_LIMIT_BILLING_PER_MINUTE", "value": "20" },
+        { "name": "RATE_LIMIT_FAIL_OPEN", "value": "true" },
+        { "name": "PAYMENT_GATEWAY_DRIVER", "value": "console" },
+        { "name": "SCHEDULER_ENABLED", "value": "true" },
+        { "name": "SCHEDULER_LOCK_TTL_SECONDS", "value": "300" },
+        { "name": "ANALYTICS_AGGREGATOR_ENABLED", "value": "true" },
+        { "name": "ANALYTICS_AGGREGATOR_INTERVAL_MINUTES", "value": "10" },
+        { "name": "ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC", "value": "3" },
+        { "name": "ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS", "value": "30" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:sa-east-1:240462142513:secret:concurso/prod/database-url-iVjutA:DATABASE_URL::" },
+        { "name": "JWT_SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:sa-east-1:240462142513:secret:concurso/prod/jwt-secret-key-ClLLlb:JWT_SECRET_KEY::" },
+        { "name": "REDIS_URL", "valueFrom": "arn:aws:secretsmanager:sa-east-1:240462142513:secret:concurso/prod/redis-url-Ryy7DI:REDIS_URL::" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/concurso-backend",
+          "awslogs-region": "sa-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

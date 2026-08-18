@@ -33,6 +33,34 @@ class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_correct_status_map(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, bool]:
+        """Para cada `question_id` de `question_ids` já respondido pelo
+        usuário, indica se ele acertou em ALGUMA tentativa (`True`) ou só
+        errou em todas (`False`). Questões ausentes do dict não foram
+        respondidas.
+
+        ETAPA 3 (sessão 6): usado por `QuestionService.list_questions` para
+        preencher `answer_status` na listagem, numa única query agregada em
+        lote (evita N+1).
+        """
+        if not question_ids:
+            return {}
+        stmt = (
+            select(
+                QuestionAttempt.question_id,
+                func.bool_or(QuestionAttempt.is_correct),
+            )
+            .where(
+                QuestionAttempt.user_id == user_id,
+                QuestionAttempt.question_id.in_(question_ids),
+            )
+            .group_by(QuestionAttempt.question_id)
+        )
+        result = await self.session.execute(stmt)
+        return {row[0]: bool(row[1]) for row in result.all()}
+
     async def count_answered_today(
         self, user_id: uuid.UUID, session_type: SessionType
     ) -> int:

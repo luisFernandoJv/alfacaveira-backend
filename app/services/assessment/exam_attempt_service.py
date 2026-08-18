@@ -72,8 +72,19 @@ class ExamAttemptService:
         if template is None or not (template.is_public or template.created_by == user_id):
             raise NotFoundError("Molde de simulado não encontrado.")
 
-        filters = _filters_from_snapshot(template.filters_snapshot)
-        questions = await self._questions.list_random(filters, limit=template.question_count)
+        # ETAPA (2026-08-15): molde criado a partir de uma seleção explícita
+        # do Banco de Questões (`ExamTemplateCreateRequest.question_ids`)
+        # usa exatamente essas questões, na ordem em que foram selecionadas
+        # — não sorteia por filtro. Ver `exam_template_service._filters_snapshot`.
+        selected_ids = template.filters_snapshot.get("question_ids")
+        if selected_ids:
+            ids = [uuid.UUID(str(value)) for value in selected_ids]
+            by_id = {question.id: question for question in await self._questions.list_by_ids(ids)}
+            questions = [by_id[qid] for qid in ids if qid in by_id]
+        else:
+            filters = _filters_from_snapshot(template.filters_snapshot)
+            questions = await self._questions.list_random(filters, limit=template.question_count)
+
         if not questions:
             raise NotFoundError("Nenhuma questão encontrada para os filtros do molde.")
 

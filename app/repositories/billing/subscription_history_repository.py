@@ -8,7 +8,7 @@ necessário nem deve ser adicionado aqui.
 import uuid
 
 from sqlalchemy import select
-from datetime import datetime
+
 from app.models.billing.subscription_history import SubscriptionHistory
 from app.repositories.base import BaseRepository
 
@@ -57,13 +57,3 @@ class SubscriptionHistoryRepository(BaseRepository[SubscriptionHistory]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
-
-
-    async def mark_renewal_reminder_sent(self, subscription_id: uuid.UUID, now: datetime) -> None:
-        """Marca o lembrete como enviado para este período."""
-        stmt = (
-            update(Subscription)
-            .where(Subscription.id == subscription_id)
-            .values(renewal_reminder_sent_at=now)
-        )
-        await self.session.execute(stmt)

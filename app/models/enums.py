@@ -16,6 +16,22 @@ class QuestionStatus(str, enum.Enum):
     DESATIVADA = "desativada"
 
 
+class QuestionAnswerStatus(str, enum.Enum):
+    """Status de resposta do usuário autenticado para uma questão.
+
+    ETAPA 3 (sessão 6): usado só na listagem pública (`QuestionListItem`),
+    calculado por usuário a partir de `QuestionAttempt` — não é uma coluna
+    de `Question`. Valores espelham exatamente `AnswerStatus` do frontend
+    (`config/questions.ts`), incluindo o hífen em "nao-respondida" — não
+    são um enum Python "bonito" de propósito, para não precisar de
+    tradução na borda.
+    """
+
+    NAO_RESPONDIDA = "nao-respondida"
+    ACERTOU = "acertou"
+    ERROU = "errou"
+
+
 class QuestionRevisionType(str, enum.Enum):
     CRIACAO = "criacao"
     EDICAO = "edicao"
@@ -195,3 +211,11 @@ class NotificationStatus(str, enum.Enum):
     UNREAD = "unread"
     READ = "read"
     ARCHIVED = "archived"
+
+
+class QuestionReportReason(str, enum.Enum):
+    ENUNCIADO = "enunciado"
+    GABARITO = "gabarito"
+    DUPLICADA = "duplicada"
+    CLASSIFICACAO = "classificacao"
+    OUTRO = "outro"

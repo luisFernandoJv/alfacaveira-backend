@@ -36,21 +36,11 @@ def upgrade() -> None:
     )
     """)
 
-    # Criar índices
-    op.execute("""
-    CREATE INDEX IF NOT EXISTS ix_notifications_user_id_status 
-    ON notifications(user_id, status)
-    """)
-    
-    op.execute("""
-    CREATE INDEX IF NOT EXISTS ix_notifications_user_id_created_at 
-    ON notifications(user_id, created_at DESC)
-    """)
-    
-    op.execute("""
-    CREATE INDEX IF NOT EXISTS ix_notifications_type 
-    ON notifications(type)
-    """)
+    # Índices movidos para a migration 0019_fix_notifications_schema,
+    # que garante que as colunas existem antes de criar os índices
+    # (a tabela `notifications` pode já existir previamente com
+    # schema diferente, tornando o CREATE TABLE IF NOT EXISTS acima
+    # um no-op).
 
 
 def downgrade() -> None:
