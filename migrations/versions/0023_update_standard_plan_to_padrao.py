@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 
 # Identificadores da revisão (Alembic)
-revision: str = '0023_update_standard_plan_to_padrao'
+revision: str = '0023_update_padrao'
 down_revision: Union[str, None] = '0022_add_question_reports'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
