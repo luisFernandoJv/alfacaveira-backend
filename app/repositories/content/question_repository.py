@@ -27,7 +27,7 @@ de só filtrar dentro da página já carregada).
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import selectinload
@@ -169,6 +169,27 @@ class QuestionRepository(BaseRepository[Question]):
         stmt = self._apply_filters(stmt, filters)  # type: ignore[arg-type]
         result = await self.session.execute(stmt)
         return result.scalar_one()
+
+    async def facet_counts(
+        self, dimension: str, filters: QuestionFilters
+    ) -> list[tuple[object, int]]:
+        """Contagem agregada de `dimension` (ex.: `discipline_id`, `year`)
+        dentro do universo definido pelos filtros ATUAIS, exceto o próprio
+        filtro de `dimension` (mesma semântica de facetas do Explorer:
+        "se eu trocar só esta dimensão, quantas questões cada opção teria").
+
+        Reaproveita `_apply_filters` (mesmo WHERE de `list_paginated`/`count`)
+        — só troca `SELECT *` por `SELECT dimension, count(*) ... GROUP BY
+        dimension`, então continua sem N+1 e sem trazer linhas de `Question`
+        pra memória. Ver `QUESTOES_ENGINE_AUDIT.md` §5/§9 — este é o método
+        que sustenta `GET /questions/facets`.
+        """
+        scoped_filters = replace(filters, **{dimension: None})
+        dim_col = getattr(Question, dimension)
+        stmt = select(dim_col, func.count(Question.id)).group_by(dim_col)
+        stmt = self._apply_filters(stmt, scoped_filters)  # type: ignore[arg-type]
+        result = await self.session.execute(stmt)
+        return [(value, count) for value, count in result.all() if value is not None]
 
     async def list_random(self, filters: QuestionFilters, limit: int) -> list[Question]:
         """Seleciona até `limit` questões aleatórias que casam com os filtros.

@@ -22,6 +22,7 @@ from app.repositories.content.question_repository import QuestionFilters
 from app.schemas.content.question import (
     QuestionCreateRequest,
     QuestionDetailResponse,
+    QuestionFacetsResponse,
     QuestionListItem,
     QuestionStatusUpdateRequest,
     QuestionUpdateRequest,
@@ -102,6 +103,60 @@ async def list_questions(
         data=[QuestionListItem.model_validate(q) for q in questions],
         meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None, total=total),
     )
+
+
+@router.get("/facets", response_model=Envelope[QuestionFacetsResponse])
+async def get_question_facets(
+    current_user: CurrentUser,
+    question_service: QuestionServiceDep,
+    discipline_id: Annotated[uuid.UUID | None, Query()] = None,
+    subject_id: Annotated[uuid.UUID | None, Query()] = None,
+    topic_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_board_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_edition_id: Annotated[uuid.UUID | None, Query()] = None,
+    organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    year: Annotated[int | None, Query()] = None,
+    difficulty: Annotated[QuestionDifficulty | None, Query()] = None,
+    tag_id: Annotated[uuid.UUID | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    question_status: Annotated[
+        QuestionStatus | None, Query(alias="status")
+    ] = QuestionStatus.PUBLICADA,
+    answer_status: Annotated[
+        QuestionAnswerStatus | None,
+        Query(description="Filtra pelo status de resposta do usuário autenticado."),
+    ] = None,
+    favorite_only: Annotated[
+        bool | None,
+        Query(description="Se true, calcula facetas só sobre questões favoritadas."),
+    ] = None,
+) -> Envelope[QuestionFacetsResponse]:
+    """Contagem por opção de cada dimensão de filtro, dentro do universo já
+    filtrado — alimenta os números ao lado de cada opção no painel de
+    filtros do Explorer (`filters-panel.tsx` / `use-questions-api.ts`).
+
+    Aceita exatamente os mesmos filtros de `GET /questions` (exceto
+    paginação/ordenação, que não fazem sentido para uma agregação). Rota
+    declarada ANTES de `/{question_id}` de propósito — caso contrário
+    `"facets"` seria capturado como um `question_id` inválido.
+    """
+    filters = QuestionFilters(
+        discipline_id=discipline_id,
+        subject_id=subject_id,
+        topic_id=topic_id,
+        exam_board_id=exam_board_id,
+        exam_edition_id=exam_edition_id,
+        organization_id=organization_id,
+        year=year,
+        difficulty=difficulty,
+        status=question_status,
+        tag_id=tag_id,
+        search=search,
+        answer_status=answer_status,
+        favorite_only=favorite_only,
+    )
+    facets = await question_service.get_facets(filters=filters, user_id=current_user.id)
+    return Envelope(data=QuestionFacetsResponse.model_validate(facets))
 
 
 @router.get("/{question_id}", response_model=Envelope[QuestionDetailResponse])

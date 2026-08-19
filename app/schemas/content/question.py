@@ -181,3 +181,32 @@ class QuestionDetailResponse(BaseModel):
     tags: list[QuestionTagResponse]
     created_at: datetime
     updated_at: datetime
+
+
+class FacetBucket(BaseModel):
+    """Uma opção de uma dimensão de faceta + quantas questões ela teria,
+    dentro dos filtros já aplicados (exceto o filtro da própria dimensão)."""
+
+    id: str
+    count: int
+
+
+class QuestionFacetsResponse(BaseModel):
+    """Resposta de `GET /questions/facets`.
+
+    `total` é a contagem com TODOS os filtros aplicados (igual a
+    `meta.total` de `GET /questions`). Cada lista de `FacetBucket` é
+    calculada com todos os filtros aplicados MENOS o da própria dimensão —
+    é o que permite ao frontend mostrar "Direito Penal (5.230)" ao lado de
+    uma opção ainda não selecionada, refletindo o que aconteceria se o
+    usuário a selecionasse.
+    """
+
+    total: int
+    discipline_id: list[FacetBucket]
+    subject_id: list[FacetBucket]
+    topic_id: list[FacetBucket]
+    exam_board_id: list[FacetBucket]
+    organization_id: list[FacetBucket]
+    year: list[FacetBucket]
+    difficulty: list[FacetBucket]

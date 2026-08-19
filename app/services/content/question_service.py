@@ -112,6 +112,43 @@ class QuestionService:
 
         return questions
 
+    # Dimensões facetáveis expostas por `GET /questions/facets`. Mantidas
+    # como tupla (não `QuestionFilters.__dataclass_fields__` genérico) de
+    # propósito — nem todo campo de filtro faz sentido como faceta (ex.:
+    # `search`/`answer_status`/`favorite_only` continuam sendo filtros
+    # aplicados normalmente ao universo, só não são "contados por opção").
+    FACET_DIMENSIONS = (
+        "discipline_id",
+        "subject_id",
+        "topic_id",
+        "exam_board_id",
+        "organization_id",
+        "year",
+        "difficulty",
+    )
+
+    async def get_facets(
+        self, filters: QuestionFilters, user_id: uuid.UUID | None = None
+    ) -> dict[str, object]:
+        """Total filtrado + contagem por opção de cada dimensão facetável.
+
+        Sequencial de propósito (mesma `AsyncSession`, não é concorrente —
+        ver `_session_gather`): 1 query de total + 1 query agregada por
+        dimensão. Nenhuma delas carrega linhas de `Question` pra memória.
+        """
+        filters.user_id = user_id
+        total = await self.count_questions(filters=filters, user_id=user_id)
+
+        facets: dict[str, list[dict[str, object]]] = {}
+        for dimension in self.FACET_DIMENSIONS:
+            rows = await self._questions.facet_counts(dimension, filters)
+            facets[dimension] = [
+                {"id": str(value.value if hasattr(value, "value") else value), "count": count}
+                for value, count in rows
+            ]
+
+        return {"total": total, **facets}
+
     async def count_questions(
         self, filters: QuestionFilters, user_id: uuid.UUID | None = None
     ) -> int:

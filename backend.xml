@@ -345,6 +345,7 @@ migrations/
     0021_fix_notebooks_schema.py
     0022_add_question_reports.py
     0023_update_standard_plan_to_padrao.py
+    0024_update_pro_plan_price.py
     00c71973182e_create_reviews_table.py
     087474b8bf9d_create_reviews_table.py
     09d28b1818f6_add_reviews_table.py
@@ -382,6 +383,7 @@ tests/
   integration/
     __init__.py
     conftest.py
+    test_daily_questions_quota_concurrency_postgres.py
     test_subscription_concurrency_postgres.py
   unit/
     billing/
@@ -10492,111 +10494,6 @@ from app.services.practice.training_session_service import TrainingSessionServic
 __all__ = ["QuestionAttemptService", "TrainingSessionService"]
 </file>
 
-<file path="app/services/practice/question_attempt_repository.py">
-"""Regras de negócio de tentativas de resposta (`QuestionAttempt`).
-
-Submeter uma resposta é sempre relativo a uma sessão existente (hoje, só
-`treino`; `simulado` reutilizará esta mesma tabela na Etapa 9 —
-`assessment`). Cada resposta atualiza o contador `correct_count` da sessão
-de forma atômica, junto com o registro de `QuestionAttempt`.
-"""
-
-import uuid
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError
-from app.database.uow import UnitOfWork
-from app.models.enums import FeatureKey, SessionType
-from app.models.practice.question_attempt import QuestionAttempt
-from app.repositories.content.question_repository import QuestionRepository
-from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
-from app.repositories.practice.training_session_repository import TrainingSessionRepository
-from app.schemas.practice.question_attempt import AnswerSubmitRequest
-from app.services.billing.feature_gate_service import FeatureGateService
-
-
-class QuestionAttemptService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._attempts = QuestionAttemptRepository(session)
-        self._questions = QuestionRepository(session)
-        self._sessions = TrainingSessionRepository(session)
-        self._feature_gate = FeatureGateService(session)
-
-    async def submit_training_answer(
-        self,
-        user_id: uuid.UUID,
-        session_id: uuid.UUID,
-        question_id: uuid.UUID,
-        data: AnswerSubmitRequest,
-    ) -> QuestionAttempt:
-        training_session = await self._sessions.get_with_questions(session_id)
-        if training_session is None or training_session.user_id != user_id:
-            raise NotFoundError("Sessão de treino não encontrada.")
-        if training_session.finished_at is not None:
-            raise ConflictError("Sessão já finalizada — não é possível responder.")
-        if not any(item.question_id == question_id for item in training_session.questions):
-            raise NotFoundError("Questão não pertence a esta sessão de treino.")
-
-        already_answered = await self._attempts.get_for_question_in_session(
-            user_id=user_id,
-            question_id=question_id,
-            session_type=SessionType.TREINO,
-            session_id=session_id,
-        )
-        if already_answered is not None:
-            raise ConflictError("Questão já respondida nesta sessão.")
-
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        question = await self._questions.get_with_relations(question_id)
-        if question is None:
-            raise NotFoundError("Questão não encontrada.")
-
-        selected_letter = None
-        if data.selected_alternative_id is not None:
-            selected = next(
-                (alt for alt in question.alternatives if alt.id == data.selected_alternative_id),
-                None,
-            )
-            if selected is None:
-                raise NotFoundError("Alternativa não encontrada para esta questão.")
-            selected_letter = selected.letter
-
-        is_correct = selected_letter == question.correct_alternative_letter
-
-        attempt = QuestionAttempt(
-            user_id=user_id,
-            question_id=question_id,
-            session_type=SessionType.TREINO,
-            session_id=session_id,
-            selected_alternative_id=data.selected_alternative_id,
-            is_correct=is_correct,
-            time_spent_seconds=data.time_spent_seconds,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._attempts.add(attempt)
-            if is_correct:
-                training_session.correct_count += 1
-                self._session.add(training_session)
-
-        return attempt
-
-    async def list_history(
-        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[QuestionAttempt]:
-        return await self._attempts.list_paginated(
-            user_id=user_id, limit=limit, cursor_id=cursor_id
-        )
-</file>
-
 <file path="app/services/practice/review_service.py">
 """Regras de negócio de revisões espaçadas."""
 
@@ -13697,6 +13594,51 @@ def downgrade() -> None:
     op.execute("DROP TYPE IF EXISTS question_report_reason")
 </file>
 
+<file path="migrations/versions/0024_update_pro_plan_price.py">
+"""update_pro_plan_price
+
+Corrige o preço oficial do plano Pro para R$ 59,90/mês (5990 centavos).
+
+Contexto: `0006_seed_billing_catalog` criou o Pro com `price_cents=4990`
+(R$ 49,90). A decisão comercial vigente (auditoria do funil Free/Padrão/
+Pro) fixa Pro em R$ 59,90/mês — mesmo padrão de correção pós-seed já usado
+por `0023_update_standard_plan_to_padrao` para o plano Padrão.
+
+Revision ID: 0024_update_pro_price
+Revises: 0023_update_padrao
+Create Date: 2026-08-18
+"""
+from typing import Sequence, Union
+
+from alembic import op
+
+# Identificadores da revisão (Alembic)
+revision: str = '0024_update_pro_price'
+down_revision: Union[str, None] = '0023_update_padrao'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.execute(
+        """
+        UPDATE plans
+        SET price_cents = 5990
+        WHERE slug = 'pro';
+        """
+    )
+
+
+def downgrade() -> None:
+    op.execute(
+        """
+        UPDATE plans
+        SET price_cents = 4990
+        WHERE slug = 'pro';
+        """
+    )
+</file>
+
 <file path="migrations/versions/00c71973182e_create_reviews_table.py">
 """create_reviews_table
 
@@ -16568,6 +16510,193 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
         yield session
     await outer_transaction.rollback()
     await connection.close()
+</file>
+
+<file path="tests/integration/test_daily_questions_quota_concurrency_postgres.py">
+"""Concorrência real contra Postgres para a quota diária `daily_questions`
+(Free = 5 questões/dia), fechando o item 29 da auditoria do funil comercial
+(Free/Padrão/Pro): o limite precisa ser seguro contra requisições
+simultâneas — duas respostas concorrentes não podem juntas furar o limite
+(5 -> 6/7).
+
+Mesmo padrão de `test_subscription_concurrency_postgres.py`: duas
+`AsyncSession` independentes, cada uma sua própria conexão do `db_engine`
+(não `db_session`, que roda numa única transação externa e não simula duas
+transações committadas de verdade), disputam a MESMA quota via
+`QuestionAttemptService.submit_training_answer` disparadas com
+`asyncio.gather`.
+
+A proteção é um `pg_advisory_xact_lock` por usuário dentro do mesmo
+`UnitOfWork` que faz a contagem + o insert do `QuestionAttempt` (ver
+`app/services/practice/question_attempt_repository.py`) — sob essa lock, a
+segunda chamada só conta depois que a primeira commitou, então já enxerga o
+attempt recém-inserido.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from app.core.exceptions import ForbiddenError
+from app.models.content.exam_source import ExamBoard
+from app.models.content.question import Question, QuestionAlternative
+from app.models.content.taxonomy import Discipline
+from app.models.enums import QuestionDifficulty, QuestionStatus, SessionType
+from app.models.identity.user import User
+from app.models.practice.question_attempt import QuestionAttempt
+from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
+from app.schemas.practice.question_attempt import AnswerSubmitRequest
+from app.security.password import hash_password
+from app.services.practice.question_attempt_repository import QuestionAttemptService
+
+pytestmark = pytest.mark.asyncio
+
+# Quota do plano Free (`daily_questions`), seedada por
+# `migrations/versions/0006_seed_billing_catalog.py`. Um usuário sem
+# assinatura ativa cai no Free por convenção (`FeatureGateService`).
+FREE_DAILY_QUESTIONS_LIMIT = 5
+
+
+def _session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+async def _seed_user_with_answered_questions(
+    session: AsyncSession, *, already_answered: int, extra_unanswered: int
+) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
+    """Cria um usuário Free (sem subscription) com `already_answered`
+    `QuestionAttempt`s já registrados HOJE, uma `TrainingSession` aberta e
+    `extra_unanswered` questões novas na sessão (uma por chamada
+    concorrente do teste). Retorna (user_id, session_id, question_ids das
+    ainda não respondidas).
+    """
+    now = datetime.now(UTC)
+
+    user = User(
+        email=f"{uuid.uuid4()}@teste.local",
+        password_hash=hash_password("senha-teste-123"),
+        full_name="Aluno Free de Teste",
+        is_active=True,
+    )
+    discipline = Discipline(name=f"Disciplina {uuid.uuid4()}", slug=f"disciplina-{uuid.uuid4()}")
+    exam_board = ExamBoard(
+        name=f"Banca {uuid.uuid4()}", acronym=str(uuid.uuid4())[:8], slug=f"banca-{uuid.uuid4()}"
+    )
+    session.add_all([user, discipline, exam_board])
+    await session.flush()
+
+    total_questions = already_answered + extra_unanswered
+    questions: list[Question] = []
+    for i in range(total_questions):
+        question = Question(
+            discipline_id=discipline.id,
+            exam_board_id=exam_board.id,
+            difficulty=QuestionDifficulty.MEDIA,
+            status=QuestionStatus.PUBLICADA,
+            statement=f"Enunciado de teste {i} — {uuid.uuid4()}",
+            correct_alternative_letter="A",
+        )
+        questions.append(question)
+    session.add_all(questions)
+    await session.flush()
+
+    for question in questions:
+        session.add(
+            QuestionAlternative(question_id=question.id, letter="A", text="Certa", is_correct=True)
+        )
+        session.add(
+            QuestionAlternative(question_id=question.id, letter="B", text="Errada", is_correct=False)
+        )
+    await session.flush()
+
+    training_session = TrainingSession(
+        user_id=user.id,
+        filters_snapshot={},
+        total_questions=total_questions,
+        started_at=now,
+    )
+    session.add(training_session)
+    await session.flush()
+
+    for position, question in enumerate(questions):
+        session.add(
+            TrainingSessionQuestion(session_id=training_session.id, question_id=question.id, position=position)
+        )
+    await session.flush()
+
+    # Registra as respostas "já dadas hoje" diretamente (sem passar pelo
+    # service — só queremos preencher `answered_today` até perto do limite).
+    for question in questions[:already_answered]:
+        session.add(
+            QuestionAttempt(
+                user_id=user.id,
+                question_id=question.id,
+                session_type=SessionType.TREINO,
+                session_id=training_session.id,
+                selected_alternative_id=None,
+                is_correct=False,
+            )
+        )
+    await session.commit()
+
+    unanswered_ids = [q.id for q in questions[already_answered:]]
+    return user.id, training_session.id, unanswered_ids
+
+
+async def _count_attempts_today(session: AsyncSession, user_id: uuid.UUID) -> int:
+    stmt = select(QuestionAttempt).where(QuestionAttempt.user_id == user_id)
+    result = await session.execute(stmt)
+    return len(result.scalars().all())
+
+
+class TestDailyQuestionsQuotaConcurrencyReal:
+    async def test_two_concurrent_answers_at_the_limit_only_one_succeeds(
+        self, db_engine: AsyncEngine
+    ) -> None:
+        """Usuário Free já respondeu 4/5 hoje. Duas respostas concorrentes
+        disputam a 5ª vaga — exatamente uma deve ser aceita (chegando a
+        5/5) e a outra deve ser bloqueada com `ForbiddenError` (limite
+        atingido), nunca as duas passando (o que furaria para 6/5).
+        """
+        factory = _session_factory(db_engine)
+        async with factory() as seed_session:
+            user_id, session_id, unanswered_ids = await _seed_user_with_answered_questions(
+                seed_session,
+                already_answered=FREE_DAILY_QUESTIONS_LIMIT - 1,
+                extra_unanswered=2,
+            )
+
+        async with factory() as s1, factory() as s2:
+            service_a = QuestionAttemptService(s1)
+            service_b = QuestionAttemptService(s2)
+
+            data = AnswerSubmitRequest(selected_alternative_id=None, time_spent_seconds=10)
+
+            results = await asyncio.gather(
+                service_a.submit_training_answer(user_id, session_id, unanswered_ids[0], data),
+                service_b.submit_training_answer(user_id, session_id, unanswered_ids[1], data),
+                return_exceptions=True,
+            )
+
+        successes = [r for r in results if not isinstance(r, Exception)]
+        failures = [r for r in results if isinstance(r, Exception)]
+
+        assert len(successes) == 1, "exatamente uma das duas respostas concorrentes deve ser aceita"
+        assert len(failures) == 1
+        assert isinstance(failures[0], ForbiddenError)
+
+        async with factory() as check_session:
+            total_today = await _count_attempts_today(check_session, user_id)
+        assert total_today == FREE_DAILY_QUESTIONS_LIMIT, (
+            "o total de respostas de hoje nunca pode ultrapassar o limite do plano Free "
+            f"(esperado {FREE_DAILY_QUESTIONS_LIMIT}, obtido {total_today})"
+        )
 </file>
 
 <file path="tests/integration/test_subscription_concurrency_postgres.py">
@@ -20786,6 +20915,7 @@ from app.repositories.content.question_repository import QuestionFilters
 from app.schemas.content.question import (
     QuestionCreateRequest,
     QuestionDetailResponse,
+    QuestionFacetsResponse,
     QuestionListItem,
     QuestionStatusUpdateRequest,
     QuestionUpdateRequest,
@@ -20866,6 +20996,60 @@ async def list_questions(
         data=[QuestionListItem.model_validate(q) for q in questions],
         meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None, total=total),
     )
+
+
+@router.get("/facets", response_model=Envelope[QuestionFacetsResponse])
+async def get_question_facets(
+    current_user: CurrentUser,
+    question_service: QuestionServiceDep,
+    discipline_id: Annotated[uuid.UUID | None, Query()] = None,
+    subject_id: Annotated[uuid.UUID | None, Query()] = None,
+    topic_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_board_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_edition_id: Annotated[uuid.UUID | None, Query()] = None,
+    organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    year: Annotated[int | None, Query()] = None,
+    difficulty: Annotated[QuestionDifficulty | None, Query()] = None,
+    tag_id: Annotated[uuid.UUID | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    question_status: Annotated[
+        QuestionStatus | None, Query(alias="status")
+    ] = QuestionStatus.PUBLICADA,
+    answer_status: Annotated[
+        QuestionAnswerStatus | None,
+        Query(description="Filtra pelo status de resposta do usuário autenticado."),
+    ] = None,
+    favorite_only: Annotated[
+        bool | None,
+        Query(description="Se true, calcula facetas só sobre questões favoritadas."),
+    ] = None,
+) -> Envelope[QuestionFacetsResponse]:
+    """Contagem por opção de cada dimensão de filtro, dentro do universo já
+    filtrado — alimenta os números ao lado de cada opção no painel de
+    filtros do Explorer (`filters-panel.tsx` / `use-questions-api.ts`).
+
+    Aceita exatamente os mesmos filtros de `GET /questions` (exceto
+    paginação/ordenação, que não fazem sentido para uma agregação). Rota
+    declarada ANTES de `/{question_id}` de propósito — caso contrário
+    `"facets"` seria capturado como um `question_id` inválido.
+    """
+    filters = QuestionFilters(
+        discipline_id=discipline_id,
+        subject_id=subject_id,
+        topic_id=topic_id,
+        exam_board_id=exam_board_id,
+        exam_edition_id=exam_edition_id,
+        organization_id=organization_id,
+        year=year,
+        difficulty=difficulty,
+        status=question_status,
+        tag_id=tag_id,
+        search=search,
+        answer_status=answer_status,
+        favorite_only=favorite_only,
+    )
+    facets = await question_service.get_facets(filters=filters, user_id=current_user.id)
+    return Envelope(data=QuestionFacetsResponse.model_validate(facets))
 
 
 @router.get("/{question_id}", response_model=Envelope[QuestionDetailResponse])
@@ -22151,7 +22335,7 @@ de só filtrar dentro da página já carregada).
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import selectinload
@@ -22293,6 +22477,27 @@ class QuestionRepository(BaseRepository[Question]):
         stmt = self._apply_filters(stmt, filters)  # type: ignore[arg-type]
         result = await self.session.execute(stmt)
         return result.scalar_one()
+
+    async def facet_counts(
+        self, dimension: str, filters: QuestionFilters
+    ) -> list[tuple[object, int]]:
+        """Contagem agregada de `dimension` (ex.: `discipline_id`, `year`)
+        dentro do universo definido pelos filtros ATUAIS, exceto o próprio
+        filtro de `dimension` (mesma semântica de facetas do Explorer:
+        "se eu trocar só esta dimensão, quantas questões cada opção teria").
+
+        Reaproveita `_apply_filters` (mesmo WHERE de `list_paginated`/`count`)
+        — só troca `SELECT *` por `SELECT dimension, count(*) ... GROUP BY
+        dimension`, então continua sem N+1 e sem trazer linhas de `Question`
+        pra memória. Ver `QUESTOES_ENGINE_AUDIT.md` §5/§9 — este é o método
+        que sustenta `GET /questions/facets`.
+        """
+        scoped_filters = replace(filters, **{dimension: None})
+        dim_col = getattr(Question, dimension)
+        stmt = select(dim_col, func.count(Question.id)).group_by(dim_col)
+        stmt = self._apply_filters(stmt, scoped_filters)  # type: ignore[arg-type]
+        result = await self.session.execute(stmt)
+        return [(value, count) for value, count in result.all() if value is not None]
 
     async def list_random(self, filters: QuestionFilters, limit: int) -> list[Question]:
         """Seleciona até `limit` questões aleatórias que casam com os filtros.
@@ -23237,6 +23442,35 @@ class QuestionDetailResponse(BaseModel):
     tags: list[QuestionTagResponse]
     created_at: datetime
     updated_at: datetime
+
+
+class FacetBucket(BaseModel):
+    """Uma opção de uma dimensão de faceta + quantas questões ela teria,
+    dentro dos filtros já aplicados (exceto o filtro da própria dimensão)."""
+
+    id: str
+    count: int
+
+
+class QuestionFacetsResponse(BaseModel):
+    """Resposta de `GET /questions/facets`.
+
+    `total` é a contagem com TODOS os filtros aplicados (igual a
+    `meta.total` de `GET /questions`). Cada lista de `FacetBucket` é
+    calculada com todos os filtros aplicados MENOS o da própria dimensão —
+    é o que permite ao frontend mostrar "Direito Penal (5.230)" ao lado de
+    uma opção ainda não selecionada, refletindo o que aconteceria se o
+    usuário a selecionasse.
+    """
+
+    total: int
+    discipline_id: list[FacetBucket]
+    subject_id: list[FacetBucket]
+    topic_id: list[FacetBucket]
+    exam_board_id: list[FacetBucket]
+    organization_id: list[FacetBucket]
+    year: list[FacetBucket]
+    difficulty: list[FacetBucket]
 </file>
 
 <file path="app/schemas/identity/__init__.py">
@@ -24342,6 +24576,43 @@ class QuestionService:
                 question.answer_status = QuestionAnswerStatus.ERROU
 
         return questions
+
+    # Dimensões facetáveis expostas por `GET /questions/facets`. Mantidas
+    # como tupla (não `QuestionFilters.__dataclass_fields__` genérico) de
+    # propósito — nem todo campo de filtro faz sentido como faceta (ex.:
+    # `search`/`answer_status`/`favorite_only` continuam sendo filtros
+    # aplicados normalmente ao universo, só não são "contados por opção").
+    FACET_DIMENSIONS = (
+        "discipline_id",
+        "subject_id",
+        "topic_id",
+        "exam_board_id",
+        "organization_id",
+        "year",
+        "difficulty",
+    )
+
+    async def get_facets(
+        self, filters: QuestionFilters, user_id: uuid.UUID | None = None
+    ) -> dict[str, object]:
+        """Total filtrado + contagem por opção de cada dimensão facetável.
+
+        Sequencial de propósito (mesma `AsyncSession`, não é concorrente —
+        ver `_session_gather`): 1 query de total + 1 query agregada por
+        dimensão. Nenhuma delas carrega linhas de `Question` pra memória.
+        """
+        filters.user_id = user_id
+        total = await self.count_questions(filters=filters, user_id=user_id)
+
+        facets: dict[str, list[dict[str, object]]] = {}
+        for dimension in self.FACET_DIMENSIONS:
+            rows = await self._questions.facet_counts(dimension, filters)
+            facets[dimension] = [
+                {"id": str(value.value if hasattr(value, "value") else value), "count": count}
+                for value, count in rows
+            ]
+
+        return {"total": total, **facets}
 
     async def count_questions(
         self, filters: QuestionFilters, user_id: uuid.UUID | None = None
@@ -25665,6 +25936,125 @@ class NotebookService:
         async with UnitOfWork(self._session):
             result = await self._questions.bulk_create(target_notebook_id, to_add)
         return result
+</file>
+
+<file path="app/services/practice/question_attempt_repository.py">
+"""Regras de negócio de tentativas de resposta (`QuestionAttempt`).
+
+Submeter uma resposta é sempre relativo a uma sessão existente (hoje, só
+`treino`; `simulado` reutilizará esta mesma tabela na Etapa 9 —
+`assessment`). Cada resposta atualiza o contador `correct_count` da sessão
+de forma atômica, junto com o registro de `QuestionAttempt`.
+"""
+
+import uuid
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError
+from app.database.uow import UnitOfWork
+from app.models.enums import FeatureKey, SessionType
+from app.models.practice.question_attempt import QuestionAttempt
+from app.repositories.content.question_repository import QuestionRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.schemas.practice.question_attempt import AnswerSubmitRequest
+from app.services.billing.feature_gate_service import FeatureGateService
+
+
+class QuestionAttemptService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._attempts = QuestionAttemptRepository(session)
+        self._questions = QuestionRepository(session)
+        self._sessions = TrainingSessionRepository(session)
+        self._feature_gate = FeatureGateService(session)
+
+    async def submit_training_answer(
+        self,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        question_id: uuid.UUID,
+        data: AnswerSubmitRequest,
+    ) -> QuestionAttempt:
+        training_session = await self._sessions.get_with_questions(session_id)
+        if training_session is None or training_session.user_id != user_id:
+            raise NotFoundError("Sessão de treino não encontrada.")
+        if training_session.finished_at is not None:
+            raise ConflictError("Sessão já finalizada — não é possível responder.")
+        if not any(item.question_id == question_id for item in training_session.questions):
+            raise NotFoundError("Questão não pertence a esta sessão de treino.")
+
+        already_answered = await self._attempts.get_for_question_in_session(
+            user_id=user_id,
+            question_id=question_id,
+            session_type=SessionType.TREINO,
+            session_id=session_id,
+        )
+        if already_answered is not None:
+            raise ConflictError("Questão já respondida nesta sessão.")
+
+        question = await self._questions.get_with_relations(question_id)
+        if question is None:
+            raise NotFoundError("Questão não encontrada.")
+
+        selected_letter = None
+        if data.selected_alternative_id is not None:
+            selected = next(
+                (alt for alt in question.alternatives if alt.id == data.selected_alternative_id),
+                None,
+            )
+            if selected is None:
+                raise NotFoundError("Alternativa não encontrada para esta questão.")
+            selected_letter = selected.letter
+
+        is_correct = selected_letter == question.correct_alternative_letter
+
+        attempt = QuestionAttempt(
+            user_id=user_id,
+            question_id=question_id,
+            session_type=SessionType.TREINO,
+            session_id=session_id,
+            selected_alternative_id=data.selected_alternative_id,
+            is_correct=is_correct,
+            time_spent_seconds=data.time_spent_seconds,
+        )
+
+        async with UnitOfWork(self._session):
+            # Lock consultivo do Postgres, escopado à transação (liberado
+            # automaticamente no commit/rollback do `UnitOfWork`), serializando
+            # submissões concorrentes do MESMO usuário. Sem isso, duas
+            # requisições simultâneas podem ambas ler `answered_today=4` antes
+            # de qualquer uma inserir seu `QuestionAttempt`, e as duas passam
+            # no `assert_within_quota` — furando o limite diário (ex.: 5 -> 7).
+            # Com o lock, a segunda requisição só executa sua contagem depois
+            # que a primeira commita, então já enxerga o attempt recém-inserido.
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": f"daily_questions_quota:{user_id}"},
+            )
+
+            answered_today = await self._attempts.count_answered_today(
+                user_id, session_type=SessionType.TREINO
+            )
+            await self._feature_gate.assert_within_quota(
+                user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+            )
+
+            await self._attempts.add(attempt)
+            if is_correct:
+                training_session.correct_count += 1
+                self._session.add(training_session)
+
+        return attempt
+
+    async def list_history(
+        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
+    ) -> list[QuestionAttempt]:
+        return await self._attempts.list_paginated(
+            user_id=user_id, limit=limit, cursor_id=cursor_id
+        )
 </file>
 
 <file path="app/services/practice/question_attempt_service.py">
@@ -33709,6 +34099,255 @@ class TrainingSessionService:
         return await self.get_session(session_id, user_id)
 </file>
 
+<file path="app/core/config.py">
+"""Configurações da aplicação lidas de variáveis de ambiente (.env)."""
+
+from functools import lru_cache
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Aplicação
+    APP_NAME: str = "Foco Policial API"
+    APP_ENV: str = Field(default="development")  # development | staging | production
+    DEBUG: bool = Field(default=False)
+    API_V1_PREFIX: str = "/api/v1"
+
+    # Banco de dados (Supabase usado apenas como Postgres gerenciado — sem Auth/RLS)
+    DATABASE_URL: str = Field(
+        default="postgresql+asyncpg://postgres:postgres@localhost:5432/foco_policial"
+    )
+    DATABASE_POOL_SIZE: int = 10
+    DATABASE_MAX_OVERFLOW: int = 20
+
+    # Redis (cache, rate limiting)
+    REDIS_URL: str = Field(default="redis://localhost:6379/0")
+
+    # Segurança / JWT
+    JWT_SECRET_KEY: str = Field(default="changeme-in-env-never-commit")
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+
+    # Recuperação de senha
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
+    # URL base do frontend, usada para montar o link enviado por e-mail
+    # (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
+    FRONTEND_URL: str = Field(default="http://localhost:3000")
+
+    # E-mail transacional
+    # EMAIL_DRIVER=console (padrão): apenas loga o e-mail formatado — não exige
+    # nenhuma infra externa, ideal para desenvolvimento e para novos ambientes
+    # até que um provedor SMTP seja configurado.
+    # EMAIL_DRIVER=smtp: envia de fato via SMTP (qualquer provedor: SES, Postmark,
+    # Resend, Mailgun, Gmail etc. — todos falam SMTP) usando as credenciais abaixo.
+    EMAIL_DRIVER: str = Field(default="console")  # console | smtp
+    SMTP_HOST: str = Field(default="")
+    SMTP_PORT: int = Field(default=587)
+    SMTP_USER: str = Field(default="")
+    SMTP_PASSWORD: str = Field(default="")
+    SMTP_USE_TLS: bool = Field(default=True)
+    SMTP_FROM_EMAIL: str = Field(default="no-reply@focopolicial.com.br")
+    SMTP_FROM_NAME: str = Field(default="Foco Policial")
+
+    # Worker de agregação de analytics (app/workers/analytics_aggregator.py),
+    # agendado in-process via APScheduler — ver app/core/scheduler.py.
+    # Só é seguro com a API rodando como processo único (ver docstring de
+    # app/core/scheduler.py antes de escalar para múltiplas instâncias).
+    ANALYTICS_AGGREGATOR_ENABLED: bool = Field(default=True)
+    # Frequência do job "rápido" (janela de 2 dias, mantém o dashboard quase
+    # em tempo real). Recomendação original: 5-15 min.
+    ANALYTICS_AGGREGATOR_INTERVAL_MINUTES: int = Field(default=10, ge=1)
+    # Hora (UTC) do job diário de reconciliação, janela maior.
+    ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC: int = Field(default=3, ge=0, le=23)
+    ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS: int = Field(default=30, ge=1)
+
+    # Worker de renovação automática de assinaturas
+    # (app/workers/subscription_renewal.py, PROMPT 10), agendado in-process
+    # via APScheduler — mesmo padrão de ANALYTICS_AGGREGATOR_*, ver
+    # app/core/scheduler.py. Só é seguro com a API rodando como processo
+    # único (mesma ressalva de escala horizontal do agregador de analytics).
+    SUBSCRIPTION_RENEWAL_ENABLED: bool = Field(default=True)
+    # Frequência do job: cobra assinaturas ATIVA cujo período já terminou e
+    # efetiva cancelamentos agendados vencidos. Não precisa rodar com alta
+    # frequência (diferente do analytics, que alimenta um dashboard quase
+    # em tempo real) — o requisito é só não deixar o período vencido sem
+    # cobrança por muito tempo.
+    SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES: int = Field(default=60, ge=1)
+
+    # Worker de dunning (app/workers/subscription_dunning.py, PROMPT 11,
+    # roadmap item 11), agendado in-process via APScheduler — mesmo padrão
+    # de SUBSCRIPTION_RENEWAL_*/ANALYTICS_AGGREGATOR_*, ver
+    # app/core/scheduler.py. Só é seguro com a API rodando como processo
+    # único (mesma ressalva de escala horizontal dos demais workers).
+    #
+    # Política comercial (decidida explicitamente pelo usuário nesta sessão,
+    # não inventada — ver docs/DECISIONS.md ADR-027): 3 tentativas de
+    # recobrança, uma por dia, dentro de um grace period de 3 dias — ou
+    # seja, o grace period e o intervalo x tentativas coincidem por
+    # construção (3 x 1 dia = 3 dias). Mudar um sem o outro é uma decisão
+    # de negócio válida (ex.: grace period maior que tentativas x intervalo
+    # só significa que a assinatura fica alguns dias sem nova tentativa
+    # antes de expirar) — os três valores são independentes no código.
+    DUNNING_ENABLED: bool = Field(default=True)
+    # Frequência do job: procura assinaturas INADIMPLENTE com retry
+    # elegível ou grace period vencido. Mesmo raciocínio de
+    # SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES — não precisa de alta
+    # frequência, só não deixar uma tentativa elegível esperando demais.
+    DUNNING_INTERVAL_MINUTES: int = Field(default=60, ge=1)
+    # Número máximo de tentativas de recobrança por ciclo de inadimplência.
+    DUNNING_MAX_RETRIES: int = Field(default=3, ge=1)
+    # Intervalo entre tentativas de recobrança, em dias.
+    DUNNING_RETRY_INTERVAL_DAYS: int = Field(default=1, ge=1)
+    # Duração do grace period (INADIMPLENTE -> EXPIRADA), em dias, a partir
+    # do momento em que a assinatura entra em INADIMPLENTE.
+    DUNNING_GRACE_PERIOD_DAYS: int = Field(default=3, ge=1)
+
+    # CORS
+    CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+
+    # Rate limiting
+    RATE_LIMIT_PER_MINUTE: int = 60
+
+    # Políticas dedicadas para rotas sensíveis a abuso (força bruta,
+    # enumeração de contas, flood de webhook/checkout). Cada uma é contada
+    # isoladamente por IP e por janela de 60s — não compartilham o balde da
+    # política padrão (`RATE_LIMIT_PER_MINUTE`) nem entre si.
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
+    RATE_LIMIT_REGISTER_PER_MINUTE: int = 5
+    RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: int = 3
+    RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: int = 5
+    RATE_LIMIT_BILLING_PER_MINUTE: int = 20
+
+    # Comportamento explícito quando o Redis está indisponível (ou quando
+    # `request.app.state.redis` não existe). Antes desta mudança, a falha
+    # era engolida em silêncio (`except Exception: pass`), sem log e sem
+    # decisão declarada.
+    #
+    # True (padrão): "fail open" — a requisição prossegue sem limite
+    # aplicado. Prioriza disponibilidade (inclusive de login) sobre a
+    # proteção de rate limit quando a infra de cache está fora do ar. O
+    # evento é sempre logado como warning estruturado para alerta
+    # operacional (ver PROJECT_STATE.md §15 — observabilidade).
+    #
+    # False: "fail closed" — a requisição é bloqueada com 503 enquanto o
+    # Redis estiver indisponível. Prioriza proteção contra abuso sobre
+    # disponibilidade. Só ative se o negócio decidir que abuso sem rate
+    # limit é pior do que indisponibilidade parcial.
+    RATE_LIMIT_FAIL_OPEN: bool = True
+
+
+    # Billing — gateway de pagamento (ver app/services/billing/gateway.py)
+    # PAYMENT_GATEWAY_DRIVER=console (padrão): nenhum provedor real — aprova
+    # toda cobrança imediatamente via ConsoleGateway. Usar apenas em
+    # desenvolvimento/teste. Quando um provedor real for integrado, este
+    # campo passa a selecionar o driver correspondente (ex.: "stripe").
+    PAYMENT_GATEWAY_DRIVER: str = Field(default="console")  # console | (futuro: stripe, etc.)
+    # Segredo compartilhado com o provedor de pagamento, usado para validar a
+    # assinatura do payload recebido em app/api/v1/billing/webhooks.py,
+    # verificada pelo driver configurado (ver
+    # app/services/billing/gateway.py::PaymentGateway.parse_webhook_event,
+    # ADR-016). Deve ficar vazio apenas quando PAYMENT_GATEWAY_DRIVER=
+    # "console" — ver validação abaixo, que impede subir em produção com um
+    # driver real e sem segredo configurado.
+    PAYMENT_WEBHOOK_SECRET: str = Field(default="")
+
+    
+
+    @model_validator(mode="after")
+    def _validate_production_webhook_secret(self) -> "Settings":
+        """Em produção, um driver de pagamento real exige PAYMENT_WEBHOOK_SECRET
+        configurado — sem isso, o webhook aceitaria qualquer payload sem
+        verificar a assinatura (ver
+        `PaymentGateway.parse_webhook_event`/`ConsoleGateway.
+        parse_webhook_event` em app/services/billing/gateway.py, ADR-016,
+        que pula a checagem quando o segredo está vazio). O driver "console"
+        fica isento porque não fala com nenhum provedor real e não há
+        assinatura para validar.
+        """
+        if (
+            self.APP_ENV == "production"
+            and self.PAYMENT_GATEWAY_DRIVER != "console"
+            and not self.PAYMENT_WEBHOOK_SECRET
+        ):
+            raise ValueError(
+                "PAYMENT_WEBHOOK_SECRET é obrigatório em produção quando "
+                f"PAYMENT_GATEWAY_DRIVER='{self.PAYMENT_GATEWAY_DRIVER}' (driver "
+                "diferente de 'console'). Configure a variável de ambiente antes "
+                "de subir este serviço."
+            )
+        return self
+
+    # app/core/config.py (adicionar ao final da classe Settings)
+
+    # --- Notificações transacionais (PROMPT 13) --------------------------- #
+    # Flags de ativação por tipo de evento
+    NOTIFY_PAYMENT_APPROVED: bool = Field(default=True)
+    NOTIFY_PAYMENT_FAILED: bool = Field(default=True)
+    NOTIFY_RENEWAL_SUCCESS: bool = Field(default=True)
+    NOTIFY_RENEWAL_REMINDER: bool = Field(default=True)
+    NOTIFY_CANCELLATION: bool = Field(default=True)
+    NOTIFY_REACTIVATION: bool = Field(default=True)
+    NOTIFY_PLAN_CHANGE: bool = Field(default=True)
+    NOTIFY_DUNNING_RECOVERED: bool = Field(default=True)
+    NOTIFY_DUNNING_RETRY_FAILED: bool = Field(default=True)
+    NOTIFY_DUNNING_EXPIRED: bool = Field(default=True)
+
+    # Dias de antecedência para aviso de renovação
+    RENEWAL_REMINDER_DAYS_BEFORE: int = Field(default=3, ge=1, le=7)
+
+    # Adicionar ao final da classe Settings
+
+    # Scheduler / Workers
+    SCHEDULER_ENABLED: bool = Field(
+        default=True,
+        description="Habilita o scheduler in-process. Desabilite em workers secundários.",
+    )
+    SCHEDULER_LOCK_TTL_SECONDS: int = Field(
+        default=300,
+        ge=30,
+        description="TTL do lock distribuído para jobs em segundos.",
+    )
+
+        # Adicionar ao final da classe Settings
+
+    # Cache
+    CACHE_ENABLED: bool = Field(
+        default=True,
+        description="Habilita o cache distribuído via Redis.",
+    )
+    CACHE_DEFAULT_TTL_SECONDS: int = Field(
+        default=3600,
+        ge=60,
+        description="TTL padrão para cache em segundos.",
+    )
+    CACHE_PLANS_TTL_SECONDS: int = Field(
+        default=3600,
+        ge=60,
+        description="TTL para cache de planos em segundos.",
+    )
+    CACHE_USER_TTL_SECONDS: int = Field(
+        default=300,
+        ge=60,
+        description="TTL para cache de usuários em segundos.",
+    )
+
+    
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Settings em cache — lida do ambiente uma única vez por processo."""
+    return Settings()
+
+
+settings = get_settings()
+</file>
+
 <file path="scripts/seed_test_data.py">
 """Seed de dados de teste para desenvolvimento local.
 
@@ -33802,7 +34441,7 @@ PLAN_CATALOG: list[dict] = [
     {
         "slug": "pro",
         "name": "Pro",
-        "price_cents": 4990,
+        "price_cents": 5990,
         "billing_period": BillingPeriod.MENSAL,
         "features": {
             FeatureKey.DAILY_QUESTIONS: None,
@@ -34154,255 +34793,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-</file>
-
-<file path="app/core/config.py">
-"""Configurações da aplicação lidas de variáveis de ambiente (.env)."""
-
-from functools import lru_cache
-
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
-    # Aplicação
-    APP_NAME: str = "Foco Policial API"
-    APP_ENV: str = Field(default="development")  # development | staging | production
-    DEBUG: bool = Field(default=False)
-    API_V1_PREFIX: str = "/api/v1"
-
-    # Banco de dados (Supabase usado apenas como Postgres gerenciado — sem Auth/RLS)
-    DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/foco_policial"
-    )
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 20
-
-    # Redis (cache, rate limiting)
-    REDIS_URL: str = Field(default="redis://localhost:6379/0")
-
-    # Segurança / JWT
-    JWT_SECRET_KEY: str = Field(default="changeme-in-env-never-commit")
-    JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
-
-    # Recuperação de senha
-    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
-    # URL base do frontend, usada para montar o link enviado por e-mail
-    # (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
-    FRONTEND_URL: str = Field(default="http://localhost:3000")
-
-    # E-mail transacional
-    # EMAIL_DRIVER=console (padrão): apenas loga o e-mail formatado — não exige
-    # nenhuma infra externa, ideal para desenvolvimento e para novos ambientes
-    # até que um provedor SMTP seja configurado.
-    # EMAIL_DRIVER=smtp: envia de fato via SMTP (qualquer provedor: SES, Postmark,
-    # Resend, Mailgun, Gmail etc. — todos falam SMTP) usando as credenciais abaixo.
-    EMAIL_DRIVER: str = Field(default="console")  # console | smtp
-    SMTP_HOST: str = Field(default="")
-    SMTP_PORT: int = Field(default=587)
-    SMTP_USER: str = Field(default="")
-    SMTP_PASSWORD: str = Field(default="")
-    SMTP_USE_TLS: bool = Field(default=True)
-    SMTP_FROM_EMAIL: str = Field(default="no-reply@focopolicial.com.br")
-    SMTP_FROM_NAME: str = Field(default="Foco Policial")
-
-    # Worker de agregação de analytics (app/workers/analytics_aggregator.py),
-    # agendado in-process via APScheduler — ver app/core/scheduler.py.
-    # Só é seguro com a API rodando como processo único (ver docstring de
-    # app/core/scheduler.py antes de escalar para múltiplas instâncias).
-    ANALYTICS_AGGREGATOR_ENABLED: bool = Field(default=True)
-    # Frequência do job "rápido" (janela de 2 dias, mantém o dashboard quase
-    # em tempo real). Recomendação original: 5-15 min.
-    ANALYTICS_AGGREGATOR_INTERVAL_MINUTES: int = Field(default=10, ge=1)
-    # Hora (UTC) do job diário de reconciliação, janela maior.
-    ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC: int = Field(default=3, ge=0, le=23)
-    ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS: int = Field(default=30, ge=1)
-
-    # Worker de renovação automática de assinaturas
-    # (app/workers/subscription_renewal.py, PROMPT 10), agendado in-process
-    # via APScheduler — mesmo padrão de ANALYTICS_AGGREGATOR_*, ver
-    # app/core/scheduler.py. Só é seguro com a API rodando como processo
-    # único (mesma ressalva de escala horizontal do agregador de analytics).
-    SUBSCRIPTION_RENEWAL_ENABLED: bool = Field(default=True)
-    # Frequência do job: cobra assinaturas ATIVA cujo período já terminou e
-    # efetiva cancelamentos agendados vencidos. Não precisa rodar com alta
-    # frequência (diferente do analytics, que alimenta um dashboard quase
-    # em tempo real) — o requisito é só não deixar o período vencido sem
-    # cobrança por muito tempo.
-    SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES: int = Field(default=60, ge=1)
-
-    # Worker de dunning (app/workers/subscription_dunning.py, PROMPT 11,
-    # roadmap item 11), agendado in-process via APScheduler — mesmo padrão
-    # de SUBSCRIPTION_RENEWAL_*/ANALYTICS_AGGREGATOR_*, ver
-    # app/core/scheduler.py. Só é seguro com a API rodando como processo
-    # único (mesma ressalva de escala horizontal dos demais workers).
-    #
-    # Política comercial (decidida explicitamente pelo usuário nesta sessão,
-    # não inventada — ver docs/DECISIONS.md ADR-027): 3 tentativas de
-    # recobrança, uma por dia, dentro de um grace period de 3 dias — ou
-    # seja, o grace period e o intervalo x tentativas coincidem por
-    # construção (3 x 1 dia = 3 dias). Mudar um sem o outro é uma decisão
-    # de negócio válida (ex.: grace period maior que tentativas x intervalo
-    # só significa que a assinatura fica alguns dias sem nova tentativa
-    # antes de expirar) — os três valores são independentes no código.
-    DUNNING_ENABLED: bool = Field(default=True)
-    # Frequência do job: procura assinaturas INADIMPLENTE com retry
-    # elegível ou grace period vencido. Mesmo raciocínio de
-    # SUBSCRIPTION_RENEWAL_INTERVAL_MINUTES — não precisa de alta
-    # frequência, só não deixar uma tentativa elegível esperando demais.
-    DUNNING_INTERVAL_MINUTES: int = Field(default=60, ge=1)
-    # Número máximo de tentativas de recobrança por ciclo de inadimplência.
-    DUNNING_MAX_RETRIES: int = Field(default=3, ge=1)
-    # Intervalo entre tentativas de recobrança, em dias.
-    DUNNING_RETRY_INTERVAL_DAYS: int = Field(default=1, ge=1)
-    # Duração do grace period (INADIMPLENTE -> EXPIRADA), em dias, a partir
-    # do momento em que a assinatura entra em INADIMPLENTE.
-    DUNNING_GRACE_PERIOD_DAYS: int = Field(default=3, ge=1)
-
-    # CORS
-    CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
-
-    # Rate limiting
-    RATE_LIMIT_PER_MINUTE: int = 60
-
-    # Políticas dedicadas para rotas sensíveis a abuso (força bruta,
-    # enumeração de contas, flood de webhook/checkout). Cada uma é contada
-    # isoladamente por IP e por janela de 60s — não compartilham o balde da
-    # política padrão (`RATE_LIMIT_PER_MINUTE`) nem entre si.
-    RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
-    RATE_LIMIT_REGISTER_PER_MINUTE: int = 5
-    RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: int = 3
-    RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: int = 5
-    RATE_LIMIT_BILLING_PER_MINUTE: int = 20
-
-    # Comportamento explícito quando o Redis está indisponível (ou quando
-    # `request.app.state.redis` não existe). Antes desta mudança, a falha
-    # era engolida em silêncio (`except Exception: pass`), sem log e sem
-    # decisão declarada.
-    #
-    # True (padrão): "fail open" — a requisição prossegue sem limite
-    # aplicado. Prioriza disponibilidade (inclusive de login) sobre a
-    # proteção de rate limit quando a infra de cache está fora do ar. O
-    # evento é sempre logado como warning estruturado para alerta
-    # operacional (ver PROJECT_STATE.md §15 — observabilidade).
-    #
-    # False: "fail closed" — a requisição é bloqueada com 503 enquanto o
-    # Redis estiver indisponível. Prioriza proteção contra abuso sobre
-    # disponibilidade. Só ative se o negócio decidir que abuso sem rate
-    # limit é pior do que indisponibilidade parcial.
-    RATE_LIMIT_FAIL_OPEN: bool = True
-
-
-    # Billing — gateway de pagamento (ver app/services/billing/gateway.py)
-    # PAYMENT_GATEWAY_DRIVER=console (padrão): nenhum provedor real — aprova
-    # toda cobrança imediatamente via ConsoleGateway. Usar apenas em
-    # desenvolvimento/teste. Quando um provedor real for integrado, este
-    # campo passa a selecionar o driver correspondente (ex.: "stripe").
-    PAYMENT_GATEWAY_DRIVER: str = Field(default="console")  # console | (futuro: stripe, etc.)
-    # Segredo compartilhado com o provedor de pagamento, usado para validar a
-    # assinatura do payload recebido em app/api/v1/billing/webhooks.py,
-    # verificada pelo driver configurado (ver
-    # app/services/billing/gateway.py::PaymentGateway.parse_webhook_event,
-    # ADR-016). Deve ficar vazio apenas quando PAYMENT_GATEWAY_DRIVER=
-    # "console" — ver validação abaixo, que impede subir em produção com um
-    # driver real e sem segredo configurado.
-    PAYMENT_WEBHOOK_SECRET: str = Field(default="")
-
-    
-
-    @model_validator(mode="after")
-    def _validate_production_webhook_secret(self) -> "Settings":
-        """Em produção, um driver de pagamento real exige PAYMENT_WEBHOOK_SECRET
-        configurado — sem isso, o webhook aceitaria qualquer payload sem
-        verificar a assinatura (ver
-        `PaymentGateway.parse_webhook_event`/`ConsoleGateway.
-        parse_webhook_event` em app/services/billing/gateway.py, ADR-016,
-        que pula a checagem quando o segredo está vazio). O driver "console"
-        fica isento porque não fala com nenhum provedor real e não há
-        assinatura para validar.
-        """
-        if (
-            self.APP_ENV == "production"
-            and self.PAYMENT_GATEWAY_DRIVER != "console"
-            and not self.PAYMENT_WEBHOOK_SECRET
-        ):
-            raise ValueError(
-                "PAYMENT_WEBHOOK_SECRET é obrigatório em produção quando "
-                f"PAYMENT_GATEWAY_DRIVER='{self.PAYMENT_GATEWAY_DRIVER}' (driver "
-                "diferente de 'console'). Configure a variável de ambiente antes "
-                "de subir este serviço."
-            )
-        return self
-
-    # app/core/config.py (adicionar ao final da classe Settings)
-
-    # --- Notificações transacionais (PROMPT 13) --------------------------- #
-    # Flags de ativação por tipo de evento
-    NOTIFY_PAYMENT_APPROVED: bool = Field(default=True)
-    NOTIFY_PAYMENT_FAILED: bool = Field(default=True)
-    NOTIFY_RENEWAL_SUCCESS: bool = Field(default=True)
-    NOTIFY_RENEWAL_REMINDER: bool = Field(default=True)
-    NOTIFY_CANCELLATION: bool = Field(default=True)
-    NOTIFY_REACTIVATION: bool = Field(default=True)
-    NOTIFY_PLAN_CHANGE: bool = Field(default=True)
-    NOTIFY_DUNNING_RECOVERED: bool = Field(default=True)
-    NOTIFY_DUNNING_RETRY_FAILED: bool = Field(default=True)
-    NOTIFY_DUNNING_EXPIRED: bool = Field(default=True)
-
-    # Dias de antecedência para aviso de renovação
-    RENEWAL_REMINDER_DAYS_BEFORE: int = Field(default=3, ge=1, le=7)
-
-    # Adicionar ao final da classe Settings
-
-    # Scheduler / Workers
-    SCHEDULER_ENABLED: bool = Field(
-        default=True,
-        description="Habilita o scheduler in-process. Desabilite em workers secundários.",
-    )
-    SCHEDULER_LOCK_TTL_SECONDS: int = Field(
-        default=300,
-        ge=30,
-        description="TTL do lock distribuído para jobs em segundos.",
-    )
-
-        # Adicionar ao final da classe Settings
-
-    # Cache
-    CACHE_ENABLED: bool = Field(
-        default=True,
-        description="Habilita o cache distribuído via Redis.",
-    )
-    CACHE_DEFAULT_TTL_SECONDS: int = Field(
-        default=3600,
-        ge=60,
-        description="TTL padrão para cache em segundos.",
-    )
-    CACHE_PLANS_TTL_SECONDS: int = Field(
-        default=3600,
-        ge=60,
-        description="TTL para cache de planos em segundos.",
-    )
-    CACHE_USER_TTL_SECONDS: int = Field(
-        default=300,
-        ge=60,
-        description="TTL para cache de usuários em segundos.",
-    )
-
-    
-
-
-@lru_cache
-def get_settings() -> Settings:
-    """Settings em cache — lida do ambiente uma única vez por processo."""
-    return Settings()
-
-
-settings = get_settings()
 </file>
 
 <file path=".env.example">
