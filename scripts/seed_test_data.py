@@ -74,8 +74,8 @@ PLAN_CATALOG: list[dict] = [
     },
     {
         "slug": "standard",
-        "name": "Standard",
-        "price_cents": 2990,
+        "name": "Padrão",
+        "price_cents": 3990,
         "billing_period": BillingPeriod.MENSAL,
         "features": {
             FeatureKey.DAILY_QUESTIONS: None,
