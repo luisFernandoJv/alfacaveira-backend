@@ -90,7 +90,7 @@ PLAN_CATALOG: list[dict] = [
     {
         "slug": "pro",
         "name": "Pro",
-        "price_cents": 4990,
+        "price_cents": 5990,
         "billing_period": BillingPeriod.MENSAL,
         "features": {
             FeatureKey.DAILY_QUESTIONS: None,

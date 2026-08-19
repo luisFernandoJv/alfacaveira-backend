@@ -8,6 +8,7 @@ de forma atômica, junto com o registro de `QuestionAttempt`.
 
 import uuid
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
@@ -53,13 +54,6 @@ class QuestionAttemptService:
         if already_answered is not None:
             raise ConflictError("Questão já respondida nesta sessão.")
 
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
         question = await self._questions.get_with_relations(question_id)
         if question is None:
             raise NotFoundError("Questão não encontrada.")
@@ -87,6 +81,26 @@ class QuestionAttemptService:
         )
 
         async with UnitOfWork(self._session):
+            # Lock consultivo do Postgres, escopado à transação (liberado
+            # automaticamente no commit/rollback do `UnitOfWork`), serializando
+            # submissões concorrentes do MESMO usuário. Sem isso, duas
+            # requisições simultâneas podem ambas ler `answered_today=4` antes
+            # de qualquer uma inserir seu `QuestionAttempt`, e as duas passam
+            # no `assert_within_quota` — furando o limite diário (ex.: 5 -> 7).
+            # Com o lock, a segunda requisição só executa sua contagem depois
+            # que a primeira commita, então já enxerga o attempt recém-inserido.
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": f"daily_questions_quota:{user_id}"},
+            )
+
+            answered_today = await self._attempts.count_answered_today(
+                user_id, session_type=SessionType.TREINO
+            )
+            await self._feature_gate.assert_within_quota(
+                user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+            )
+
             await self._attempts.add(attempt)
             if is_correct:
                 training_session.correct_count += 1
