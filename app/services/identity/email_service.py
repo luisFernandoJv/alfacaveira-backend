@@ -42,7 +42,7 @@ class EmailService:
     # ==================================================================== #
 
     async def send_password_reset_email(self, *, to_email: str, to_name: str, reset_url: str) -> None:
-        subject = "Redefinição de senha — Foco Policial"
+        subject = "Redefinição de senha — Alfa Caveira"
         text_body, html_body = _render_password_reset_email(to_name=to_name, reset_url=reset_url)
 
         if settings.EMAIL_DRIVER == "smtp":
@@ -122,104 +122,104 @@ class EmailService:
                 "Olá {first_name}!\n\n"
                 "Seu pagamento para o plano {plan_name} (R$ {amount:.2f}) foi aprovado. "
                 "Agora você tem acesso a todos os recursos do plano.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu pagamento para o plano <strong>{plan_name}</strong> (R$ {amount:.2f}) "
                 "foi aprovado. Agora você tem acesso a todos os recursos do plano.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "payment_failed": (
                 "Olá {first_name}!\n\n"
                 "Houve um problema com o pagamento do plano {plan_name}. "
                 "Por favor, verifique seus dados de pagamento no portal do assinante.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Houve um problema com o pagamento do plano <strong>{plan_name}</strong>. "
                 "Por favor, verifique seus dados de pagamento no portal do assinante.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             # Eventos de renovação
             "renewal_success": (
                 "Olá {first_name}!\n\n"
                 "Seu plano {plan_name} foi renovado com sucesso! "
                 "A próxima cobrança será em {next_renewal}.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano <strong>{plan_name}</strong> foi renovado com sucesso! "
                 "A próxima cobrança será em <strong>{next_renewal}</strong>.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "renewal_reminder": (
                 "Olá {first_name}!\n\n"
                 "Seu plano {plan_name} será renovado em {days_left} dia(s), "
                 "no valor de R$ {amount:.2f}. "
                 "Se você não quiser renovar, cancele antes dessa data no portal do assinante.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano <strong>{plan_name}</strong> será renovado em "
                 "<strong>{days_left}</strong> dia(s), no valor de R$ {amount:.2f}.</p>"
                 "<p>Se você não quiser renovar, cancele antes dessa data no portal do assinante.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             # Eventos de gerenciamento
             "cancellation": (
                 "Olá {first_name}!\n\n"
                 "Seu plano {plan_name} foi cancelado. Você terá acesso até {expiration_date}.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano <strong>{plan_name}</strong> foi cancelado. "
                 "Você terá acesso até <strong>{expiration_date}</strong>.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "reactivation": (
                 "Olá {first_name}!\n\n"
                 "Seu plano {plan_name} foi reativado. A cobrança continuará normalmente.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano <strong>{plan_name}</strong> foi reativado. "
                 "A cobrança continuará normalmente.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "plan_change": (
                 "Olá {first_name}!\n\n"
                 "Seu plano foi alterado de {old_plan} para {new_plan}. "
                 "A próxima cobrança será de R$ {new_amount:.2f}.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano foi alterado de <strong>{old_plan}</strong> para "
                 "<strong>{new_plan}</strong>. A próxima cobrança será de R$ {new_amount:.2f}.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             # Eventos de dunning (inadimplência)
             "dunning_recovered": (
                 "Olá {first_name}!\n\n"
                 "Uma cobrança pendente do seu plano {plan_name} foi regularizada. "
                 "Seu acesso está normalizado.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Uma cobrança pendente do seu plano <strong>{plan_name}</strong> foi regularizada. "
                 "Seu acesso está normalizado.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "dunning_retry_failed": (
                 "Olá {first_name}!\n\n"
                 "A cobrança do seu plano {plan_name} falhou novamente. "
                 "Atualize seus dados de pagamento para evitar a perda de acesso.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>A cobrança do seu plano <strong>{plan_name}</strong> falhou novamente. "
                 "Atualize seus dados de pagamento para evitar a perda de acesso.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
             "dunning_expired": (
                 "Olá {first_name}!\n\n"
                 "Seu plano {plan_name} foi expirado por falta de pagamento. "
                 "Acesse o portal para regularizar sua assinatura.\n\n"
-                "Equipe Foco Policial",
+                "Equipe Alfa Caveira",
                 "<p>Olá <strong>{first_name}</strong>!</p>"
                 "<p>Seu plano <strong>{plan_name}</strong> foi expirado por falta de pagamento. "
                 "Acesse o portal para regularizar sua assinatura.</p>"
-                "<p>Equipe Foco Policial</p>",
+                "<p>Equipe Alfa Caveira</p>",
             ),
         }
 
@@ -289,11 +289,11 @@ def _render_password_reset_email(*, to_name: str, reset_url: str) -> tuple[str, 
     first_name = to_name.split(" ")[0] if to_name else ""
     text_body = (
         f"Olá{f', {first_name}' if first_name else ''}!\n\n"
-        "Recebemos um pedido para redefinir a senha da sua conta no Foco Policial.\n\n"
+        "Recebemos um pedido para redefinir a senha da sua conta no Alfa Caveira.\n\n"
         f"Para criar uma nova senha, acesse o link abaixo:\n{reset_url}\n\n"
         "Este link expira em 1 hora. Se você não pediu essa redefinição, "
         "pode ignorar este e-mail com segurança — sua senha atual continua válida.\n\n"
-        "Equipe Foco Policial"
+        "Equipe Alfa Caveira"
     )
     html_body = f"""\
 <!doctype html>
@@ -304,7 +304,7 @@ def _render_password_reset_email(*, to_name: str, reset_url: str) -> tuple[str, 
         <h1 style="font-size:20px; margin:0 0 16px;">Redefinir senha</h1>
         <p style="font-size:14px; line-height:1.6; color:#9ca3af;">
           Olá{f', {first_name}' if first_name else ''}! Recebemos um pedido para redefinir a
-          senha da sua conta no Foco Policial.
+          senha da sua conta no Alfa Caveira.
         </p>
         <p style="text-align:center; margin:28px 0;">
           <a href="{reset_url}"

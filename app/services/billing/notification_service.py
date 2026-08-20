@@ -35,16 +35,16 @@ class SubscriptionNotificationService:
 
     # Mapeamento evento -> subject do e-mail
     _SUBJECT_MAP = {
-        SubscriptionEmailEvent.PAYMENT_APPROVED: "Pagamento aprovado — Foco Policial",
-        SubscriptionEmailEvent.PAYMENT_FAILED: "Falha no pagamento — Foco Policial",
-        SubscriptionEmailEvent.RENEWAL_SUCCESS: "Renovação realizada — Foco Policial",
-        SubscriptionEmailEvent.RENEWAL_REMINDER: "Renovação em breve — Foco Policial",
-        SubscriptionEmailEvent.CANCELLATION: "Plano cancelado — Foco Policial",
-        SubscriptionEmailEvent.REACTIVATION: "Plano reativado — Foco Policial",
-        SubscriptionEmailEvent.PLAN_CHANGE: "Plano alterado — Foco Policial",
-        SubscriptionEmailEvent.DUNNING_RECOVERED: "Pagamento regularizado — Foco Policial",
-        SubscriptionEmailEvent.DUNNING_RETRY_FAILED: "Pagamento falhou novamente — Foco Policial",
-        SubscriptionEmailEvent.DUNNING_EXPIRED: "Plano expirado — Foco Policial",
+        SubscriptionEmailEvent.PAYMENT_APPROVED: "Pagamento aprovado — Alfa Caveira",
+        SubscriptionEmailEvent.PAYMENT_FAILED: "Falha no pagamento — Alfa Caveira",
+        SubscriptionEmailEvent.RENEWAL_SUCCESS: "Renovação realizada — Alfa Caveira",
+        SubscriptionEmailEvent.RENEWAL_REMINDER: "Renovação em breve — Alfa Caveira",
+        SubscriptionEmailEvent.CANCELLATION: "Plano cancelado — Alfa Caveira",
+        SubscriptionEmailEvent.REACTIVATION: "Plano reativado — Alfa Caveira",
+        SubscriptionEmailEvent.PLAN_CHANGE: "Plano alterado — Alfa Caveira",
+        SubscriptionEmailEvent.DUNNING_RECOVERED: "Pagamento regularizado — Alfa Caveira",
+        SubscriptionEmailEvent.DUNNING_RETRY_FAILED: "Pagamento falhou novamente — Alfa Caveira",
+        SubscriptionEmailEvent.DUNNING_EXPIRED: "Plano expirado — Alfa Caveira",
     }
 
     def __init__(self, email_service: Optional[EmailService] = None):
@@ -59,7 +59,7 @@ class SubscriptionNotificationService:
 
     def _get_subject(self, event: SubscriptionEmailEvent) -> str:
         """Retorna o subject para o evento."""
-        return self._SUBJECT_MAP.get(event, "Atualização — Foco Policial")
+        return self._SUBJECT_MAP.get(event, "Atualização — Alfa Caveira")
 
     def _get_first_name(self, user: User) -> str:
         """Extrai o primeiro nome do usuário."""

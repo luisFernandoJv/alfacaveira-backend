@@ -1,0 +1,62 @@
+{
+  "Comment": "SES domain verification (DKIM) + SPF + DMARC for alfacaveira.com",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "zbxbasdnjabssejarjhyobiixgnof444._domainkey.alfacaveira.com",
+        "Type": "CNAME",
+        "TTL": 1800,
+        "ResourceRecords": [
+          { "Value": "zbxbasdnjabssejarjhyobiixgnof444.dkim.amazonses.com" }
+        ]
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "5onb7kqmsvs4azaqqpj7w5ma5tlhvmws._domainkey.alfacaveira.com",
+        "Type": "CNAME",
+        "TTL": 1800,
+        "ResourceRecords": [
+          { "Value": "5onb7kqmsvs4azaqqpj7w5ma5tlhvmws.dkim.amazonses.com" }
+        ]
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "e46let742klmvcckkmx7x6blckdnsc4x._domainkey.alfacaveira.com",
+        "Type": "CNAME",
+        "TTL": 1800,
+        "ResourceRecords": [
+          { "Value": "e46let742klmvcckkmx7x6blckdnsc4x.dkim.amazonses.com" }
+        ]
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "alfacaveira.com",
+        "Type": "TXT",
+        "TTL": 1800,
+        "ResourceRecords": [
+          { "Value": "\"v=spf1 include:amazonses.com ~all\"" }
+        ]
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "_dmarc.alfacaveira.com",
+        "Type": "TXT",
+        "TTL": 1800,
+        "ResourceRecords": [
+          {
+            "Value": "\"v=DMARC1; p=quarantine; rua=mailto:dmarc@alfacaveira.com\""
+          }
+        ]
+      }
+    }
+  ]
+}

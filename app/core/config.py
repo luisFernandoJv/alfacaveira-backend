@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Aplicação
-    APP_NAME: str = "Foco Policial API"
+    APP_NAME: str = "Alfa Caveira API"
     APP_ENV: str = Field(default="development")  # development | staging | production
     DEBUG: bool = Field(default=False)
     API_V1_PREFIX: str = "/api/v1"
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = Field(default="")
     SMTP_USE_TLS: bool = Field(default=True)
     SMTP_FROM_EMAIL: str = Field(default="no-reply@focopolicial.com.br")
-    SMTP_FROM_NAME: str = Field(default="Foco Policial")
+    SMTP_FROM_NAME: str = Field(default="Alfa Caveira")
 
     # Worker de agregação de analytics (app/workers/analytics_aggregator.py),
     # agendado in-process via APScheduler — ver app/core/scheduler.py.
