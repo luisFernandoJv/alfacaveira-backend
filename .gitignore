@@ -50,3 +50,6 @@ dump.rdb
 *.rdb
 .coverage
 .coverage.*
+secrets-policy.json
+ses-dns-records.json
+*credentials.csv
