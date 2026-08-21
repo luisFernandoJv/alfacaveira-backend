@@ -3,9 +3,8 @@
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.schemas.content.question import QuestionListItem
 from app.schemas.learning.notebook_folder import NotebookFolderResponse
@@ -22,52 +21,28 @@ class NotebookResponse(BaseModel):
     name: str
     description: str | None
     folder_id: uuid.UUID | None
-    folder: NotebookFolderResponse | None = None
+    folder: NotebookFolderResponse | None
     is_favorite: bool
     created_at: datetime
     updated_at: datetime
-    
-    # 🔥 CORREÇÃO BUG 1: Campo normal, em vez de @computed_field
-    question_count: int = 0
 
-
-class NotebookQuestionResponse(BaseModel):
-    """Representa a relação entre o caderno e a questão."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    notebook_id: uuid.UUID
-    question_id: uuid.UUID
-    added_at: datetime
-    question: Optional[QuestionListItem] = None
-
-    @model_validator(mode='before')
-    @classmethod
-    def safe_load_question(cls, data: Any) -> Any:
-        """
-        🔥 CORREÇÃO DO ERRO 500 (MissingGreenlet): Impede que o Pydantic
-        tente acessar um relacionamento ('question') não previamente carregado
-        numa query individual de POST, o que gerava um crash interno no FastAPI.
-        """
-        if hasattr(data, '_sa_instance_state'):
-            state = data._sa_instance_state
-            has_question = 'question' in state.dict
-            return {
-                "id": data.id,
-                "notebook_id": data.notebook_id,
-                "question_id": data.question_id,
-                "added_at": data.added_at,
-                "question": state.dict['question'] if has_question else None
-            }
-        return data
+    @computed_field
+    @property
+    def question_count(self) -> int:
+        """Número de questões no caderno."""
+        # Se o objeto tiver a lista de questions carregada, usa ela
+        if hasattr(self, 'questions') and self.questions is not None:
+            return len(self.questions)
+        # Caso contrário, tenta usar o atributo que pode ter sido definido
+        if hasattr(self, '_question_count'):
+            return self._question_count
+        return 0
 
 
 class NotebookDetailResponse(NotebookResponse):
     """Resposta detalhada de um caderno (com questões)."""
 
-    # 🔥 CORREÇÃO BUG 3: Alinhado à expectativa do Frontend (ApiNotebookQuestion[])
-    questions: list[NotebookQuestionResponse] = Field(default_factory=list)
+    questions: list[QuestionListItem] = Field(default_factory=list)
 
 
 class NotebookCreateRequest(BaseModel):

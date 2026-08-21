@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base
 from app.models.base import TimestampMixin, UUIDPKMixin
 
+# 🔥 CORREÇÃO: Importar a tabela do arquivo correto
 from app.models.learning.notebook_tag import notebook_tag_links
 from app.models.learning.notebook_folder import NotebookFolder
 from app.models.learning.notebook_question import NotebookQuestion
@@ -58,10 +59,3 @@ class Notebook(UUIDPKMixin, TimestampMixin, Base):
         secondary=notebook_tag_links,
         back_populates="notebooks",
     )
-
-    # 🔥 CORREÇÃO BUG 1: Propriedade para Pydantic absorver o valor agrupado via from_attributes=True
-    @property
-    def question_count(self) -> int:
-        if hasattr(self, "questions") and self.questions is not None:
-            return len(self.questions)
-        return getattr(self, "_question_count", 0)
