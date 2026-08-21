@@ -11,7 +11,6 @@ from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
 from app.models.enums import FeatureKey
-from app.schemas.content.question import QuestionListItem
 from app.schemas.learning.notebook import (
     NotebookCreateRequest,
     NotebookDetailResponse,
@@ -230,8 +229,8 @@ async def create_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
+        question_count=0,
     )
-    response_data._question_count = 0
 
     return Envelope(data=response_data)
 
@@ -261,9 +260,12 @@ async def get_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
-        questions=[QuestionListItem.model_validate(q) for q in questions],
+        question_count=len(questions),
+        questions=[
+            NotebookQuestionResponse.model_validate(nq)
+            for nq in notebook.questions
+        ],
     )
-    response._question_count = len(questions)
 
     return Envelope(data=response)
 
@@ -297,8 +299,8 @@ async def update_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
+        question_count=getattr(notebook, "_question_count", 0),
     )
-    response_data._question_count = notebook._question_count if hasattr(notebook, "_question_count") else 0
 
     return Envelope(data=response_data)
 

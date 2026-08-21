@@ -29,6 +29,7 @@ _QUESTION_RELATIONS = (
     selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
     selectinload(NotebookQuestion.question).selectinload(Question.organization),
     selectinload(NotebookQuestion.question).selectinload(Question.tags),
+    selectinload(NotebookQuestion.question).selectinload(Question.attachments),
 )
 
 # Mantido por compatibilidade com quem já importava `_RELATIONS` deste módulo.

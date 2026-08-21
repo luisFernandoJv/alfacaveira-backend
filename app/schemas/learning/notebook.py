@@ -4,11 +4,10 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.content.question import QuestionListItem
+from app.schemas.learning.notebook_question import NotebookQuestionResponse
 from app.schemas.learning.notebook_folder import NotebookFolderResponse
-from app.schemas.learning.notebook_tag import NotebookTagResponse
 
 
 class NotebookResponse(BaseModel):
@@ -26,23 +25,13 @@ class NotebookResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    @computed_field
-    @property
-    def question_count(self) -> int:
-        """Número de questões no caderno."""
-        # Se o objeto tiver a lista de questions carregada, usa ela
-        if hasattr(self, 'questions') and self.questions is not None:
-            return len(self.questions)
-        # Caso contrário, tenta usar o atributo que pode ter sido definido
-        if hasattr(self, '_question_count'):
-            return self._question_count
-        return 0
+    question_count: int = 0
 
 
 class NotebookDetailResponse(NotebookResponse):
     """Resposta detalhada de um caderno (com questões)."""
 
-    questions: list[QuestionListItem] = Field(default_factory=list)
+    questions: list[NotebookQuestionResponse] = Field(default_factory=list)
 
 
 class NotebookCreateRequest(BaseModel):

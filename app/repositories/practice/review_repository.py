@@ -6,10 +6,20 @@ from datetime import date, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
+from app.models.content.question import Question
 from app.models.practice.review import Review, ReviewStatus
 from app.repositories.base import BaseRepository
 
-_RELATIONS = (selectinload(Review.question),)
+_RELATIONS = (
+    selectinload(Review.question).selectinload(Question.discipline),
+    selectinload(Review.question).selectinload(Question.subject),
+    selectinload(Review.question).selectinload(Question.topic),
+    selectinload(Review.question).selectinload(Question.exam_board),
+    selectinload(Review.question).selectinload(Question.exam_edition),
+    selectinload(Review.question).selectinload(Question.organization),
+    selectinload(Review.question).selectinload(Question.tags),
+    selectinload(Review.question).selectinload(Question.attachments),
+)
 
 
 class ReviewRepository(BaseRepository[Review]):

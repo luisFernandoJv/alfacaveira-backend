@@ -54,6 +54,12 @@ class Notebook(UUIDPKMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="NotebookQuestion.added_at.desc()",
     )
+
+    @property
+    def question_count(self) -> int:
+        """Quantidade de questões do caderno para serialização segura."""
+        return int(getattr(self, "_question_count", 0))
+
     tags: Mapped[List["NotebookTag"]] = relationship(
         "NotebookTag",
         secondary=notebook_tag_links,

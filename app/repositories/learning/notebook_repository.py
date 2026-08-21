@@ -25,6 +25,7 @@ _QUESTION_DETAIL_RELATIONS = (
     selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
     selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.organization),
     selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.tags),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.attachments),
 )
 
 

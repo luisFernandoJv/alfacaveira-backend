@@ -48,9 +48,13 @@ class NotebookService:
         parent_id: Optional[uuid.UUID] = None,
     ) -> NotebookFolder:
         """Cria uma nova pasta."""
-        existing = await self._folders.get_by_name(user_id, name)
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ConflictError("O nome da pasta não pode ficar vazio.")
+
+        existing = await self._folders.get_by_name(user_id, normalized_name)
         if existing:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
+            raise ConflictError(f"Você já possui uma pasta com o nome '{normalized_name}'.")
 
         if parent_id:
             parent = await self._folders.get_owned(parent_id, user_id)
@@ -59,7 +63,7 @@ class NotebookService:
 
         folder = NotebookFolder(
             user_id=user_id,
-            name=name.strip(),
+            name=normalized_name,
             parent_id=parent_id,
         )
 
