@@ -47,6 +47,10 @@ _RELATIONS = (
     selectinload(Question.organization),
     selectinload(Question.alternatives),
     selectinload(Question.tags),
+    # Imagens do enunciado (S3). Carregado aqui, no ponto central reusado
+    # por get_with_relations/list_by_ids/list_random/list_paginated, para
+    # não precisar repetir o selectinload em cada método (e evitar N+1).
+    selectinload(Question.attachments),
 )
 
 

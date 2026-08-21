@@ -9,6 +9,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -29,6 +30,7 @@ from app.schemas.content.question import (
 )
 from app.security.dependencies import CurrentAdminUser, CurrentUser
 from app.services.content.question_service import QuestionService
+from app.services.storage.s3_service import create_presigned_upload
 
 router = APIRouter()
 
@@ -157,6 +159,46 @@ async def get_question_facets(
     )
     facets = await question_service.get_facets(filters=filters, user_id=current_user.id)
     return Envelope(data=QuestionFacetsResponse.model_validate(facets))
+
+
+class AttachmentPresignRequest(BaseModel):
+    filename: str
+    content_type: str
+
+
+class AttachmentPresignResponse(BaseModel):
+    upload_url: str
+    public_url: str
+    expires_in: int
+
+
+@router.post(
+    "/attachments/presign",
+    response_model=Envelope[AttachmentPresignResponse],
+)
+async def presign_attachment_upload(
+    body: AttachmentPresignRequest,
+    _admin: CurrentAdminUser,
+) -> Envelope[AttachmentPresignResponse]:
+    """Gera uma URL assinada (PUT) para o admin subir uma imagem direto pro
+    S3, sem passar o binário pela API. Declarada ANTES de `/{question_id}`
+    de propósito (mesmo motivo de `/facets`): `"attachments"` não pode ser
+    capturado como um `question_id` inválido.
+
+    Fluxo completo em 3 passos, ver README/`docs` de imagens: (1) o
+    frontend chama esta rota com `filename` + `content_type`; (2) faz um
+    `PUT` direto pro `upload_url` retornado, com o arquivo no corpo; (3)
+    guarda `public_url` no formulário e envia junto com
+    `POST/PATCH /questions` (campo `attachments`).
+    """
+    result = create_presigned_upload(filename=body.filename, content_type=body.content_type)
+    return Envelope(
+        data=AttachmentPresignResponse(
+            upload_url=result["upload_url"],
+            public_url=result["public_url"],
+            expires_in=result["expires_in"],
+        )
+    )
 
 
 @router.get("/{question_id}", response_model=Envelope[QuestionDetailResponse])

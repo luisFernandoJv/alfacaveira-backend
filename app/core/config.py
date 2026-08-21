@@ -234,7 +234,43 @@ class Settings(BaseSettings):
         description="TTL para cache de usuários em segundos.",
     )
 
-    
+    # --- Armazenamento de imagens das questões (S3) ------------------- #
+    # Upload direto do browser pro bucket via presigned URL — a API nunca
+    # recebe o binário da imagem, só gera a URL assinada de upload (ver
+    # app/services/storage/s3_service.py). O RDS Postgres continua
+    # guardando apenas a URL final em `question_attachments.url`.
+    S3_BUCKET_NAME: str = Field(default="")
+    S3_REGION: str = Field(default="sa-east-1")
+    # Opcional: só preencher se usar credenciais explícitas em vez de IAM
+    # role (ex.: rodando localmente). Em produção (ECS), deixe em branco e
+    # use uma Task Role com permissão no bucket — nunca commite chave de
+    # acesso.
+    S3_ACCESS_KEY_ID: str = Field(default="")
+    S3_SECRET_ACCESS_KEY: str = Field(default="")
+    # URL pública base do bucket. Se usar CloudFront na frente do S3
+    # (recomendado — evita expor o bucket direto e permite cache/CDN),
+    # aponte para o domínio do CloudFront aqui.
+    S3_PUBLIC_BASE_URL: str = Field(default="")
+    # Prefixo (pasta) dentro do bucket, pra organizar por tipo de conteúdo.
+    S3_QUESTIONS_PREFIX: str = Field(default="questions/attachments")
+    # Segundos de validade da URL assinada de upload.
+    S3_PRESIGN_EXPIRES_SECONDS: int = Field(default=300, ge=60, le=3600)
+    # Tamanho máximo aceito por imagem (bytes). 8 MB é generoso pra
+    # enunciados/gabaritos escaneados.
+    S3_MAX_UPLOAD_BYTES: int = Field(default=8 * 1024 * 1024)
+
+    @model_validator(mode="after")
+    def _validate_s3_config(self) -> "Settings":
+        """Em produção, S3_PUBLIC_BASE_URL é obrigatório se S3_BUCKET_NAME
+        estiver configurado — sem ele as URLs salvas no banco ficam
+        inválidas (apontam pro bucket em vez do CDN/domínio público)."""
+        if self.APP_ENV == "production" and self.S3_BUCKET_NAME and not self.S3_PUBLIC_BASE_URL:
+            raise ValueError(
+                "S3_PUBLIC_BASE_URL é obrigatório em produção quando "
+                "S3_BUCKET_NAME está configurado — sem ele as URLs salvas "
+                "no banco ficam inválidas."
+            )
+        return self
 
 
 @lru_cache
@@ -244,4 +280,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-

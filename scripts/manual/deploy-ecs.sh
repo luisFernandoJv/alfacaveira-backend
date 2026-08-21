@@ -20,6 +20,15 @@ ECS_SERVICE="concurso-backend-svc"
 TASK_FAMILY="concurso-backend"          # família da task definition
 CONTAINER_NAME="concurso-backend"       # nome do container dentro da task def
 PLATFORM="linux/arm64"                  # task roda em ARM64 (Fargate) — build precisa bater
+
+# Variáveis de ambiente da task definition que este script sempre reafirma,
+# independente do que já estava registrado na revisão anterior. Evita que um
+# valor antigo/errado (ex: nome de marca desatualizado) continue se arrastando
+# de deploy em deploy. Adicione outras entradas aqui se precisar travar mais
+# alguma variável.
+declare -A ENFORCED_ENV_VARS=(
+  [SMTP_FROM_NAME]="Alfa Caveira"
+)
 # --------------------------------------------------------------------
 
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
@@ -39,9 +48,28 @@ CURRENT_TASK_DEF=$(aws ecs describe-task-definition \
   --task-definition "$TASK_FAMILY" \
   --region "$AWS_REGION")
 
-NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq --arg IMAGE "${ECR_URI}:${IMAGE_TAG}" --arg NAME "$CONTAINER_NAME" '
+# Monta os pares [{"name": ..., "value": ...}] a partir de ENFORCED_ENV_VARS
+ENFORCED_JSON="[]"
+for key in "${!ENFORCED_ENV_VARS[@]}"; do
+  ENFORCED_JSON=$(echo "$ENFORCED_JSON" | jq --arg N "$key" --arg V "${ENFORCED_ENV_VARS[$key]}" '. + [{"name": $N, "value": $V}]')
+done
+
+NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq \
+  --arg IMAGE "${ECR_URI}:${IMAGE_TAG}" \
+  --arg NAME "$CONTAINER_NAME" \
+  --argjson ENFORCED "$ENFORCED_JSON" '
   .taskDefinition |
-  .containerDefinitions = (.containerDefinitions | map(if .name == $NAME then .image = $IMAGE else . end)) |
+  .containerDefinitions = (.containerDefinitions | map(
+    if .name == $NAME then
+      .image = $IMAGE |
+      # sobrescreve/insere cada variável de ENFORCED, preservando as demais
+      .environment = (
+        (.environment // []) as $current |
+        ($ENFORCED | map(.name)) as $enforcedNames |
+        ($current | map(select(.name as $n | ($enforcedNames | index($n)) | not))) + $ENFORCED
+      )
+    else . end
+  )) |
   del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
 ')
 

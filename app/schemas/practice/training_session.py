@@ -12,7 +12,11 @@ from app.schemas.content.exam_source import (
     ExamEditionResponse,
     OrganizationResponse,
 )
-from app.schemas.content.question import QuestionAlternativePublicResponse, QuestionTagResponse
+from app.schemas.content.question import (
+    QuestionAlternativePublicResponse,
+    QuestionAttachmentResponse,
+    QuestionTagResponse,
+)
 from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
 
 
@@ -56,6 +60,10 @@ class TrainingSessionQuestionResponse(BaseModel):
     difficulty: QuestionDifficulty
     alternatives: list[QuestionAlternativePublicResponse]
     tags: list[QuestionTagResponse]
+    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
+    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
+    # resolução real acontece na sessão de treino, não no detalhe avulso.
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
     position: int
     answered: bool
 

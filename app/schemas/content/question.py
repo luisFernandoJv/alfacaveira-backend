@@ -64,6 +64,27 @@ class QuestionAlternativePublicResponse(BaseModel):
     text: str
 
 
+class QuestionAttachmentInput(BaseModel):
+    """Anexo enviado na criação/edição de questão.
+
+    A imagem já deve estar no S3 (via `POST /questions/attachments/presign`)
+    — aqui só se referencia a URL pública final do objeto.
+    """
+
+    type: str = Field(default="imagem")  # "imagem" | "arquivo"
+    url: str = Field(min_length=1, max_length=1000)
+    alt_text: str | None = Field(default=None, max_length=500)
+
+
+class QuestionAttachmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    type: str
+    url: str
+    alt_text: str | None
+
+
 class QuestionCreateRequest(BaseModel):
     discipline_id: uuid.UUID
     subject_id: uuid.UUID | None = None
@@ -79,6 +100,9 @@ class QuestionCreateRequest(BaseModel):
 
     alternatives: list[QuestionAlternativeInput] = Field(min_length=2, max_length=5)
     tag_ids: list[uuid.UUID] = Field(default_factory=list)
+    # Imagens do enunciado/alternativas, já hospedadas no S3 (ver
+    # QuestionAttachmentInput). Opcional — nem toda questão tem imagem.
+    attachments: list[QuestionAttachmentInput] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_alternatives(self) -> "QuestionCreateRequest":
@@ -111,6 +135,9 @@ class QuestionUpdateRequest(BaseModel):
         default=None, min_length=2, max_length=5
     )
     tag_ids: list[uuid.UUID] | None = None
+    # Se enviado, substitui integralmente o conjunto de anexos (mesmo
+    # comportamento já adotado para `alternatives`/`tag_ids`).
+    attachments: list[QuestionAttachmentInput] | None = None
 
     @model_validator(mode="after")
     def _validate_alternatives(self) -> "QuestionUpdateRequest":
@@ -147,6 +174,10 @@ class QuestionListItem(BaseModel):
     status: QuestionStatus
     tags: list[QuestionTagResponse]
     created_at: datetime
+    # Anexos (imagens) da questão — expostos também na listagem para o
+    # frontend poder mostrar um indicador/miniatura de "questão com imagem"
+    # sem precisar abrir o detalhe.
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
 
     # ETAPA 3 (sessão 6): estado do usuário autenticado para esta questão.
     # Não são colunas de `Question` — `QuestionService.list_questions`
@@ -179,6 +210,7 @@ class QuestionDetailResponse(BaseModel):
     status: QuestionStatus
     alternatives: list[QuestionAlternativeResponse]
     tags: list[QuestionTagResponse]
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

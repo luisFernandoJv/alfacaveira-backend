@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question, QuestionAlternative
+from app.models.content.question_attachment import QuestionAttachment
 from app.models.content.question_revision import QuestionRevision
-from app.models.enums import QuestionAnswerStatus, QuestionRevisionType, QuestionStatus
+from app.models.enums import AttachmentType, QuestionAnswerStatus, QuestionRevisionType, QuestionStatus
 from app.repositories.content.exam_source_repository import ExamBoardRepository
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.content.question_tag_repository import QuestionTagRepository
@@ -42,6 +43,10 @@ def _snapshot(question: Question) -> dict[str, object]:
             for alt in question.alternatives
         ],
         "tag_ids": [str(tag.id) for tag in question.tags],
+        "attachments": [
+            {"type": att.type.value, "url": att.url, "alt_text": att.alt_text}
+            for att in question.attachments
+        ],
     }
 
 
@@ -212,6 +217,12 @@ class QuestionService:
             for alt in data.alternatives
         ]
         question.tags = tags
+        question.attachments = [
+            QuestionAttachment(
+                type=AttachmentType(att.type), url=att.url, alt_text=att.alt_text
+            )
+            for att in data.attachments
+        ]
 
         async with UnitOfWork(self._session):
             await self._questions.add(question)
@@ -231,7 +242,9 @@ class QuestionService:
     ) -> Question:
         question = await self.get_question(question_id)
 
-        fields = data.model_dump(exclude_unset=True, exclude={"alternatives", "tag_ids"})
+        fields = data.model_dump(
+            exclude_unset=True, exclude={"alternatives", "tag_ids", "attachments"}
+        )
         if "discipline_id" in fields:
             discipline = await self._disciplines.get_by_id(fields["discipline_id"])
             if discipline is None:
@@ -261,6 +274,18 @@ class QuestionService:
 
             if new_tags is not None:
                 question.tags = new_tags
+
+            if data.attachments is not None:
+                # Substitui integralmente o conjunto de anexos, mesmo padrão
+                # já adotado para `alternatives` — o cascade
+                # "all, delete-orphan" da relationship cuida de apagar os
+                # antigos que saírem da lista.
+                question.attachments = [
+                    QuestionAttachment(
+                        type=AttachmentType(att.type), url=att.url, alt_text=att.alt_text
+                    )
+                    for att in data.attachments
+                ]
 
             await self._session.flush()
             self._session.add(
