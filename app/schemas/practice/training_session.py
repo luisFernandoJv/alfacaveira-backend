@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
 from app.models.enums import QuestionDifficulty
 from app.schemas.content.exam_source import (
     ExamBoardResponse,
@@ -36,7 +37,7 @@ class TrainingSessionCreateRequest(BaseModel):
     
     question_ids: list[uuid.UUID] | None = Field(
         default=None,
-        max_length=100,
+        max_length=MAX_BULK_QUESTION_SELECTION,
         description="Lista explícita de IDs de questões para montar a sessão"
     )
     # 🔥 CORREÇÃO: Adicionar notebook_id

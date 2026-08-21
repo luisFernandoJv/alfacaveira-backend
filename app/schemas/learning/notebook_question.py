@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
 from app.schemas.content.question import QuestionListItem
 
 
@@ -30,7 +31,9 @@ class NotebookQuestionAddRequest(BaseModel):
 class NotebookQuestionBulkAddRequest(BaseModel):
     """Request para adicionar múltiplas questões ao caderno."""
 
-    question_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    question_ids: list[uuid.UUID] = Field(
+        min_length=1, max_length=MAX_BULK_QUESTION_SELECTION
+    )
 
 
 class NotebookQuestionListResponse(BaseModel):
@@ -46,11 +49,15 @@ class NotebookQuestionMoveRequest(BaseModel):
     """Request para mover questões entre cadernos."""
 
     target_notebook_id: uuid.UUID
-    question_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    question_ids: list[uuid.UUID] = Field(
+        min_length=1, max_length=MAX_BULK_QUESTION_SELECTION
+    )
 
 
 class NotebookQuestionCopyRequest(BaseModel):
     """Request para copiar questões entre cadernos."""
 
     target_notebook_id: uuid.UUID
-    question_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    question_ids: list[uuid.UUID] = Field(
+        min_length=1, max_length=MAX_BULK_QUESTION_SELECTION
+    )

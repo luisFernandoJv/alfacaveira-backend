@@ -158,6 +158,21 @@ class QuestionRepository(BaseRepository[Question]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    async def list_ids(self, filters: QuestionFilters, limit: int) -> list[uuid.UUID]:
+        """Retorna só os IDs que casam com os filtros, sem carregar relações —
+        usado por 'selecionar tudo que bate com o filtro' no Banco de
+        Questões. `limit` é responsabilidade de quem chama (ver
+        `MAX_BULK_QUESTION_SELECTION` em `app/core/constants.py`).
+        """
+        stmt = (
+            select(Question.id)
+            .order_by(Question.created_at.asc(), Question.id.asc())
+            .limit(limit)
+        )
+        stmt = self._apply_filters(stmt, filters)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def count(self, filters: QuestionFilters) -> int:
         """Conta questões que casam com os filtros, sem paginar.
 

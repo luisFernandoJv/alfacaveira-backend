@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.platform.question_report import QuestionReportCreateRequest, QuestionReportResponse
 from app.services.platform.question_report_service import QuestionReportService
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
@@ -159,6 +160,62 @@ async def get_question_facets(
     )
     facets = await question_service.get_facets(filters=filters, user_id=current_user.id)
     return Envelope(data=QuestionFacetsResponse.model_validate(facets))
+
+
+@router.get("/ids", response_model=Envelope[list[uuid.UUID]])
+async def list_question_ids(
+    current_user: CurrentUser,
+    question_service: QuestionServiceDep,
+    discipline_id: Annotated[uuid.UUID | None, Query()] = None,
+    subject_id: Annotated[uuid.UUID | None, Query()] = None,
+    topic_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_board_id: Annotated[uuid.UUID | None, Query()] = None,
+    exam_edition_id: Annotated[uuid.UUID | None, Query()] = None,
+    organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    year: Annotated[int | None, Query()] = None,
+    difficulty: Annotated[QuestionDifficulty | None, Query()] = None,
+    tag_id: Annotated[uuid.UUID | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    question_status: Annotated[
+        QuestionStatus | None, Query(alias="status")
+    ] = QuestionStatus.PUBLICADA,
+    answer_status: Annotated[
+        QuestionAnswerStatus | None,
+        Query(description="Filtra pelo status de resposta do usuário autenticado."),
+    ] = None,
+    favorite_only: Annotated[
+        bool | None,
+        Query(description="Se true, retorna somente IDs de questões favoritadas."),
+    ] = None,
+) -> Envelope[list[uuid.UUID]]:
+    """Só os IDs (até `MAX_BULK_QUESTION_SELECTION`) que casam com o filtro
+    atual — usado pelo botão "Selecionar todas que batem com o filtro" no
+    Banco de Questões, para permitir seleção em lote além da página
+    carregada (`hooks/use-questions-api.ts` -> `fetchMatchingQuestionIds`).
+
+    Rota declarada ANTES de `/{question_id}` de propósito (mesmo motivo de
+    `/facets`) — caso contrário `"ids"` seria capturado como um
+    `question_id` inválido.
+    """
+    filters = QuestionFilters(
+        discipline_id=discipline_id,
+        subject_id=subject_id,
+        topic_id=topic_id,
+        exam_board_id=exam_board_id,
+        exam_edition_id=exam_edition_id,
+        organization_id=organization_id,
+        year=year,
+        difficulty=difficulty,
+        status=question_status,
+        tag_id=tag_id,
+        search=search,
+        answer_status=answer_status,
+        favorite_only=favorite_only,
+    )
+    ids = await question_service.list_question_ids(
+        filters=filters, user_id=current_user.id, limit=MAX_BULK_QUESTION_SELECTION
+    )
+    return Envelope(data=ids)
 
 
 class AttachmentPresignRequest(BaseModel):

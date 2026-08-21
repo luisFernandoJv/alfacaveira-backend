@@ -6,6 +6,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
 from app.core.exceptions import NotFoundError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question, QuestionAlternative
@@ -167,6 +168,19 @@ class QuestionService:
         """
         filters.user_id = user_id
         return await self._questions.count(filters)
+
+    async def list_question_ids(
+        self,
+        filters: QuestionFilters,
+        user_id: uuid.UUID | None = None,
+        limit: int = MAX_BULK_QUESTION_SELECTION,
+    ) -> list[uuid.UUID]:
+        """IDs (só isso, sem relações) que casam com os filtros — usado por
+        'selecionar tudo' no Banco de Questões. Se o total filtrado passar
+        de `limit`, o front avisa o usuário (não é um erro silencioso).
+        """
+        filters.user_id = user_id
+        return await self._questions.list_ids(filters, limit=limit)
 
     @staticmethod
     async def _session_gather(*coros):
