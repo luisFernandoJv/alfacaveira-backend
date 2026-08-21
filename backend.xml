@@ -90,6 +90,7 @@ app/
         reviews.py
         training_sessions.py
       __init__.py
+      identity-users.py
       router.py
     __init__.py
   core/
@@ -291,6 +292,9 @@ app/
       exam_source_service.py
       question_service.py
       taxonomy_service.py
+    export/
+      __init__.py
+      notebook_pdf_service.py
     identity/
       __init__.py
       auth_service.py
@@ -2036,142 +2040,6 @@ async def list_topics(
 """Endpoints HTTP do contexto 'identity'."""
 </file>
 
-<file path="app/api/v1/identity/users.py">
-"""Endpoints HTTP de conta, perfil e administração de usuários."""
-
-import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.schemas.identity import (
-    AdminUserListItem,
-    ChangePasswordRequest,
-    MeResponse,
-    UpdateAccountRequest,
-    UpdateProfileRequest,
-    UpdateUserStatusRequest,
-    UserProfileResponse,
-)
-from app.security.dependencies import CurrentAdminUser, CurrentUser
-from app.services.identity import UserService
-
-router = APIRouter()
-
-
-def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
-    return UserService(session)
-
-
-UserServiceDep = Annotated[UserService, Depends(get_user_service)]
-
-
-@router.get("/me", response_model=Envelope[MeResponse])
-async def get_me(
-    current_user: CurrentUser, user_service: UserServiceDep
-) -> Envelope[MeResponse]:
-    profile = await user_service.get_profile(current_user.id)
-    return Envelope(
-        data=MeResponse(
-            id=current_user.id,
-            email=current_user.email,
-            full_name=current_user.full_name,
-            is_admin=current_user.is_admin,
-            is_active=current_user.is_active,
-            created_at=current_user.created_at,
-            profile=UserProfileResponse.model_validate(profile),
-        )
-    )
-
-
-@router.patch("/me", response_model=Envelope[MeResponse])
-async def update_me(
-    body: UpdateAccountRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> Envelope[MeResponse]:
-    user = await user_service.update_account(current_user, full_name=body.full_name)
-    profile = await user_service.get_profile(user.id)
-    return Envelope(
-        data=MeResponse(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            is_admin=user.is_admin,
-            is_active=user.is_active,
-            created_at=user.created_at,
-            profile=UserProfileResponse.model_validate(profile),
-        )
-    )
-
-
-@router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
-async def update_my_profile(
-    body: UpdateProfileRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> Envelope[UserProfileResponse]:
-    fields = body.model_dump(exclude_unset=True)
-    profile = await user_service.update_profile(current_user.id, fields)
-    return Envelope(data=UserProfileResponse.model_validate(profile))
-
-
-@router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)
-async def change_my_password(
-    body: ChangePasswordRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> None:
-    await user_service.change_password(
-        current_user, current_password=body.current_password, new_password=body.new_password
-    )
-
-
-@router.get("", response_model=Envelope[list[AdminUserListItem]])
-async def list_users(
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-) -> Envelope[list[AdminUserListItem]]:
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    users = await user_service.list_users(limit=limit, cursor_id=cursor_id)
-    next_cursor = CursorPage.encode_cursor(str(users[-1].id)) if len(users) == limit else None
-
-    return Envelope(
-        data=[AdminUserListItem.model_validate(u) for u in users],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
-    )
-
-
-@router.get("/{user_id}", response_model=Envelope[AdminUserListItem])
-async def get_user(
-    user_id: uuid.UUID,
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-) -> Envelope[AdminUserListItem]:
-    user = await user_service.get_user(user_id)
-    return Envelope(data=AdminUserListItem.model_validate(user))
-
-
-@router.patch("/{user_id}/status", response_model=Envelope[AdminUserListItem])
-async def update_user_status(
-    user_id: uuid.UUID,
-    body: UpdateUserStatusRequest,
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-) -> Envelope[AdminUserListItem]:
-    user = await user_service.set_active_status(user_id, body.is_active)
-    return Envelope(data=AdminUserListItem.model_validate(user))
-</file>
-
 <file path="app/api/v1/learning/__init__.py">
 """Endpoints HTTP do contexto 'learning'."""
 </file>
@@ -2875,6 +2743,160 @@ async def skip_review(
 
 <file path="app/api/v1/__init__.py">
 """Versão 1 da API (/api/v1)."""
+</file>
+
+<file path="app/api/v1/identity-users.py">
+"""Endpoints HTTP de conta, perfil e administração de usuários."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.schemas.identity import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+)
+from app.security.dependencies import CurrentAdminUser, CurrentUser
+from app.services.identity import UserService
+from app.core.config import settings
+from app.services.storage.s3_service import create_presigned_upload
+
+router = APIRouter()
+
+
+def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
+    return UserService(session)
+
+
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]
+
+
+@router.get("/me", response_model=Envelope[MeResponse])
+async def get_me(
+    current_user: CurrentUser, user_service: UserServiceDep
+) -> Envelope[MeResponse]:
+    profile = await user_service.get_profile(current_user.id)
+    return Envelope(
+        data=MeResponse(
+            id=current_user.id,
+            email=current_user.email,
+            full_name=current_user.full_name,
+            is_admin=current_user.is_admin,
+            is_active=current_user.is_active,
+            created_at=current_user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+@router.patch("/me", response_model=Envelope[MeResponse])
+async def update_me(
+    body: UpdateAccountRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[MeResponse]:
+    user = await user_service.update_account(current_user, full_name=body.full_name)
+    profile = await user_service.get_profile(user.id)
+    return Envelope(
+        data=MeResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            is_admin=user.is_admin,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+
+@router.post("/me/avatar/presign", response_model=Envelope[dict])
+async def presign_my_avatar(
+    body: AvatarPresignRequest,
+    current_user: CurrentUser,
+) -> Envelope[dict]:
+    """Gera URL presignada para upload da foto de perfil no S3."""
+    upload = create_presigned_upload(
+        filename=body.filename,
+        content_type=body.content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    return Envelope(data=upload)
+
+
+@router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
+async def update_my_profile(
+    body: UpdateProfileRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[UserProfileResponse]:
+    fields = body.model_dump(exclude_unset=True)
+    profile = await user_service.update_profile(current_user.id, fields)
+    return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+@router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> None:
+    await user_service.change_password(
+        current_user, current_password=body.current_password, new_password=body.new_password
+    )
+
+
+@router.get("", response_model=Envelope[list[AdminUserListItem]])
+async def list_users(
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[list[AdminUserListItem]]:
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    users = await user_service.list_users(limit=limit, cursor_id=cursor_id)
+    next_cursor = CursorPage.encode_cursor(str(users[-1].id)) if len(users) == limit else None
+
+    return Envelope(
+        data=[AdminUserListItem.model_validate(u) for u in users],
+        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+    )
+
+
+@router.get("/{user_id}", response_model=Envelope[AdminUserListItem])
+async def get_user(
+    user_id: uuid.UUID,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.get_user(user_id)
+    return Envelope(data=AdminUserListItem.model_validate(user))
+
+
+@router.patch("/{user_id}/status", response_model=Envelope[AdminUserListItem])
+async def update_user_status(
+    user_id: uuid.UUID,
+    body: UpdateUserStatusRequest,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.set_active_status(user_id, body.is_active)
+    return Envelope(data=AdminUserListItem.model_validate(user))
 </file>
 
 <file path="app/api/__init__.py">
@@ -4057,57 +4079,6 @@ class FlashcardReview(UUIDPKMixin, TimestampMixin, Base):
     flashcard: Mapped["Flashcard"] = relationship(back_populates="review_state")
 </file>
 
-<file path="app/models/learning/notebook_folder.py">
-# app/models/learning/notebook_folder.py
-"""Modelo de pasta para organização hierárquica de cadernos."""
-
-import uuid
-from typing import List, Optional
-
-from sqlalchemy import ForeignKey, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database.base import Base
-from app.models.base import TimestampMixin, UUIDPKMixin
-
-
-class NotebookFolder(UUIDPKMixin, TimestampMixin, Base):
-    """Pasta para organizar cadernos em hierarquia."""
-
-    __tablename__ = "notebook_folders"
-    __table_args__ = (
-        UniqueConstraint("user_id", "name", name="uq_notebook_folder_user_name"),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("notebook_folders.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-    )
-
-    # Relacionamentos
-    parent: Mapped[Optional["NotebookFolder"]] = relationship(
-        "NotebookFolder",
-        remote_side="NotebookFolder.id",
-        backref="children",
-        single_parent=True,
-    )
-    notebooks: Mapped[List["Notebook"]] = relationship(
-        "Notebook",
-        back_populates="folder",
-        cascade="all, delete-orphan",
-    )
-</file>
-
 <file path="app/models/learning/notebook_question.py">
 # app/models/learning/notebook_question.py
 """Modelo de relação entre caderno e questão."""
@@ -4210,70 +4181,6 @@ class NotebookTag(UUIDPKMixin, TimestampMixin, Base):
         "Notebook",
         secondary=notebook_tag_links,
         back_populates="tags",
-    )
-</file>
-
-<file path="app/models/learning/notebook.py">
-# app/models/learning/notebook.py
-"""Modelo de caderno do usuário."""
-
-import uuid
-from typing import List, Optional
-
-from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database.base import Base
-from app.models.base import TimestampMixin, UUIDPKMixin
-
-# 🔥 CORREÇÃO: Importar a tabela do arquivo correto
-from app.models.learning.notebook_tag import notebook_tag_links
-from app.models.learning.notebook_folder import NotebookFolder
-from app.models.learning.notebook_question import NotebookQuestion
-from app.models.learning.notebook_tag import NotebookTag
-
-
-class Notebook(UUIDPKMixin, TimestampMixin, Base):
-    """Caderno do usuário para organizar questões."""
-
-    __tablename__ = "notebooks"
-    __table_args__ = (
-        UniqueConstraint("user_id", "name", name="uq_notebook_user_name"),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("notebook_folders.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-    is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-
-    # Relacionamentos
-    folder: Mapped[Optional["NotebookFolder"]] = relationship(
-        "NotebookFolder",
-        back_populates="notebooks",
-        foreign_keys=[folder_id],
-    )
-    questions: Mapped[List["NotebookQuestion"]] = relationship(
-        "NotebookQuestion",
-        back_populates="notebook",
-        cascade="all, delete-orphan",
-        order_by="NotebookQuestion.added_at.desc()",
-    )
-    tags: Mapped[List["NotebookTag"]] = relationship(
-        "NotebookTag",
-        secondary=notebook_tag_links,
-        back_populates="notebooks",
     )
 </file>
 
@@ -6443,220 +6350,6 @@ class NotebookFolderRepository(BaseRepository[NotebookFolder]):
         return list(reversed(result))
 </file>
 
-<file path="app/repositories/learning/notebook_question_repository.py">
-# app/repositories/learning/notebook_question_repository.py
-"""Repositório de acesso a dados de `NotebookQuestion`."""
-
-import uuid
-from typing import Optional
-
-from sqlalchemy import select, func, delete, or_
-from sqlalchemy.orm import selectinload
-
-from app.models.content.question import Question
-from app.models.learning.notebook_question import NotebookQuestion
-from app.repositories.base import BaseRepository
-
-# 🔥 CORREÇÃO: eager-load da árvore completa de `Question`, não só o objeto
-# raso. `QuestionListItem` (usado por `NotebookQuestionResponse.question`)
-# exige discipline/subject/topic/exam_board/exam_edition/organization/tags;
-# sem carregar cada um deles, o Pydantic tenta lazy-load fora do contexto
-# assíncrono da sessão ao serializar e estoura `MissingGreenlet`.
-# Mesmo conjunto de relações usado por `QuestionRepository._RELATIONS`
-# (app/repositories/content/question_repository.py) — mantido em espelho
-# aqui porque `NotebookQuestion.question` é carregado a partir de outra
-# raiz de query (NotebookQuestion, não Question), então não dá para
-# reaproveitar a tupla de lá diretamente.
-_QUESTION_RELATIONS = (
-    selectinload(NotebookQuestion.question).selectinload(Question.discipline),
-    selectinload(NotebookQuestion.question).selectinload(Question.subject),
-    selectinload(NotebookQuestion.question).selectinload(Question.topic),
-    selectinload(NotebookQuestion.question).selectinload(Question.exam_board),
-    selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
-    selectinload(NotebookQuestion.question).selectinload(Question.organization),
-    selectinload(NotebookQuestion.question).selectinload(Question.tags),
-)
-
-# Mantido por compatibilidade com quem já importava `_RELATIONS` deste módulo.
-_RELATIONS = _QUESTION_RELATIONS
-
-
-class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
-    """Repositório de questões em cadernos."""
-
-    model = NotebookQuestion
-
-    async def get_owned(
-        self,
-        notebook_id: uuid.UUID,
-        question_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> NotebookQuestion | None:
-        """Busca uma relação notebook-question validando ownership do notebook."""
-        stmt = (
-            select(NotebookQuestion)
-            .join(NotebookQuestion.notebook)
-            .where(
-                NotebookQuestion.notebook_id == notebook_id,
-                NotebookQuestion.question_id == question_id,
-                NotebookQuestion.notebook.has(user_id=user_id),
-            )
-            .options(*_QUESTION_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def list_by_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        limit: int,
-        cursor_id: Optional[uuid.UUID] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[NotebookQuestion], int]:
-        """Lista questões de um caderno."""
-        stmt = (
-            select(NotebookQuestion)
-            .join(NotebookQuestion.notebook)
-            .where(
-                NotebookQuestion.notebook_id == notebook_id,
-                NotebookQuestion.notebook.has(user_id=user_id),
-            )
-            .options(*_QUESTION_RELATIONS)
-            .order_by(NotebookQuestion.added_at.desc(), NotebookQuestion.id.desc())
-            .limit(limit)
-        )
-
-        if search:
-            search_term = f"%{search}%"
-            # 🔥 CORREÇÃO: `statement` não existia neste escopo (NameError
-            # silencioso — só estourava quando alguém de fato usava ?search=).
-            # O correto é filtrar pela coluna `Question.statement`.
-            stmt = stmt.where(
-                or_(
-                    NotebookQuestion.question.has(Question.statement.ilike(search_term)),
-                )
-            )
-
-        if cursor_id is not None:
-            cursor = await self.get_by_id(cursor_id)
-            if cursor is not None:
-                stmt = stmt.where(
-                    (NotebookQuestion.added_at < cursor.added_at)
-                    | (
-                        (NotebookQuestion.added_at == cursor.added_at)
-                        & (NotebookQuestion.id < cursor.id)
-                    )
-                )
-
-        result = await self.session.execute(stmt)
-        items = list(result.scalars().unique().all())
-
-        # Contagem total
-        count_stmt = (
-            select(func.count())
-            .select_from(NotebookQuestion)
-            .join(NotebookQuestion.notebook)
-            .where(
-                NotebookQuestion.notebook_id == notebook_id,
-                NotebookQuestion.notebook.has(user_id=user_id),
-            )
-        )
-
-        if search:
-            search_term = f"%{search}%"
-            count_stmt = count_stmt.where(
-                NotebookQuestion.question.has(Question.statement.ilike(search_term)),
-            )
-
-        count_result = await self.session.execute(count_stmt)
-        total = count_result.scalar() or 0
-
-        return items, total
-
-    async def exists(
-        self,
-        notebook_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> bool:
-        """Verifica se uma questão já está no caderno."""
-        stmt = select(func.count()).select_from(NotebookQuestion).where(
-            NotebookQuestion.notebook_id == notebook_id,
-            NotebookQuestion.question_id == question_id,
-        )
-        result = await self.session.execute(stmt)
-        return (result.scalar() or 0) > 0
-
-    async def list_by_ids_with_relations(
-        self,
-        notebook_question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Busca por lote de IDs de `NotebookQuestion`, com `question` e sua
-        árvore de relações já carregadas.
-
-        Usado para recarregar itens recém-criados (bulk_create) sem cair no
-        mesmo bug de lazy-load fora de contexto assíncrono que afetava
-        `bulk_create` antes desta correção.
-        """
-        if not notebook_question_ids:
-            return []
-        stmt = (
-            select(NotebookQuestion)
-            .where(NotebookQuestion.id.in_(notebook_question_ids))
-            .options(*_QUESTION_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def bulk_create(
-        self,
-        notebook_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Cria múltiplas relações em lote."""
-        items = []
-        for question_id in question_ids:
-            nq = NotebookQuestion(
-                notebook_id=notebook_id,
-                question_id=question_id,
-            )
-            self.session.add(nq)
-            items.append(nq)
-
-        await self.session.flush()
-
-        # 🔥 CORREÇÃO: recarregar em uma única query com as relações de
-        # `question` já carregadas (`self.get_by_id`, herdado de
-        # `BaseRepository`, não aplica nenhum `selectinload` — o retorno
-        # anterior quebrava na serialização com `MissingGreenlet`).
-        ids = [item.id for item in items]
-        return await self.list_by_ids_with_relations(ids)
-
-    async def delete_by_notebook_and_question(
-        self,
-        notebook_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> bool:
-        """Remove uma questão de um caderno."""
-        stmt = delete(NotebookQuestion).where(
-            NotebookQuestion.notebook_id == notebook_id,
-            NotebookQuestion.question_id == question_id,
-        )
-        result = await self.session.execute(stmt)
-        return result.rowcount > 0
-
-    async def delete_by_notebook(
-        self,
-        notebook_id: uuid.UUID,
-    ) -> int:
-        """Remove todas as questões de um caderno."""
-        stmt = delete(NotebookQuestion).where(
-            NotebookQuestion.notebook_id == notebook_id
-        )
-        result = await self.session.execute(stmt)
-        return result.rowcount
-</file>
-
 <file path="app/repositories/learning/notebook_tag_repository.py">
 # app/repositories/learning/notebook_tag_repository.py
 """Repositório de acesso a dados de `NotebookTag`."""
@@ -7292,216 +6985,6 @@ from app.repositories.practice.question_attempt_repository import QuestionAttemp
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
 
 __all__ = ["QuestionAttemptRepository", "TrainingSessionRepository"]
-</file>
-
-<file path="app/repositories/practice/review_repository.py">
-"""Repositório de acesso a dados de `Review`."""
-
-import uuid
-from datetime import date, timedelta
-
-from sqlalchemy import func, select, update
-from sqlalchemy.orm import selectinload
-
-from app.models.practice.review import Review, ReviewStatus
-from app.repositories.base import BaseRepository
-
-_RELATIONS = (selectinload(Review.question),)
-
-
-class ReviewRepository(BaseRepository[Review]):
-    model = Review
-
-    async def get_with_question(self, review_id: uuid.UUID) -> Review | None:
-        """Busca revisão com a questão carregada."""
-        stmt = select(Review).where(Review.id == review_id).options(*_RELATIONS)
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_owned(self, review_id: uuid.UUID, user_id: uuid.UUID) -> Review | None:
-        """Busca revisão restrita ao dono."""
-        stmt = (
-            select(Review)
-            .where(Review.id == review_id, Review.user_id == user_id)
-            .options(*_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def list_due(self, user_id: uuid.UUID, limit: int = 50) -> list[Review]:
-        """Lista revisões pendentes, ordenadas por prioridade e data de vencimento."""
-        today = date.today()
-        stmt = (
-            select(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.PENDENTE,
-                Review.due_date <= today,
-            )
-            .options(*_RELATIONS)
-            .order_by(
-                Review.priority.desc(),
-                Review.due_date.asc(),
-            )
-            .limit(limit)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def list_upcoming(self, user_id: uuid.UUID, days: int = 7, limit: int = 50) -> list[Review]:
-        """Lista revisões futuras (próximos N dias)."""
-        today = date.today()
-        future = today + timedelta(days=days)
-        stmt = (
-            select(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.PENDENTE,
-                Review.due_date > today,
-                Review.due_date <= future,
-            )
-            .options(*_RELATIONS)
-            .order_by(Review.due_date.asc())
-            .limit(limit)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def count_due(self, user_id: uuid.UUID) -> int:
-        """Conta revisões pendentes para hoje."""
-        today = date.today()
-        stmt = (
-            select(func.count())
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.PENDENTE,
-                Review.due_date <= today,
-            )
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one()
-
-    async def count_overdue(self, user_id: uuid.UUID) -> int:
-        """Conta revisões atrasadas."""
-        today = date.today()
-        stmt = (
-            select(func.count())
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.PENDENTE,
-                Review.due_date < today,
-            )
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one()
-
-    async def count_completed_today(self, user_id: uuid.UUID) -> int:
-        """Conta revisões concluídas hoje."""
-        today = date.today()
-        stmt = (
-            select(func.count())
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.CONCLUIDA,
-                func.date(Review.updated_at) == today,
-            )
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one()
-
-    async def update_status(
-        self,
-        review_id: uuid.UUID,
-        status: ReviewStatus,
-        **kwargs,
-    ) -> bool:
-        """Atualiza status e campos adicionais de uma revisão."""
-        values = {"status": status, **kwargs}
-        stmt = (
-            update(Review)
-            .where(Review.id == review_id)
-            .values(**values)
-        )
-        result = await self.session.execute(stmt)
-        return result.rowcount == 1
-
-    async def bulk_create(self, reviews: list[Review]) -> list[Review]:
-        """Cria múltiplas revisões em lote."""
-        for review in reviews:
-            self.session.add(review)
-        await self.session.flush()
-        return reviews
-
-    async def get_stats(self, user_id: uuid.UUID) -> dict:
-        """Estatísticas agregadas de revisão."""
-        today = date.today()
-        thirty_days_ago = today - timedelta(days=30)
-        
-        total_due = await self.count_due(user_id)
-        overdue = await self.count_overdue(user_id)
-        completed_today = await self.count_completed_today(user_id)
-
-        # Total de revisões nos últimos 30 dias
-        total_stmt = (
-            select(func.count())
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.created_at >= thirty_days_ago,
-            )
-        )
-        total_result = await self.session.execute(total_stmt)
-        total = total_result.scalar() or 0
-
-        # Revisões concluídas nos últimos 30 dias
-        completed_stmt = (
-            select(func.count())
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.CONCLUIDA,
-                Review.created_at >= thirty_days_ago,
-            )
-        )
-        completed_result = await self.session.execute(completed_stmt)
-        completed = completed_result.scalar() or 0
-
-        completion_rate = round(completed / total * 100, 1) if total > 0 else 0
-
-        # Intervalo médio
-        avg_stmt = (
-            select(func.avg(Review.interval_days))
-            .select_from(Review)
-            .where(
-                Review.user_id == user_id,
-                Review.status == ReviewStatus.CONCLUIDA,
-                Review.review_count > 0,
-            )
-        )
-        avg_result = await self.session.execute(avg_stmt)
-        avg_interval = avg_result.scalar() or 0
-
-        # Maior sequência de acertos consecutivos
-        streak_stmt = (
-            select(func.max(Review.consecutive_correct))
-            .select_from(Review)
-            .where(Review.user_id == user_id)
-        )
-        streak_result = await self.session.execute(streak_stmt)
-        longest_streak = streak_result.scalar() or 0
-
-        return {
-            "total_due": total_due,
-            "due_today": total_due,
-            "overdue": overdue,
-            "completed_today": completed_today,
-            "completion_rate": completion_rate,
-            "average_interval": round(avg_interval, 1) if avg_interval else 0,
-            "longest_streak": longest_streak,
-        }
 </file>
 
 <file path="app/repositories/practice/training_session_repository.py">
@@ -8145,78 +7628,6 @@ class TopicResponse(BaseModel):
     slug: str
 </file>
 
-<file path="app/schemas/identity/user.py">
-"""Schemas de request/response de usuário e perfil."""
-
-import uuid
-from datetime import date, datetime
-
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-
-
-class UserProfileResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    target_exam: str | None = None
-    avatar_url: str | None = None
-    bio: str | None = None
-    phone: str | None = None
-    birth_date: date | None = None
-
-
-class MeResponse(BaseModel):
-    """Usuário autenticado com o perfil embutido (usado em GET /users/me)."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    is_admin: bool
-    is_active: bool
-    created_at: datetime
-    profile: UserProfileResponse
-
-
-class UpdateAccountRequest(BaseModel):
-    """Campos de conta (tabela `users`) que o próprio usuário pode alterar."""
-
-    full_name: str | None = Field(default=None, min_length=2, max_length=255)
-
-
-class UpdateProfileRequest(BaseModel):
-    """Campos de perfil (tabela `user_profiles`).
-
-    Todos opcionais: PATCH parcial. Enviar explicitamente `null` limpa o campo.
-    """
-
-    target_exam: str | None = Field(default=None, max_length=255)
-    avatar_url: str | None = Field(default=None, max_length=500)
-    bio: str | None = Field(default=None, max_length=1000)
-    phone: str | None = Field(default=None, max_length=30)
-    birth_date: date | None = None
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=8, max_length=128)
-
-
-class AdminUserListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    is_admin: bool
-    is_active: bool
-    created_at: datetime
-
-
-class UpdateUserStatusRequest(BaseModel):
-    is_active: bool
-</file>
-
 <file path="app/schemas/learning/notebook_folder.py">
 # app/schemas/learning/notebook_folder.py
 """Schemas de request/response de pastas de cadernos."""
@@ -8293,88 +7704,6 @@ class NotebookTagListResponse(BaseModel):
 
     items: list[NotebookTagResponse]
     total: int
-</file>
-
-<file path="app/schemas/learning/notebook.py">
-# app/schemas/learning/notebook.py
-"""Schemas de request/response de cadernos."""
-
-import uuid
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, Field, computed_field
-
-from app.schemas.content.question import QuestionListItem
-from app.schemas.learning.notebook_folder import NotebookFolderResponse
-from app.schemas.learning.notebook_tag import NotebookTagResponse
-
-
-class NotebookResponse(BaseModel):
-    """Resposta de um caderno (metadados)."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    user_id: uuid.UUID
-    name: str
-    description: str | None
-    folder_id: uuid.UUID | None
-    folder: NotebookFolderResponse | None
-    is_favorite: bool
-    created_at: datetime
-    updated_at: datetime
-
-    @computed_field
-    @property
-    def question_count(self) -> int:
-        """Número de questões no caderno."""
-        # Se o objeto tiver a lista de questions carregada, usa ela
-        if hasattr(self, 'questions') and self.questions is not None:
-            return len(self.questions)
-        # Caso contrário, tenta usar o atributo que pode ter sido definido
-        if hasattr(self, '_question_count'):
-            return self._question_count
-        return 0
-
-
-class NotebookDetailResponse(NotebookResponse):
-    """Resposta detalhada de um caderno (com questões)."""
-
-    questions: list[QuestionListItem] = Field(default_factory=list)
-
-
-class NotebookCreateRequest(BaseModel):
-    """Request para criar um caderno."""
-
-    name: str = Field(min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=1000)
-    folder_id: uuid.UUID | None = None
-    tag_ids: list[uuid.UUID] = Field(default_factory=list)
-
-
-class NotebookUpdateRequest(BaseModel):
-    """Request para atualizar um caderno."""
-
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=1000)
-    folder_id: uuid.UUID | None = None
-    is_favorite: bool | None = None
-    tag_ids: list[uuid.UUID] | None = None
-
-
-class NotebookListResponse(BaseModel):
-    """Lista de cadernos do usuário."""
-
-    items: list[NotebookResponse]
-    total: int
-    next_cursor: str | None = None
-    has_more: bool = False
-
-
-class NotebookFavoriteToggleRequest(BaseModel):
-    """Request para alternar favorito."""
-
-    is_favorite: bool
 </file>
 
 <file path="app/schemas/platform/__init__.py">
@@ -9158,97 +8487,6 @@ class RankingService:
 """Serviços do contexto 'billing'."""
 </file>
 
-<file path="app/services/billing/feature_gate_service.py">
-"""Único ponto de leitura de "o usuário X tem direito à feature Y" que
-módulos fora de `billing` podem importar (`practice`, `learning`,
-`analytics`, etc.). Nenhum outro módulo deve importar `Plan`, `Subscription`
-ou `PlanFeature` diretamente — só conhece `FeatureKey` (enum) e este service.
-
-Resolução do plano efetivo do usuário:
-    assinatura ATIVA (`SubscriptionRepository.get_active_by_user`) → o plano
-    dela; sem assinatura ativa → plano FREE (`FREE_PLAN_SLUG`), por
-    convenção nunca representado por uma linha em `subscriptions`.
-
-Decisão registrada no doc de acompanhamento: sem dependência de Redis por
-enquanto — a leitura já é uma única query com `selectinload` (sem N+1) via
-`SubscriptionRepository.get_active_by_user`/`PlanRepository.
-get_by_slug_with_features`. Cache entra só se isso aparecer como gargalo real
-(KISS/YAGNI).
-"""
-
-import uuid
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ForbiddenError, NotFoundError
-from app.models.billing.plan import Plan
-from app.models.billing.plan_feature import PlanFeature
-from app.models.enums import FeatureKey
-from app.repositories.billing.plan_repository import PlanRepository
-from app.repositories.billing.subscription_repository import SubscriptionRepository
-
-# Plano concedido a todo usuário sem assinatura paga. Precisa existir no
-# banco com este slug exato (seed dos planos — Etapa 6); se não existir,
-# `get_effective_plan` levanta `NotFoundError` de propósito, em vez de
-# assumir silenciosamente "sem features", para deixar o problema de
-# configuração óbvio em vez de mascarado.
-FREE_PLAN_SLUG = "free"
-
-
-class FeatureGateService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._subscriptions = SubscriptionRepository(session)
-        self._plans = PlanRepository(session)
-
-    async def get_effective_plan(self, user_id: uuid.UUID) -> Plan:
-        """Plano efetivo do usuário: o da assinatura ativa, ou FREE."""
-        subscription = await self._subscriptions.get_active_by_user(user_id)
-        if subscription is not None:
-            return subscription.plan
-
-        plan = await self._plans.get_by_slug_with_features(FREE_PLAN_SLUG)
-        if plan is None:
-            raise NotFoundError(
-                f"Plano padrão '{FREE_PLAN_SLUG}' não está cadastrado. Rode o seed de planos."
-            )
-        return plan
-
-    async def has_feature(self, user_id: uuid.UUID, key: FeatureKey) -> bool:
-        plan = await self.get_effective_plan(user_id)
-        return _find_plan_feature(plan, key) is not None
-
-    async def assert_feature(self, user_id: uuid.UUID, key: FeatureKey) -> None:
-        """Levanta `ForbiddenError` se o plano efetivo não inclui `key`."""
-        if not await self.has_feature(user_id, key):
-            raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
-
-    async def get_quota_limit(self, user_id: uuid.UUID, key: FeatureKey) -> int | None:
-        """Limite de quota da feature no plano efetivo (`None` = ilimitado).
-
-        Levanta `ForbiddenError` se o plano nem tem acesso à feature — mesmo
-        comportamento de `assert_feature`, para quem for chamar isto direto.
-        """
-        plan = await self.get_effective_plan(user_id)
-        plan_feature = _find_plan_feature(plan, key)
-        if plan_feature is None:
-            raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
-        return plan_feature.quota_limit
-
-    async def assert_within_quota(self, user_id: uuid.UUID, key: FeatureKey, current_usage: int) -> None:
-        """Levanta `ForbiddenError` se `current_usage` já atingiu o limite do
-        plano efetivo para `key`. Uso típico em `practice`/`learning` antes
-        de criar um novo registro contado pela quota (ex.: `daily_questions`).
-        """
-        limit = await self.get_quota_limit(user_id, key)
-        if limit is not None and current_usage >= limit:
-            raise ForbiddenError(f"Limite do seu plano foi atingido para '{key.value}' ({limit}).")
-
-
-def _find_plan_feature(plan: Plan, key: FeatureKey) -> PlanFeature | None:
-    return next((pf for pf in plan.plan_features if pf.feature.key == key), None)
-</file>
-
 <file path="app/services/content/__init__.py">
 """Serviços do contexto 'content'."""
 
@@ -9424,6 +8662,10 @@ class TaxonomyService:
         if subject is None:
             raise NotFoundError("Assunto não encontrado.")
         return await self._topics.list_by_subject(subject_id)
+</file>
+
+<file path="app/services/export/__init__.py">
+
 </file>
 
 <file path="app/services/identity/user_service.py">
@@ -10627,100 +9869,6 @@ class UserQuestionStateService:
 
 <file path="app/services/storage/__init__.py">
 
-</file>
-
-<file path="app/services/storage/s3_service.py">
-"""Serviço de armazenamento de imagens das questões em S3, via presigned URL.
-
-O backend NUNCA recebe o binário da imagem — só gera uma URL assinada de
-upload (PUT) que o navegador do admin usa para subir o arquivo direto pro
-bucket. Isso mantém a API leve (não bufferiza arquivo grande) e escala sem
-esforço. O RDS Postgres só guarda a URL final (`question_attachments.url`).
-"""
-
-import uuid
-
-import boto3
-from botocore.client import Config as BotoConfig
-from botocore.exceptions import ClientError
-
-from app.core.config import settings
-from app.core.exceptions import DomainError
-
-ALLOWED_CONTENT_TYPES = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/webp": ".webp",
-}
-
-
-class S3ConfigError(DomainError):
-    """S3 não está configurado corretamente (bucket/URL pública ausentes)."""
-
-    code = "s3_not_configured"
-
-
-class S3UploadValidationError(DomainError):
-    """Tipo de arquivo (ou outro parâmetro) inválido para upload."""
-
-    code = "s3_upload_invalid"
-
-
-def _get_client():
-    if not settings.S3_BUCKET_NAME:
-        raise S3ConfigError(
-            "Upload de imagens não está configurado: defina S3_BUCKET_NAME "
-            "e S3_PUBLIC_BASE_URL nas variáveis de ambiente do backend."
-        )
-    kwargs: dict = {
-        "region_name": settings.S3_REGION,
-        "config": BotoConfig(signature_version="s3v4"),
-    }
-    # Em produção, prefira a Task Role do ECS (não passe credenciais
-    # explícitas). Local/dev pode usar S3_ACCESS_KEY_ID/SECRET no .env.
-    if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
-        kwargs["aws_access_key_id"] = settings.S3_ACCESS_KEY_ID
-        kwargs["aws_secret_access_key"] = settings.S3_SECRET_ACCESS_KEY
-    return boto3.client("s3", **kwargs)
-
-
-def create_presigned_upload(filename: str, content_type: str) -> dict:
-    """Gera uma URL assinada de upload (PUT) + a URL pública final do objeto.
-
-    A chave do objeto é gerada no backend (UUID), nunca a partir do nome
-    original do arquivo — evita path traversal, colisão de nomes e
-    vazamento do nome original do arquivo do usuário/admin.
-    """
-    if content_type not in ALLOWED_CONTENT_TYPES:
-        raise S3UploadValidationError(
-            f"Tipo de arquivo não permitido: '{content_type}'. "
-            f"Aceitos: {', '.join(ALLOWED_CONTENT_TYPES)}."
-        )
-
-    extension = ALLOWED_CONTENT_TYPES[content_type]
-    key = f"{settings.S3_QUESTIONS_PREFIX}/{uuid.uuid4().hex}{extension}"
-
-    client = _get_client()
-    try:
-        upload_url = client.generate_presigned_url(
-            ClientMethod="put_object",
-            Params={
-                "Bucket": settings.S3_BUCKET_NAME,
-                "Key": key,
-                "ContentType": content_type,
-            },
-            ExpiresIn=settings.S3_PRESIGN_EXPIRES_SECONDS,
-        )
-    except ClientError as exc:
-        raise S3ConfigError(f"Falha ao gerar URL de upload: {exc}") from exc
-
-    public_base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
-    return {
-        "upload_url": upload_url,
-        "public_url": f"{public_base}/{key}",
-        "key": key,
-        "expires_in": settings.S3_PRESIGN_EXPIRES_SECONDS,
-    }
 </file>
 
 <file path="app/services/__init__.py">
@@ -21183,6 +20331,160 @@ async def receive_payment_webhook(
     return Envelope(data=PaymentResponse.model_validate(payment))
 </file>
 
+<file path="app/api/v1/identity/users.py">
+"""Endpoints HTTP de conta, perfil e administração de usuários."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.schemas.identity import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+)
+from app.security.dependencies import CurrentAdminUser, CurrentUser
+from app.services.identity import UserService
+from app.core.config import settings
+from app.services.storage.s3_service import create_presigned_upload
+
+router = APIRouter()
+
+
+def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
+    return UserService(session)
+
+
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]
+
+
+@router.get("/me", response_model=Envelope[MeResponse])
+async def get_me(
+    current_user: CurrentUser, user_service: UserServiceDep
+) -> Envelope[MeResponse]:
+    profile = await user_service.get_profile(current_user.id)
+    return Envelope(
+        data=MeResponse(
+            id=current_user.id,
+            email=current_user.email,
+            full_name=current_user.full_name,
+            is_admin=current_user.is_admin,
+            is_active=current_user.is_active,
+            created_at=current_user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+@router.patch("/me", response_model=Envelope[MeResponse])
+async def update_me(
+    body: UpdateAccountRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[MeResponse]:
+    user = await user_service.update_account(current_user, full_name=body.full_name)
+    profile = await user_service.get_profile(user.id)
+    return Envelope(
+        data=MeResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            is_admin=user.is_admin,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+
+@router.post("/me/avatar/presign", response_model=Envelope[dict])
+async def presign_my_avatar(
+    body: AvatarPresignRequest,
+    current_user: CurrentUser,
+) -> Envelope[dict]:
+    """Gera URL presignada para upload da foto de perfil no S3."""
+    upload = create_presigned_upload(
+        filename=body.filename,
+        content_type=body.content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    return Envelope(data=upload)
+
+
+@router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
+async def update_my_profile(
+    body: UpdateProfileRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[UserProfileResponse]:
+    fields = body.model_dump(exclude_unset=True)
+    profile = await user_service.update_profile(current_user.id, fields)
+    return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+@router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> None:
+    await user_service.change_password(
+        current_user, current_password=body.current_password, new_password=body.new_password
+    )
+
+
+@router.get("", response_model=Envelope[list[AdminUserListItem]])
+async def list_users(
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[list[AdminUserListItem]]:
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    users = await user_service.list_users(limit=limit, cursor_id=cursor_id)
+    next_cursor = CursorPage.encode_cursor(str(users[-1].id)) if len(users) == limit else None
+
+    return Envelope(
+        data=[AdminUserListItem.model_validate(u) for u in users],
+        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+    )
+
+
+@router.get("/{user_id}", response_model=Envelope[AdminUserListItem])
+async def get_user(
+    user_id: uuid.UUID,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.get_user(user_id)
+    return Envelope(data=AdminUserListItem.model_validate(user))
+
+
+@router.patch("/{user_id}/status", response_model=Envelope[AdminUserListItem])
+async def update_user_status(
+    user_id: uuid.UUID,
+    body: UpdateUserStatusRequest,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.set_active_status(user_id, body.is_active)
+    return Envelope(data=AdminUserListItem.model_validate(user))
+</file>
+
 <file path="app/api/v1/learning/flashcards.py">
 """Endpoints HTTP de flashcards e revisão espaçada (SM-2).
 
@@ -21366,476 +20668,6 @@ async def review_flashcard(
     """Registra a avaliação de confiança do aluno e recalcula o agendamento (SM-2)."""
     flashcard = await flashcard_service.review_flashcard(flashcard_id, current_user.id, body.grade)
     return Envelope(data=FlashcardResponse.from_model(flashcard))
-</file>
-
-<file path="app/api/v1/learning/notebooks.py">
-# app/api/v1/learning/notebooks.py
-"""Endpoints HTTP de cadernos."""
-
-import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.models.enums import FeatureKey
-from app.schemas.content.question import QuestionListItem
-from app.schemas.learning.notebook import (
-    NotebookCreateRequest,
-    NotebookDetailResponse,
-    NotebookFavoriteToggleRequest,
-    NotebookListResponse,
-    NotebookResponse,
-    NotebookUpdateRequest,
-)
-from app.schemas.learning.notebook_folder import (
-    NotebookFolderCreateRequest,
-    NotebookFolderListResponse,
-    NotebookFolderResponse,
-    NotebookFolderUpdateRequest,
-)
-from app.schemas.learning.notebook_question import (
-    NotebookQuestionAddRequest,
-    NotebookQuestionBulkAddRequest,
-    NotebookQuestionCopyRequest,
-    NotebookQuestionListResponse,
-    NotebookQuestionMoveRequest,
-    NotebookQuestionResponse,
-)
-from app.schemas.learning.notebook_tag import (
-    NotebookTagCreateRequest,
-    NotebookTagListResponse,
-    NotebookTagResponse,
-)
-from app.security.dependencies import CurrentUser, RequireFeature
-from app.services.learning.notebook_service import NotebookService
-
-router = APIRouter()
-
-
-def get_notebook_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> NotebookService:
-    return NotebookService(session)
-
-
-NotebookServiceDep = Annotated[NotebookService, Depends(get_notebook_service)]
-
-
-# ==================================================================== #
-# FOLDERS                                                             #
-# ==================================================================== #
-
-
-@router.get("/folders", response_model=Envelope[NotebookFolderListResponse])
-async def list_folders(
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookFolderListResponse]:
-    """Lista todas as pastas do usuário."""
-    folders = await notebook_service.list_folders(current_user.id)
-    return Envelope(
-        data=NotebookFolderListResponse(
-            items=[NotebookFolderResponse.model_validate(f) for f in folders],
-            total=len(folders),
-        )
-    )
-
-
-@router.post(
-    "/folders",
-    response_model=Envelope[NotebookFolderResponse],
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_folder(
-    body: NotebookFolderCreateRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookFolderResponse]:
-    """Cria uma nova pasta."""
-    folder = await notebook_service.create_folder(
-        user_id=current_user.id,
-        name=body.name,
-        parent_id=body.parent_id,
-    )
-    return Envelope(data=NotebookFolderResponse.model_validate(folder))
-
-
-@router.patch("/folders/{folder_id}", response_model=Envelope[NotebookFolderResponse])
-async def update_folder(
-    folder_id: uuid.UUID,
-    body: NotebookFolderUpdateRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookFolderResponse]:
-    """Renomeia uma pasta."""
-    folder = await notebook_service.update_folder(
-        folder_id=folder_id,
-        user_id=current_user.id,
-        name=body.name,
-    )
-    return Envelope(data=NotebookFolderResponse.model_validate(folder))
-
-
-@router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_folder(
-    folder_id: uuid.UUID,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> None:
-    """Exclui uma pasta (move cadernos para root)."""
-    await notebook_service.delete_folder(folder_id, current_user.id)
-
-
-# ==================================================================== #
-# TAGS                                                                #
-# ==================================================================== #
-
-
-@router.get("/tags", response_model=Envelope[NotebookTagListResponse])
-async def list_tags(
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookTagListResponse]:
-    """Lista todas as tags disponíveis."""
-    tags = await notebook_service.list_tags()
-    return Envelope(
-        data=NotebookTagListResponse(
-            items=[NotebookTagResponse.model_validate(t) for t in tags],
-            total=len(tags),
-        )
-    )
-
-
-@router.post(
-    "/tags",
-    response_model=Envelope[NotebookTagResponse],
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_tag(
-    body: NotebookTagCreateRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookTagResponse]:
-    """Cria uma nova tag."""
-    tag = await notebook_service.create_tag(name=body.name)
-    return Envelope(data=NotebookTagResponse.model_validate(tag))
-
-
-# ==================================================================== #
-# NOTEBOOKS                                                           #
-# ==================================================================== #
-
-
-@router.get("", response_model=Envelope[NotebookListResponse])
-async def list_notebooks(
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-    folder_id: Annotated[uuid.UUID | None, Query()] = None,
-    favorite: Annotated[bool | None, Query()] = None,
-    search: Annotated[str | None, Query(max_length=200)] = None,
-) -> Envelope[NotebookListResponse]:
-    """Lista cadernos do usuário com filtros."""
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    notebooks, total = await notebook_service.list_notebooks(
-        user_id=current_user.id,
-        limit=limit,
-        cursor_id=cursor_id,
-        folder_id=folder_id,
-        favorite=favorite,
-        search=search,
-    )
-
-    next_cursor = (
-        CursorPage.encode_cursor(str(notebooks[-1].id))
-        if len(notebooks) == limit and notebooks
-        else None
-    )
-
-    return Envelope(
-        data=NotebookListResponse(
-            items=[NotebookResponse.model_validate(n) for n in notebooks],
-            total=total,
-            next_cursor=next_cursor,
-            has_more=next_cursor is not None,
-        )
-    )
-
-
-@router.post(
-    "",
-    response_model=Envelope[NotebookResponse],
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(RequireFeature(FeatureKey.NOTEBOOKS))],
-)
-async def create_notebook(
-    body: NotebookCreateRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookResponse]:
-    """Cria um novo caderno."""
-    notebook = await notebook_service.create_notebook(
-        user_id=current_user.id,
-        name=body.name,
-        description=body.description,
-        folder_id=body.folder_id,
-        tag_ids=body.tag_ids,
-    )
-
-    # Construção manual para evitar MissingGreenlet
-    response_data = NotebookResponse(
-        id=notebook.id,
-        user_id=notebook.user_id,
-        name=notebook.name,
-        description=notebook.description,
-        folder_id=notebook.folder_id,
-        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
-        is_favorite=notebook.is_favorite,
-        created_at=notebook.created_at,
-        updated_at=notebook.updated_at,
-    )
-    response_data._question_count = 0
-
-    return Envelope(data=response_data)
-
-
-@router.get("/{notebook_id}", response_model=Envelope[NotebookDetailResponse])
-async def get_notebook(
-    notebook_id: uuid.UUID,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookDetailResponse]:
-    """Detalhe de um caderno."""
-    notebook = await notebook_service.get_notebook(notebook_id, current_user.id)
-
-    # Extrair questões
-    questions = []
-    for nq in notebook.questions:
-        if nq.question:
-            questions.append(nq.question)
-
-    response = NotebookDetailResponse(
-        id=notebook.id,
-        user_id=notebook.user_id,
-        name=notebook.name,
-        description=notebook.description,
-        folder_id=notebook.folder_id,
-        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
-        is_favorite=notebook.is_favorite,
-        created_at=notebook.created_at,
-        updated_at=notebook.updated_at,
-        questions=[QuestionListItem.model_validate(q) for q in questions],
-    )
-    response._question_count = len(questions)
-
-    return Envelope(data=response)
-
-
-@router.patch("/{notebook_id}", response_model=Envelope[NotebookResponse])
-async def update_notebook(
-    notebook_id: uuid.UUID,
-    body: NotebookUpdateRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookResponse]:
-    """Atualiza um caderno."""
-    notebook = await notebook_service.update_notebook(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        name=body.name,
-        description=body.description,
-        folder_id=body.folder_id,
-        is_favorite=body.is_favorite,
-        tag_ids=body.tag_ids,
-    )
-
-    # Construção manual para evitar MissingGreenlet
-    response_data = NotebookResponse(
-        id=notebook.id,
-        user_id=notebook.user_id,
-        name=notebook.name,
-        description=notebook.description,
-        folder_id=notebook.folder_id,
-        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
-        is_favorite=notebook.is_favorite,
-        created_at=notebook.created_at,
-        updated_at=notebook.updated_at,
-    )
-    response_data._question_count = notebook._question_count if hasattr(notebook, "_question_count") else 0
-
-    return Envelope(data=response_data)
-
-
-@router.patch("/{notebook_id}/favorite", response_model=Envelope[NotebookResponse])
-async def toggle_favorite(
-    notebook_id: uuid.UUID,
-    body: NotebookFavoriteToggleRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookResponse]:
-    """Alterna o estado de favorito de um caderno."""
-    notebook = await notebook_service.update_notebook(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        is_favorite=body.is_favorite,
-    )
-
-    notebook._question_count = await notebook_service._notebooks.count_questions(notebook_id)
-
-    return Envelope(data=NotebookResponse.model_validate(notebook))
-
-
-@router.delete("/{notebook_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_notebook(
-    notebook_id: uuid.UUID,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> None:
-    """Exclui um caderno (remove as relações com questões)."""
-    await notebook_service.delete_notebook(notebook_id, current_user.id)
-
-
-# ==================================================================== #
-# QUESTIONS IN NOTEBOOK                                                #
-# ==================================================================== #
-
-
-@router.get("/{notebook_id}/questions", response_model=Envelope[NotebookQuestionListResponse])
-async def list_notebook_questions(
-    notebook_id: uuid.UUID,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-    search: Annotated[str | None, Query(max_length=200)] = None,
-) -> Envelope[NotebookQuestionListResponse]:
-    """Lista questões de um caderno."""
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    questions, total = await notebook_service.list_notebook_questions(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        limit=limit,
-        cursor_id=cursor_id,
-        search=search,
-    )
-
-    next_cursor = (
-        CursorPage.encode_cursor(str(questions[-1].id))
-        if len(questions) == limit and questions
-        else None
-    )
-
-    return Envelope(
-        data=NotebookQuestionListResponse(
-            items=[NotebookQuestionResponse.model_validate(q) for q in questions],
-            total=total,
-            next_cursor=next_cursor,
-            has_more=next_cursor is not None,
-        )
-    )
-
-
-@router.post(
-    "/{notebook_id}/questions",
-    response_model=Envelope[NotebookQuestionResponse],
-    status_code=status.HTTP_201_CREATED,
-)
-async def add_question_to_notebook(
-    notebook_id: uuid.UUID,
-    body: NotebookQuestionAddRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[NotebookQuestionResponse]:
-    """Adiciona uma questão ao caderno."""
-    notebook_question = await notebook_service.add_question(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        question_id=body.question_id,
-    )
-    return Envelope(data=NotebookQuestionResponse.model_validate(notebook_question))
-
-
-@router.post(
-    "/{notebook_id}/questions/bulk",
-    response_model=Envelope[list[NotebookQuestionResponse]],
-    status_code=status.HTTP_201_CREATED,
-)
-async def add_questions_to_notebook(
-    notebook_id: uuid.UUID,
-    body: NotebookQuestionBulkAddRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[list[NotebookQuestionResponse]]:
-    """Adiciona múltiplas questões ao caderno."""
-    notebook_questions = await notebook_service.add_questions_bulk(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        question_ids=body.question_ids,
-    )
-    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in notebook_questions])
-
-
-@router.delete(
-    "/{notebook_id}/questions/{question_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def remove_question_from_notebook(
-    notebook_id: uuid.UUID,
-    question_id: uuid.UUID,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> None:
-    """Remove uma questão do caderno."""
-    await notebook_service.remove_question(
-        notebook_id=notebook_id,
-        user_id=current_user.id,
-        question_id=question_id,
-    )
-
-
-@router.post("/{notebook_id}/questions/move", response_model=Envelope[list[NotebookQuestionResponse]])
-async def move_questions(
-    notebook_id: uuid.UUID,
-    body: NotebookQuestionMoveRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[list[NotebookQuestionResponse]]:
-    """Move questões para outro caderno."""
-    result = await notebook_service.move_questions(
-        source_notebook_id=notebook_id,
-        target_notebook_id=body.target_notebook_id,
-        user_id=current_user.id,
-        question_ids=body.question_ids,
-    )
-    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
-
-
-@router.post("/{notebook_id}/questions/copy", response_model=Envelope[list[NotebookQuestionResponse]])
-async def copy_questions(
-    notebook_id: uuid.UUID,
-    body: NotebookQuestionCopyRequest,
-    current_user: CurrentUser,
-    notebook_service: NotebookServiceDep,
-) -> Envelope[list[NotebookQuestionResponse]]:
-    """Copia questões para outro caderno."""
-    result = await notebook_service.copy_questions(
-        source_notebook_id=notebook_id,
-        target_notebook_id=body.target_notebook_id,
-        user_id=current_user.id,
-        question_ids=body.question_ids,
-    )
-    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
 </file>
 
 <file path="app/database/session.py">
@@ -22673,182 +21505,224 @@ class FlashcardReviewRepository(BaseRepository[FlashcardReview]):
         return [row[0] for row in result.all()]
 </file>
 
-<file path="app/repositories/learning/notebook_repository.py">
-# app/repositories/learning/notebook_repository.py
-"""Repositório de acesso a dados de `Notebook`."""
+<file path="app/repositories/practice/review_repository.py">
+"""Repositório de acesso a dados de `Review`."""
 
 import uuid
-from typing import Optional
+from datetime import date, timedelta
 
-from sqlalchemy import select, func, or_, delete
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.content.question import Question
-from app.models.learning.notebook import Notebook
-from app.models.learning.notebook_question import NotebookQuestion
+from app.models.practice.review import Review, ReviewStatus
 from app.repositories.base import BaseRepository
 
 _RELATIONS = (
-    selectinload(Notebook.folder),
-    selectinload(Notebook.tags),
-)
-
-_QUESTION_DETAIL_RELATIONS = (
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.discipline),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.subject),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.topic),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.exam_board),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.organization),
-    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.tags),
+    selectinload(Review.question).selectinload(Question.discipline),
+    selectinload(Review.question).selectinload(Question.subject),
+    selectinload(Review.question).selectinload(Question.topic),
+    selectinload(Review.question).selectinload(Question.exam_board),
+    selectinload(Review.question).selectinload(Question.exam_edition),
+    selectinload(Review.question).selectinload(Question.organization),
+    selectinload(Review.question).selectinload(Question.tags),
+    selectinload(Review.question).selectinload(Question.attachments),
 )
 
 
-class NotebookRepository(BaseRepository[Notebook]):
-    """Repositório de cadernos."""
+class ReviewRepository(BaseRepository[Review]):
+    model = Review
 
-    model = Notebook
+    async def get_with_question(self, review_id: uuid.UUID) -> Review | None:
+        """Busca revisão com a questão carregada."""
+        stmt = select(Review).where(Review.id == review_id).options(*_RELATIONS)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
 
-    async def get_owned(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Notebook | None:
-        """Busca um caderno restrito ao dono com relações carregadas."""
+    async def get_owned(self, review_id: uuid.UUID, user_id: uuid.UUID) -> Review | None:
+        """Busca revisão restrita ao dono."""
         stmt = (
-            select(Notebook)
-            .where(
-                Notebook.id == notebook_id,
-                Notebook.user_id == user_id,
-            )
+            select(Review)
+            .where(Review.id == review_id, Review.user_id == user_id)
             .options(*_RELATIONS)
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_with_questions(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Notebook | None:
-        """Busca um caderno com as questões (e suas relações) carregadas."""
+    async def list_due(self, user_id: uuid.UUID, limit: int = 50) -> list[Review]:
+        """Lista revisões pendentes, ordenadas por prioridade e data de vencimento."""
+        today = date.today()
         stmt = (
-            select(Notebook)
+            select(Review)
             .where(
-                Notebook.id == notebook_id,
-                Notebook.user_id == user_id,
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.PENDENTE,
+                Review.due_date <= today,
             )
-            .options(*_RELATIONS, *_QUESTION_DETAIL_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def list_by_user(
-        self,
-        user_id: uuid.UUID,
-        limit: int,
-        cursor_id: Optional[uuid.UUID] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        favorite: Optional[bool] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[Notebook], int]:
-        """Lista cadernos do usuário com filtros."""
-        stmt = (
-            select(Notebook)
-            .where(Notebook.user_id == user_id)
             .options(*_RELATIONS)
-            .order_by(Notebook.created_at.desc(), Notebook.id.desc())
+            .order_by(
+                Review.priority.desc(),
+                Review.due_date.asc(),
+            )
             .limit(limit)
         )
-
-        if folder_id is not None:
-            stmt = stmt.where(Notebook.folder_id == folder_id)
-
-        if favorite is not None:
-            stmt = stmt.where(Notebook.is_favorite == favorite)
-
-        if search:
-            search_term = f"%{search}%"
-            stmt = stmt.where(
-                or_(
-                    Notebook.name.ilike(search_term),
-                    Notebook.description.ilike(search_term),
-                )
-            )
-
-        if cursor_id is not None:
-            cursor = await self.get_by_id(cursor_id)
-            if cursor is not None:
-                stmt = stmt.where(
-                    (Notebook.created_at < cursor.created_at)
-                    | (
-                        (Notebook.created_at == cursor.created_at)
-                        & (Notebook.id < cursor.id)
-                    )
-                )
-
         result = await self.session.execute(stmt)
-        items = list(result.scalars().unique().all())
+        return list(result.scalars().unique().all())
 
-        # Contagem total
-        count_stmt = select(func.count()).select_from(Notebook).where(Notebook.user_id == user_id)
-        if folder_id is not None:
-            count_stmt = count_stmt.where(Notebook.folder_id == folder_id)
-        if favorite is not None:
-            count_stmt = count_stmt.where(Notebook.is_favorite == favorite)
-        if search:
-            search_term = f"%{search}%"
-            count_stmt = count_stmt.where(
-                or_(
-                    Notebook.name.ilike(search_term),
-                    Notebook.description.ilike(search_term),
-                )
+    async def list_upcoming(self, user_id: uuid.UUID, days: int = 7, limit: int = 50) -> list[Review]:
+        """Lista revisões futuras (próximos N dias)."""
+        today = date.today()
+        future = today + timedelta(days=days)
+        stmt = (
+            select(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.PENDENTE,
+                Review.due_date > today,
+                Review.due_date <= future,
             )
-
-        count_result = await self.session.execute(count_stmt)
-        total = count_result.scalar() or 0
-
-        return items, total
-
-    async def count_questions(self, notebook_id: uuid.UUID) -> int:
-        """Conta questões de um caderno."""
-        stmt = select(func.count()).select_from(NotebookQuestion).where(
-            NotebookQuestion.notebook_id == notebook_id
+            .options(*_RELATIONS)
+            .order_by(Review.due_date.asc())
+            .limit(limit)
         )
         result = await self.session.execute(stmt)
-        return result.scalar() or 0
+        return list(result.scalars().unique().all())
 
-    async def get_by_name(
-        self,
-        user_id: uuid.UUID,
-        name: str,
-    ) -> Notebook | None:
-        """Busca caderno por nome (exato) para o usuário."""
-        stmt = select(Notebook).where(
-            Notebook.user_id == user_id,
-            Notebook.name == name,
+    async def count_due(self, user_id: uuid.UUID) -> int:
+        """Conta revisões pendentes para hoje."""
+        today = date.today()
+        stmt = (
+            select(func.count())
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.PENDENTE,
+                Review.due_date <= today,
+            )
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalar_one()
 
-    async def toggle_favorite(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        is_favorite: bool,
-    ) -> Notebook | None:
-        """Alterna o estado de favorito."""
-        notebook = await self.get_owned(notebook_id, user_id)
-        if notebook:
-            notebook.is_favorite = is_favorite
-            await self.session.flush()
-        return notebook
-
-    async def delete(self, notebook_id: uuid.UUID) -> bool:
-        """Remove um caderno do banco."""
-        stmt = delete(Notebook).where(Notebook.id == notebook_id)
+    async def count_overdue(self, user_id: uuid.UUID) -> int:
+        """Conta revisões atrasadas."""
+        today = date.today()
+        stmt = (
+            select(func.count())
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.PENDENTE,
+                Review.due_date < today,
+            )
+        )
         result = await self.session.execute(stmt)
-        return result.rowcount > 0
+        return result.scalar_one()
+
+    async def count_completed_today(self, user_id: uuid.UUID) -> int:
+        """Conta revisões concluídas hoje."""
+        today = date.today()
+        stmt = (
+            select(func.count())
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.CONCLUIDA,
+                func.date(Review.updated_at) == today,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def update_status(
+        self,
+        review_id: uuid.UUID,
+        status: ReviewStatus,
+        **kwargs,
+    ) -> bool:
+        """Atualiza status e campos adicionais de uma revisão."""
+        values = {"status": status, **kwargs}
+        stmt = (
+            update(Review)
+            .where(Review.id == review_id)
+            .values(**values)
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount == 1
+
+    async def bulk_create(self, reviews: list[Review]) -> list[Review]:
+        """Cria múltiplas revisões em lote."""
+        for review in reviews:
+            self.session.add(review)
+        await self.session.flush()
+        return reviews
+
+    async def get_stats(self, user_id: uuid.UUID) -> dict:
+        """Estatísticas agregadas de revisão."""
+        today = date.today()
+        thirty_days_ago = today - timedelta(days=30)
+        
+        total_due = await self.count_due(user_id)
+        overdue = await self.count_overdue(user_id)
+        completed_today = await self.count_completed_today(user_id)
+
+        # Total de revisões nos últimos 30 dias
+        total_stmt = (
+            select(func.count())
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.created_at >= thirty_days_ago,
+            )
+        )
+        total_result = await self.session.execute(total_stmt)
+        total = total_result.scalar() or 0
+
+        # Revisões concluídas nos últimos 30 dias
+        completed_stmt = (
+            select(func.count())
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.CONCLUIDA,
+                Review.created_at >= thirty_days_ago,
+            )
+        )
+        completed_result = await self.session.execute(completed_stmt)
+        completed = completed_result.scalar() or 0
+
+        completion_rate = round(completed / total * 100, 1) if total > 0 else 0
+
+        # Intervalo médio
+        avg_stmt = (
+            select(func.avg(Review.interval_days))
+            .select_from(Review)
+            .where(
+                Review.user_id == user_id,
+                Review.status == ReviewStatus.CONCLUIDA,
+                Review.review_count > 0,
+            )
+        )
+        avg_result = await self.session.execute(avg_stmt)
+        avg_interval = avg_result.scalar() or 0
+
+        # Maior sequência de acertos consecutivos
+        streak_stmt = (
+            select(func.max(Review.consecutive_correct))
+            .select_from(Review)
+            .where(Review.user_id == user_id)
+        )
+        streak_result = await self.session.execute(streak_stmt)
+        longest_streak = streak_result.scalar() or 0
+
+        return {
+            "total_due": total_due,
+            "due_today": total_due,
+            "overdue": overdue,
+            "completed_today": completed_today,
+            "completion_rate": completion_rate,
+            "average_interval": round(avg_interval, 1) if avg_interval else 0,
+            "longest_streak": longest_streak,
+        }
 </file>
 
 <file path="app/repositories/practice/user_question_state_repository.py">
@@ -23085,48 +21959,6 @@ __all__ = [
 ]
 </file>
 
-<file path="app/schemas/identity/__init__.py">
-"""Schemas do contexto 'identity'."""
-
-from app.schemas.identity.auth import (
-    ForgotPasswordRequest,
-    LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
-    RegisterRequest,
-    ResetPasswordRequest,
-    TokenResponse,
-    UserResponse,
-)
-from app.schemas.identity.user import (
-    AdminUserListItem,
-    ChangePasswordRequest,
-    MeResponse,
-    UpdateAccountRequest,
-    UpdateProfileRequest,
-    UpdateUserStatusRequest,
-    UserProfileResponse,
-)
-
-__all__ = [
-    "AdminUserListItem",
-    "ChangePasswordRequest",
-    "ForgotPasswordRequest",
-    "LoginRequest",
-    "LogoutRequest",
-    "MeResponse",
-    "RefreshRequest",
-    "RegisterRequest",
-    "ResetPasswordRequest",
-    "TokenResponse",
-    "UpdateAccountRequest",
-    "UpdateProfileRequest",
-    "UpdateUserStatusRequest",
-    "UserProfileResponse",
-    "UserResponse",
-]
-</file>
-
 <file path="app/schemas/identity/auth.py">
 """Schemas de request/response do fluxo de autenticação."""
 
@@ -23180,6 +22012,85 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+</file>
+
+<file path="app/schemas/identity/user.py">
+"""Schemas de request/response de usuário e perfil."""
+
+import uuid
+from datetime import date, datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+class UserProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    target_exam: str | None = None
+    avatar_url: str | None = None
+    bio: str | None = None
+    phone: str | None = None
+    birth_date: date | None = None
+
+
+
+class AvatarPresignRequest(BaseModel):
+    """Solicita uma URL presignada para foto de perfil."""
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
+
+
+class MeResponse(BaseModel):
+    """Usuário autenticado com o perfil embutido (usado em GET /users/me)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+    profile: UserProfileResponse
+
+
+class UpdateAccountRequest(BaseModel):
+    """Campos de conta (tabela `users`) que o próprio usuário pode alterar."""
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=255)
+
+
+class UpdateProfileRequest(BaseModel):
+    """Campos de perfil (tabela `user_profiles`).
+
+    Todos opcionais: PATCH parcial. Enviar explicitamente `null` limpa o campo.
+    """
+
+    target_exam: str | None = Field(default=None, max_length=255)
+    avatar_url: str | None = Field(default=None, max_length=500)
+    bio: str | None = Field(default=None, max_length=1000)
+    phone: str | None = Field(default=None, max_length=30)
+    birth_date: date | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class AdminUserListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+
+
+class UpdateUserStatusRequest(BaseModel):
+    is_active: bool
 </file>
 
 <file path="app/schemas/learning/__init__.py">
@@ -24329,6 +23240,271 @@ class PlanService:
         await self._session.flush()
 </file>
 
+<file path="app/services/export/notebook_pdf_service.py">
+"""Geração de cadernos PDF com layout profissional.
+
+O PDF é montado no backend para que o aluno receba um arquivo real, com
+paginação, cabeçalho, identificação da prova/disciplina e gabarito opcional.
+Nenhum conteúdo é aceito do cliente além dos IDs das questões já pertencentes
+ao caderno autenticado.
+"""
+
+from __future__ import annotations
+
+from io import BytesIO
+from re import sub
+from xml.sax.saxutils import escape
+
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.lib import colors
+
+
+def _safe_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return escape(value).replace("\n", "<br/>")
+
+
+def _filename(value: str) -> str:
+    value = sub(r"[^A-Za-z0-9À-ÿ _-]+", "", value).strip()
+    value = sub(r"\s+", "-", value)
+    return value[:80] or "caderno-de-questoes"
+
+
+def build_notebook_pdf(
+    notebook,
+    items,
+    *,
+    include_answer_key: bool = False,
+) -> tuple[bytes, str]:
+    """Retorna bytes do PDF e nome de arquivo seguro."""
+    buffer = BytesIO()
+
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "NotebookTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        alignment=TA_CENTER,
+        spaceAfter=6 * mm,
+    )
+    subtitle = ParagraphStyle(
+        "NotebookSubtitle",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=13,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#64748B"),
+        spaceAfter=7 * mm,
+    )
+    question = ParagraphStyle(
+        "Question",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=10.5,
+        leading=15,
+        spaceAfter=3 * mm,
+    )
+    alternative = ParagraphStyle(
+        "Alternative",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        leftIndent=5 * mm,
+        firstLineIndent=-5 * mm,
+        spaceAfter=2.5 * mm,
+    )
+    meta = ParagraphStyle(
+        "Meta",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#64748B"),
+        spaceAfter=3 * mm,
+    )
+    section = ParagraphStyle(
+        "Section",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=17,
+        spaceBefore=5 * mm,
+        spaceAfter=4 * mm,
+    )
+    answer = ParagraphStyle(
+        "Answer",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        spaceAfter=2 * mm,
+    )
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#E2E8F0"))
+        canvas.line(18 * mm, 13 * mm, 192 * mm, 13 * mm)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(18 * mm, 9 * mm, "Alfa Caveira · Caderno de questões")
+        canvas.drawRightString(192 * mm, 9 * mm, f"Página {doc.page}")
+        canvas.restoreState()
+
+    doc = BaseDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=notebook.name,
+        author="Alfa Caveira",
+    )
+    frame = Frame(
+        doc.leftMargin,
+        doc.bottomMargin,
+        doc.width,
+        doc.height,
+        id="normal",
+    )
+    doc.addPageTemplates([PageTemplate(id="main", frames=frame, onPage=footer)])
+
+    story = [
+        Paragraph("ALFA CAVEIRA", subtitle),
+        Paragraph(_safe_text(notebook.name), title),
+        Paragraph(
+            f"{len(items)} questão{'ões' if len(items) != 1 else ''}"
+            + (" · Caderno de estudo" if not notebook.description else ""),
+            subtitle,
+        ),
+    ]
+
+    if notebook.description:
+        story.append(Paragraph(_safe_text(notebook.description), subtitle))
+
+    story.append(
+        Table(
+            [
+                [
+                    Paragraph("<b>Formato</b><br/>Questões objetivas", meta),
+                    Paragraph(
+                        f"<b>Gabarito</b><br/>{'Incluído ao final' if include_answer_key else 'Não incluído'}",
+                        meta,
+                    ),
+                    Paragraph("<b>Uso</b><br/>Estudo pessoal", meta),
+                ]
+            ],
+            colWidths=[doc.width / 3] * 3,
+            style=TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5 * mm),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5 * mm),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+                ]
+            ),
+        )
+    )
+    story.append(Spacer(1, 7 * mm))
+
+    for position, item in enumerate(items, start=1):
+        q = item.question
+        board = getattr(q.exam_board, "acronym", None) or getattr(q.exam_board, "name", "")
+        discipline = getattr(q.discipline, "name", "")
+        year = getattr(q, "year", None)
+        meta_line = " · ".join(
+            str(part) for part in [board, discipline, year] if part
+        )
+
+        blocks = [
+            Paragraph(f"{position}. {_safe_text(q.statement)}", question),
+        ]
+        if meta_line:
+            blocks.insert(0, Paragraph(_safe_text(meta_line), meta))
+
+        for alt in q.alternatives:
+            blocks.append(
+                Paragraph(
+                    f"<b>{escape(alt.letter)})</b> {_safe_text(alt.text)}",
+                    alternative,
+                )
+            )
+
+        # O bloco completo NÃO fica em KeepTogether: uma questão muito longa
+        # pode ser maior que uma página A4 e causar LayoutError. Mantemos apenas
+        # o cabeçalho unido ao primeiro conteúdo; o restante pode quebrar de
+        # página de forma natural.
+        story.append(
+            Table(
+                [[Paragraph(f"<b>QUESTÃO {position:02d}</b>", meta)]],
+                colWidths=[doc.width],
+                style=TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+                        ("TOPPADDING", (0, 0), (-1, -1), 2 * mm),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
+                    ]
+                ),
+            )
+        )
+        story.append(Spacer(1, 3 * mm))
+        story.extend(blocks)
+        story.append(Spacer(1, 5 * mm))
+
+    if include_answer_key:
+        story.append(Paragraph("Gabarito", section))
+        answer_rows = []
+        for position, item in enumerate(items, start=1):
+            answer_rows.append(
+                [
+                    Paragraph(f"<b>{position:02d}</b>", answer),
+                    Paragraph(
+                        escape(item.question.correct_alternative_letter),
+                        answer,
+                    ),
+                ]
+            )
+        story.append(
+            Table(
+                answer_rows,
+                colWidths=[25 * mm, 25 * mm],
+                style=TableStyle(
+                    [
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+                    ]
+                ),
+            )
+        )
+
+    doc.build(story)
+    return buffer.getvalue(), f"{_filename(notebook.name)}.pdf"
+</file>
+
 <file path="app/services/identity/__init__.py">
 """Serviços do contexto 'identity'."""
 
@@ -24645,521 +23821,6 @@ def _utcnow():
     return datetime.now(UTC)
 </file>
 
-<file path="app/services/learning/notebook_service.py">
-# app/services/learning/notebook_service.py
-"""Regras de negócio de cadernos."""
-
-import uuid
-from typing import Optional
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError, ForbiddenError
-from app.database.uow import UnitOfWork
-from app.models.learning.notebook import Notebook
-from app.models.learning.notebook_folder import NotebookFolder
-from app.models.learning.notebook_question import NotebookQuestion
-from app.models.learning.notebook_tag import NotebookTag
-from app.repositories.content.question_repository import QuestionRepository
-from app.repositories.learning.notebook_folder_repository import NotebookFolderRepository
-from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
-from app.repositories.learning.notebook_repository import NotebookRepository
-from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
-from app.services.billing.feature_gate_service import FeatureGateService
-from app.models.enums import FeatureKey
-
-
-class NotebookService:
-    """Serviço de cadernos."""
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._notebooks = NotebookRepository(session)
-        self._questions = NotebookQuestionRepository(session)
-        self._folders = NotebookFolderRepository(session)
-        self._tags = NotebookTagRepository(session)
-        self._question_repo = QuestionRepository(session)
-        self._feature_gate = FeatureGateService(session)
-
-    # ==================================================================== #
-    # FOLDERS
-    # ==================================================================== #
-
-    async def list_folders(self, user_id: uuid.UUID) -> list[NotebookFolder]:
-        """Lista todas as pastas do usuário."""
-        return await self._folders.list_by_user(user_id)
-
-    async def create_folder(
-        self,
-        user_id: uuid.UUID,
-        name: str,
-        parent_id: Optional[uuid.UUID] = None,
-    ) -> NotebookFolder:
-        """Cria uma nova pasta."""
-        existing = await self._folders.get_by_name(user_id, name)
-        if existing:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
-
-        if parent_id:
-            parent = await self._folders.get_owned(parent_id, user_id)
-            if not parent:
-                raise NotFoundError("Pasta pai não encontrada.")
-
-        folder = NotebookFolder(
-            user_id=user_id,
-            name=name.strip(),
-            parent_id=parent_id,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._folders.add(folder)
-
-        return folder
-
-    async def update_folder(
-        self,
-        folder_id: uuid.UUID,
-        user_id: uuid.UUID,
-        name: str,
-    ) -> NotebookFolder:
-        """Renomeia uma pasta."""
-        folder = await self._folders.get_owned(folder_id, user_id)
-        if not folder:
-            raise NotFoundError("Pasta não encontrada.")
-
-        existing = await self._folders.get_by_name(user_id, name.strip())
-        if existing and existing.id != folder_id:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
-
-        folder.name = name.strip()
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-
-        return folder
-
-    async def delete_folder(self, folder_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        """Exclui uma pasta (move cadernos para root)."""
-        folder = await self._folders.get_owned(folder_id, user_id)
-        if not folder:
-            raise NotFoundError("Pasta não encontrada.")
-
-        # Mover cadernos para root
-        notebooks, _ = await self._notebooks.list_by_user(
-            user_id, limit=1000, folder_id=folder_id
-        )
-        for notebook in notebooks:
-            notebook.folder_id = None
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-            await self._folders.delete_cascade(folder_id)
-
-    # ==================================================================== #
-    # TAGS
-    # ==================================================================== #
-
-    async def list_tags(self) -> list[NotebookTag]:
-        """Lista todas as tags disponíveis."""
-        return await self._tags.list_all()
-
-    async def create_tag(self, name: str) -> NotebookTag:
-        """Cria uma nova tag."""
-        existing = await self._tags.get_by_name(name.strip())
-        if existing:
-            return existing
-
-        import re
-        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
-
-        tag = NotebookTag(name=name.strip(), slug=slug)
-
-        async with UnitOfWork(self._session):
-            await self._tags.add(tag)
-
-        return tag
-
-    # ==================================================================== #
-    # NOTEBOOKS
-    # ==================================================================== #
-
-    async def list_notebooks(
-        self,
-        user_id: uuid.UUID,
-        limit: int = 20,
-        cursor_id: Optional[uuid.UUID] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        favorite: Optional[bool] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[Notebook], int]:
-        """Lista cadernos do usuário."""
-        notebooks, total = await self._notebooks.list_by_user(
-            user_id=user_id,
-            limit=limit,
-            cursor_id=cursor_id,
-            folder_id=folder_id,
-            favorite=favorite,
-            search=search,
-        )
-        for notebook in notebooks:
-            notebook._question_count = await self._notebooks.count_questions(notebook.id)
-        return notebooks, total
-
-    async def get_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Notebook:
-        """Busca um caderno específico, com as questões carregadas."""
-        notebook = await self._notebooks.get_with_questions(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        notebook._question_count = len(notebook.questions)
-        return notebook
-
-    async def create_notebook(
-        self,
-        user_id: uuid.UUID,
-        name: str,
-        description: Optional[str] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        tag_ids: Optional[list[uuid.UUID]] = None,
-    ) -> Notebook:
-        """Cria um novo caderno."""
-        # Verificar feature gate
-        has_feature = await self._feature_gate.has_feature(user_id, FeatureKey.NOTEBOOKS)
-        if not has_feature:
-            raise ForbiddenError(
-                "Seu plano atual não inclui a criação de cadernos. "
-                "Faça upgrade para o plano Standard ou Pro."
-            )
-
-        existing = await self._notebooks.get_by_name(user_id, name.strip())
-        if existing:
-            raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
-
-        if folder_id:
-            folder = await self._folders.get_owned(folder_id, user_id)
-            if not folder:
-                raise NotFoundError("Pasta não encontrada.")
-
-        tags = []
-        if tag_ids:
-            tags = await self._tags.list_by_ids(tag_ids)
-            if len(tags) != len(tag_ids):
-                raise NotFoundError("Uma ou mais tags não foram encontradas.")
-
-        notebook = Notebook(
-            user_id=user_id,
-            name=name.strip(),
-            description=description.strip() if description else None,
-            folder_id=folder_id,
-        )
-        notebook.tags = tags
-
-        async with UnitOfWork(self._session):
-            await self._notebooks.add(notebook)
-
-        # 🔥 CRÍTICO: Refresh do objeto e recarregar relações para evitar
-        # MissingGreenlet quando o router acessar notebook.folder/tags.
-        await self._session.refresh(notebook)
-
-        if notebook.folder_id:
-            folder = await self._folders.get_owned(notebook.folder_id, user_id)
-            notebook.folder = folder
-
-        if tag_ids:
-            tags = await self._tags.list_by_ids(tag_ids)
-            notebook.tags = tags
-
-        notebook._question_count = 0
-        return notebook
-
-    async def update_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        is_favorite: Optional[bool] = None,
-        tag_ids: Optional[list[uuid.UUID]] = None,
-    ) -> Notebook:
-        """Atualiza um caderno."""
-        # Buscar com relações já carregadas
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        if name is not None and name.strip() != notebook.name:
-            existing = await self._notebooks.get_by_name(user_id, name.strip())
-            if existing and existing.id != notebook_id:
-                raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
-            notebook.name = name.strip()
-
-        if description is not None:
-            notebook.description = description.strip() if description else None
-
-        if folder_id is not None:
-            if folder_id:
-                folder = await self._folders.get_owned(folder_id, user_id)
-                if not folder:
-                    raise NotFoundError("Pasta não encontrada.")
-            notebook.folder_id = folder_id
-
-        if is_favorite is not None:
-            notebook.is_favorite = is_favorite
-
-        if tag_ids is not None:
-            tags = await self._tags.list_by_ids(tag_ids)
-            if len(tags) != len(tag_ids):
-                raise NotFoundError("Uma ou mais tags não foram encontradas.")
-            notebook.tags = tags
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-
-            # 🔥 CRÍTICO: Refresh do objeto para recarregar todas as colunas
-            # do banco, incluindo updated_at que é atualizado pelo trigger
-            await self._session.refresh(notebook)
-
-            # Recarregar relações explicitamente
-            if notebook.folder_id:
-                folder = await self._folders.get_owned(notebook.folder_id, user_id)
-                notebook.folder = folder
-
-            # Recarregar tags
-            if tag_ids is not None:
-                tags = await self._tags.list_by_ids(tag_ids)
-                notebook.tags = tags
-
-        notebook._question_count = await self._notebooks.count_questions(notebook_id)
-        return notebook
-
-    async def delete_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> None:
-        """Exclui um caderno (cascade exclui relações)."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        async with UnitOfWork(self._session):
-            await self._notebooks.delete(notebook_id)
-            await self._session.flush()
-
-    # ==================================================================== #
-    # QUESTIONS IN NOTEBOOK
-    # ==================================================================== #
-
-    async def list_notebook_questions(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        limit: int = 20,
-        cursor_id: Optional[uuid.UUID] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[NotebookQuestion], int]:
-        """Lista questões de um caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        return await self._questions.list_by_notebook(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            limit=limit,
-            cursor_id=cursor_id,
-            search=search,
-        )
-
-    async def add_question(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> NotebookQuestion:
-        """Adiciona uma questão ao caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        question = await self._question_repo.get_by_id(question_id)
-        if not question:
-            raise NotFoundError("Questão não encontrada.")
-
-        if await self._questions.exists(notebook_id, question_id):
-            raise ConflictError("Esta questão já está no caderno.")
-
-        current_count = await self._notebooks.count_questions(notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count >= quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões por caderno foi atingido."
-            )
-
-        notebook_question = NotebookQuestion(
-            notebook_id=notebook_id,
-            question_id=question_id,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._questions.add(notebook_question)
-
-        return await self._questions.get_owned(notebook_id, question_id, user_id)
-
-    async def add_questions_bulk(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Adiciona múltiplas questões ao caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        current_count = await self._notebooks.count_questions(notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões por caderno seria excedido."
-            )
-
-        # Remover duplicatas
-        to_add = []
-        for qid in question_ids:
-            if not await self._questions.exists(notebook_id, qid):
-                to_add.append(qid)
-
-        if not to_add:
-            return []
-
-        # Verificar se todas as questões existem
-        questions = await self._question_repo.list_by_ids(to_add)
-        if len(questions) != len(to_add):
-            raise NotFoundError("Uma ou mais questões não foram encontradas.")
-
-        async with UnitOfWork(self._session):
-            result = await self._questions.bulk_create(notebook_id, to_add)
-        return result
-
-    async def remove_question(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> None:
-        """Remove uma questão do caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        async with UnitOfWork(self._session):
-            removed = await self._questions.delete_by_notebook_and_question(
-                notebook_id, question_id
-            )
-            if not removed:
-                raise NotFoundError("Questão não encontrada neste caderno.")
-
-    async def move_questions(
-        self,
-        source_notebook_id: uuid.UUID,
-        target_notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Move questões para outro caderno."""
-        if source_notebook_id == target_notebook_id:
-            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
-
-        source = await self._notebooks.get_owned(source_notebook_id, user_id)
-        if not source:
-            raise NotFoundError("Caderno de origem não encontrado.")
-
-        target = await self._notebooks.get_owned(target_notebook_id, user_id)
-        if not target:
-            raise NotFoundError("Caderno de destino não encontrado.")
-
-        current_count = await self._notebooks.count_questions(target_notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões no caderno destino seria excedido."
-            )
-
-        moved_ids: list[uuid.UUID] = []
-        async with UnitOfWork(self._session):
-            for qid in question_ids:
-                if not await self._questions.exists(source_notebook_id, qid):
-                    continue
-
-                await self._questions.delete_by_notebook_and_question(
-                    source_notebook_id, qid
-                )
-
-                if not await self._questions.exists(target_notebook_id, qid):
-                    nq = NotebookQuestion(
-                        notebook_id=target_notebook_id,
-                        question_id=qid,
-                    )
-                    await self._questions.add(nq)
-                    moved_ids.append(nq.id)
-
-        return await self._questions.list_by_ids_with_relations(moved_ids)
-
-    async def copy_questions(
-        self,
-        source_notebook_id: uuid.UUID,
-        target_notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Copia questões para outro caderno."""
-        if source_notebook_id == target_notebook_id:
-            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
-
-        source = await self._notebooks.get_owned(source_notebook_id, user_id)
-        if not source:
-            raise NotFoundError("Caderno de origem não encontrado.")
-
-        target = await self._notebooks.get_owned(target_notebook_id, user_id)
-        if not target:
-            raise NotFoundError("Caderno de destino não encontrado.")
-
-        current_count = await self._notebooks.count_questions(target_notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-
-        # Remover duplicatas
-        to_add = []
-        for qid in question_ids:
-            if not await self._questions.exists(target_notebook_id, qid):
-                to_add.append(qid)
-
-        if not to_add:
-            return []
-
-        if quota_limit is not None and current_count + len(to_add) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões no caderno destino seria excedido."
-            )
-
-        async with UnitOfWork(self._session):
-            result = await self._questions.bulk_create(target_notebook_id, to_add)
-        return result
-</file>
-
 <file path="app/services/practice/question_attempt_repository.py">
 """Regras de negócio de tentativas de resposta (`QuestionAttempt`).
 
@@ -25374,6 +24035,105 @@ class QuestionAttemptService:
         return await self._attempts.list_paginated(
             user_id=user_id, limit=limit, cursor_id=cursor_id
         )
+</file>
+
+<file path="app/services/storage/s3_service.py">
+"""Serviço de armazenamento de imagens das questões em S3, via presigned URL.
+
+O backend NUNCA recebe o binário da imagem — só gera uma URL assinada de
+upload (PUT) que o navegador do admin usa para subir o arquivo direto pro
+bucket. Isso mantém a API leve (não bufferiza arquivo grande) e escala sem
+esforço. O RDS Postgres só guarda a URL final (`question_attachments.url`).
+"""
+
+import uuid
+
+import boto3
+from botocore.client import Config as BotoConfig
+from botocore.exceptions import ClientError
+
+from app.core.config import settings
+from app.core.exceptions import DomainError
+
+ALLOWED_CONTENT_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+
+
+class S3ConfigError(DomainError):
+    """S3 não está configurado corretamente (bucket/URL pública ausentes)."""
+
+    code = "s3_not_configured"
+
+
+class S3UploadValidationError(DomainError):
+    """Tipo de arquivo (ou outro parâmetro) inválido para upload."""
+
+    code = "s3_upload_invalid"
+
+
+def _get_client():
+    if not settings.S3_BUCKET_NAME:
+        raise S3ConfigError(
+            "Upload de imagens não está configurado: defina S3_BUCKET_NAME "
+            "e S3_PUBLIC_BASE_URL nas variáveis de ambiente do backend."
+        )
+    kwargs: dict = {
+        "region_name": settings.S3_REGION,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    # Em produção, prefira a Task Role do ECS (não passe credenciais
+    # explícitas). Local/dev pode usar S3_ACCESS_KEY_ID/SECRET no .env.
+    if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = settings.S3_ACCESS_KEY_ID
+        kwargs["aws_secret_access_key"] = settings.S3_SECRET_ACCESS_KEY
+    return boto3.client("s3", **kwargs)
+
+
+def create_presigned_upload(
+    filename: str,
+    content_type: str,
+    prefix: str | None = None,
+) -> dict:
+    """Gera uma URL assinada de upload (PUT) + a URL pública final do objeto.
+
+    A chave do objeto é gerada no backend (UUID), nunca a partir do nome
+    original do arquivo — evita path traversal, colisão de nomes e
+    vazamento do nome original do arquivo do usuário/admin.
+    """
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise S3UploadValidationError(
+            f"Tipo de arquivo não permitido: '{content_type}'. "
+            f"Aceitos: {', '.join(ALLOWED_CONTENT_TYPES)}."
+        )
+
+    extension = ALLOWED_CONTENT_TYPES[content_type]
+    object_prefix = (prefix or settings.S3_QUESTIONS_PREFIX).strip("/")
+    key = f"{object_prefix}/{uuid.uuid4().hex}{extension}"
+
+    client = _get_client()
+    try:
+        upload_url = client.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={
+                "Bucket": settings.S3_BUCKET_NAME,
+                "Key": key,
+                "ContentType": content_type,
+            },
+            ExpiresIn=settings.S3_PRESIGN_EXPIRES_SECONDS,
+        )
+    except ClientError as exc:
+        raise S3ConfigError(f"Falha ao gerar URL de upload: {exc}") from exc
+
+    public_base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
+    return {
+        "upload_url": upload_url,
+        "public_url": f"{public_base}/{key}",
+        "key": key,
+        "expires_in": settings.S3_PRESIGN_EXPIRES_SECONDS,
+    }
 </file>
 
 <file path="app/workers/subscription_renewal.py">
@@ -27162,6 +25922,430 @@ from app.models.practice.user_question_state import UserQuestionState
 __all__ = ["TrainingSession", "TrainingSessionQuestion", "QuestionAttempt", "UserQuestionState"]
 </file>
 
+<file path="app/repositories/learning/notebook_question_repository.py">
+# app/repositories/learning/notebook_question_repository.py
+"""Repositório de acesso a dados de `NotebookQuestion`."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy import select, func, delete, or_
+from sqlalchemy.orm import selectinload
+
+from app.models.content.question import Question
+from app.models.learning.notebook_question import NotebookQuestion
+from app.repositories.base import BaseRepository
+
+# 🔥 CORREÇÃO: eager-load da árvore completa de `Question`, não só o objeto
+# raso. `QuestionListItem` (usado por `NotebookQuestionResponse.question`)
+# exige discipline/subject/topic/exam_board/exam_edition/organization/tags;
+# sem carregar cada um deles, o Pydantic tenta lazy-load fora do contexto
+# assíncrono da sessão ao serializar e estoura `MissingGreenlet`.
+# Mesmo conjunto de relações usado por `QuestionRepository._RELATIONS`
+# (app/repositories/content/question_repository.py) — mantido em espelho
+# aqui porque `NotebookQuestion.question` é carregado a partir de outra
+# raiz de query (NotebookQuestion, não Question), então não dá para
+# reaproveitar a tupla de lá diretamente.
+_QUESTION_RELATIONS = (
+    selectinload(NotebookQuestion.question).selectinload(Question.discipline),
+    selectinload(NotebookQuestion.question).selectinload(Question.subject),
+    selectinload(NotebookQuestion.question).selectinload(Question.topic),
+    selectinload(NotebookQuestion.question).selectinload(Question.exam_board),
+    selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
+    selectinload(NotebookQuestion.question).selectinload(Question.organization),
+    selectinload(NotebookQuestion.question).selectinload(Question.tags),
+)
+
+# Mantido por compatibilidade com quem já importava `_RELATIONS` deste módulo.
+_RELATIONS = _QUESTION_RELATIONS
+
+
+class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
+    """Repositório de questões em cadernos."""
+
+    model = NotebookQuestion
+
+    async def get_owned(
+        self,
+        notebook_id: uuid.UUID,
+        question_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> NotebookQuestion | None:
+        """Busca uma relação notebook-question validando ownership do notebook."""
+        stmt = (
+            select(NotebookQuestion)
+            .join(NotebookQuestion.notebook)
+            .where(
+                NotebookQuestion.notebook_id == notebook_id,
+                NotebookQuestion.question_id == question_id,
+                NotebookQuestion.notebook.has(user_id=user_id),
+            )
+            .options(*_QUESTION_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_by_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        limit: int,
+        cursor_id: Optional[uuid.UUID] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[NotebookQuestion], int]:
+        """Lista questões de um caderno."""
+        stmt = (
+            select(NotebookQuestion)
+            .join(NotebookQuestion.notebook)
+            .where(
+                NotebookQuestion.notebook_id == notebook_id,
+                NotebookQuestion.notebook.has(user_id=user_id),
+            )
+            .options(*_QUESTION_RELATIONS)
+            .order_by(NotebookQuestion.added_at.desc(), NotebookQuestion.id.desc())
+            .limit(limit)
+        )
+
+        if search:
+            search_term = f"%{search}%"
+            # 🔥 CORREÇÃO: `statement` não existia neste escopo (NameError
+            # silencioso — só estourava quando alguém de fato usava ?search=).
+            # O correto é filtrar pela coluna `Question.statement`.
+            stmt = stmt.where(
+                or_(
+                    NotebookQuestion.question.has(Question.statement.ilike(search_term)),
+                )
+            )
+
+        if cursor_id is not None:
+            cursor = await self.get_by_id(cursor_id)
+            if cursor is not None:
+                stmt = stmt.where(
+                    (NotebookQuestion.added_at < cursor.added_at)
+                    | (
+                        (NotebookQuestion.added_at == cursor.added_at)
+                        & (NotebookQuestion.id < cursor.id)
+                    )
+                )
+
+        result = await self.session.execute(stmt)
+        items = list(result.scalars().unique().all())
+
+        # Contagem total
+        count_stmt = (
+            select(func.count())
+            .select_from(NotebookQuestion)
+            .join(NotebookQuestion.notebook)
+            .where(
+                NotebookQuestion.notebook_id == notebook_id,
+                NotebookQuestion.notebook.has(user_id=user_id),
+            )
+        )
+
+        if search:
+            search_term = f"%{search}%"
+            count_stmt = count_stmt.where(
+                NotebookQuestion.question.has(Question.statement.ilike(search_term)),
+            )
+
+        count_result = await self.session.execute(count_stmt)
+        total = count_result.scalar() or 0
+
+        return items, total
+
+    async def exists(
+        self,
+        notebook_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> bool:
+        """Verifica se uma questão já está no caderno."""
+        stmt = select(func.count()).select_from(NotebookQuestion).where(
+            NotebookQuestion.notebook_id == notebook_id,
+            NotebookQuestion.question_id == question_id,
+        )
+        result = await self.session.execute(stmt)
+        return (result.scalar() or 0) > 0
+
+    async def list_by_ids_with_relations(
+        self,
+        notebook_question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Busca por lote de IDs de `NotebookQuestion`, com `question` e sua
+        árvore de relações já carregadas.
+
+        Usado para recarregar itens recém-criados (bulk_create) sem cair no
+        mesmo bug de lazy-load fora de contexto assíncrono que afetava
+        `bulk_create` antes desta correção.
+        """
+        if not notebook_question_ids:
+            return []
+        stmt = (
+            select(NotebookQuestion)
+            .where(NotebookQuestion.id.in_(notebook_question_ids))
+            .options(*_QUESTION_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def bulk_create(
+        self,
+        notebook_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Cria múltiplas relações em lote."""
+        items = []
+        for question_id in question_ids:
+            nq = NotebookQuestion(
+                notebook_id=notebook_id,
+                question_id=question_id,
+            )
+            self.session.add(nq)
+            items.append(nq)
+
+        await self.session.flush()
+
+        # 🔥 CORREÇÃO: recarregar em uma única query com as relações de
+        # `question` já carregadas (`self.get_by_id`, herdado de
+        # `BaseRepository`, não aplica nenhum `selectinload` — o retorno
+        # anterior quebrava na serialização com `MissingGreenlet`).
+        ids = [item.id for item in items]
+        return await self.list_by_ids_with_relations(ids)
+
+    async def delete_by_notebook_and_question(
+        self,
+        notebook_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> bool:
+        """Remove uma questão de um caderno."""
+        stmt = delete(NotebookQuestion).where(
+            NotebookQuestion.notebook_id == notebook_id,
+            NotebookQuestion.question_id == question_id,
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount > 0
+
+
+    async def list_for_export(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID] | None = None,
+    ) -> list[NotebookQuestion]:
+        """Carrega as questões do caderno com alternativas para exportação PDF.
+
+        A posse do caderno é sempre validada na própria query.
+        """
+        stmt = (
+            select(NotebookQuestion)
+            .join(NotebookQuestion.notebook)
+            .where(
+                NotebookQuestion.notebook_id == notebook_id,
+                NotebookQuestion.notebook.has(user_id=user_id),
+            )
+            .options(
+                *_QUESTION_RELATIONS,
+                selectinload(NotebookQuestion.question).selectinload(Question.alternatives),
+                selectinload(NotebookQuestion.question).selectinload(Question.attachments),
+            )
+            .order_by(NotebookQuestion.added_at.asc(), NotebookQuestion.id.asc())
+        )
+        if question_ids:
+            stmt = stmt.where(NotebookQuestion.question_id.in_(question_ids))
+
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def delete_by_notebook(
+        self,
+        notebook_id: uuid.UUID,
+    ) -> int:
+        """Remove todas as questões de um caderno."""
+        stmt = delete(NotebookQuestion).where(
+            NotebookQuestion.notebook_id == notebook_id
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount
+</file>
+
+<file path="app/repositories/learning/notebook_repository.py">
+# app/repositories/learning/notebook_repository.py
+"""Repositório de acesso a dados de `Notebook`."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy import select, func, or_, delete
+from sqlalchemy.orm import selectinload
+
+from app.models.content.question import Question
+from app.models.learning.notebook import Notebook
+from app.models.learning.notebook_question import NotebookQuestion
+from app.repositories.base import BaseRepository
+
+_RELATIONS = (
+    selectinload(Notebook.folder),
+    selectinload(Notebook.tags),
+)
+
+_QUESTION_DETAIL_RELATIONS = (
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.discipline),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.subject),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.topic),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.exam_board),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.organization),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.tags),
+    selectinload(Notebook.questions).selectinload(NotebookQuestion.question).selectinload(Question.attachments),
+)
+
+
+class NotebookRepository(BaseRepository[Notebook]):
+    """Repositório de cadernos."""
+
+    model = Notebook
+
+    async def get_owned(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Notebook | None:
+        """Busca um caderno restrito ao dono com relações carregadas."""
+        stmt = (
+            select(Notebook)
+            .where(
+                Notebook.id == notebook_id,
+                Notebook.user_id == user_id,
+            )
+            .options(*_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_with_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Notebook | None:
+        """Busca um caderno com as questões (e suas relações) carregadas."""
+        stmt = (
+            select(Notebook)
+            .where(
+                Notebook.id == notebook_id,
+                Notebook.user_id == user_id,
+            )
+            .options(*_RELATIONS, *_QUESTION_DETAIL_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_by_user(
+        self,
+        user_id: uuid.UUID,
+        limit: int,
+        cursor_id: Optional[uuid.UUID] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        favorite: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[Notebook], int]:
+        """Lista cadernos do usuário com filtros."""
+        stmt = (
+            select(Notebook)
+            .where(Notebook.user_id == user_id)
+            .options(*_RELATIONS)
+            .order_by(Notebook.created_at.desc(), Notebook.id.desc())
+            .limit(limit)
+        )
+
+        if folder_id is not None:
+            stmt = stmt.where(Notebook.folder_id == folder_id)
+
+        if favorite is not None:
+            stmt = stmt.where(Notebook.is_favorite == favorite)
+
+        if search:
+            search_term = f"%{search}%"
+            stmt = stmt.where(
+                or_(
+                    Notebook.name.ilike(search_term),
+                    Notebook.description.ilike(search_term),
+                )
+            )
+
+        if cursor_id is not None:
+            cursor = await self.get_by_id(cursor_id)
+            if cursor is not None:
+                stmt = stmt.where(
+                    (Notebook.created_at < cursor.created_at)
+                    | (
+                        (Notebook.created_at == cursor.created_at)
+                        & (Notebook.id < cursor.id)
+                    )
+                )
+
+        result = await self.session.execute(stmt)
+        items = list(result.scalars().unique().all())
+
+        # Contagem total
+        count_stmt = select(func.count()).select_from(Notebook).where(Notebook.user_id == user_id)
+        if folder_id is not None:
+            count_stmt = count_stmt.where(Notebook.folder_id == folder_id)
+        if favorite is not None:
+            count_stmt = count_stmt.where(Notebook.is_favorite == favorite)
+        if search:
+            search_term = f"%{search}%"
+            count_stmt = count_stmt.where(
+                or_(
+                    Notebook.name.ilike(search_term),
+                    Notebook.description.ilike(search_term),
+                )
+            )
+
+        count_result = await self.session.execute(count_stmt)
+        total = count_result.scalar() or 0
+
+        return items, total
+
+    async def count_questions(self, notebook_id: uuid.UUID) -> int:
+        """Conta questões de um caderno."""
+        stmt = select(func.count()).select_from(NotebookQuestion).where(
+            NotebookQuestion.notebook_id == notebook_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_by_name(
+        self,
+        user_id: uuid.UUID,
+        name: str,
+    ) -> Notebook | None:
+        """Busca caderno por nome (exato) para o usuário."""
+        stmt = select(Notebook).where(
+            Notebook.user_id == user_id,
+            Notebook.name == name,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def toggle_favorite(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        is_favorite: bool,
+    ) -> Notebook | None:
+        """Alterna o estado de favorito."""
+        notebook = await self.get_owned(notebook_id, user_id)
+        if notebook:
+            notebook.is_favorite = is_favorite
+            await self.session.flush()
+        return notebook
+
+    async def delete(self, notebook_id: uuid.UUID) -> bool:
+        """Remove um caderno do banco."""
+        stmt = delete(Notebook).where(Notebook.id == notebook_id)
+        result = await self.session.execute(stmt)
+        return result.rowcount > 0
+</file>
+
 <file path="app/repositories/practice/question_attempt_repository.py">
 """Repositório de acesso a dados de `QuestionAttempt` (histórico de respostas)."""
 
@@ -27280,6 +26464,141 @@ class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
 
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+</file>
+
+<file path="app/schemas/identity/__init__.py">
+"""Schemas do contexto 'identity'."""
+
+from app.schemas.identity.auth import (
+    ForgotPasswordRequest,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    UserResponse,
+)
+from app.schemas.identity.user import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+)
+
+__all__ = [
+    "AdminUserListItem",
+    "AvatarPresignRequest",
+    "ChangePasswordRequest",
+    "ForgotPasswordRequest",
+    "LoginRequest",
+    "LogoutRequest",
+    "MeResponse",
+    "RefreshRequest",
+    "RegisterRequest",
+    "ResetPasswordRequest",
+    "TokenResponse",
+    "UpdateAccountRequest",
+    "UpdateProfileRequest",
+    "UpdateUserStatusRequest",
+    "UserProfileResponse",
+    "UserResponse",
+]
+</file>
+
+<file path="app/services/billing/feature_gate_service.py">
+"""Único ponto de leitura de "o usuário X tem direito à feature Y" que
+módulos fora de `billing` podem importar (`practice`, `learning`,
+`analytics`, etc.). Nenhum outro módulo deve importar `Plan`, `Subscription`
+ou `PlanFeature` diretamente — só conhece `FeatureKey` (enum) e este service.
+
+Resolução do plano efetivo do usuário:
+    assinatura ATIVA (`SubscriptionRepository.get_active_by_user`) → o plano
+    dela; sem assinatura ativa → plano FREE (`FREE_PLAN_SLUG`), por
+    convenção nunca representado por uma linha em `subscriptions`.
+
+Decisão registrada no doc de acompanhamento: sem dependência de Redis por
+enquanto — a leitura já é uma única query com `selectinload` (sem N+1) via
+`SubscriptionRepository.get_active_by_user`/`PlanRepository.
+get_by_slug_with_features`. Cache entra só se isso aparecer como gargalo real
+(KISS/YAGNI).
+"""
+
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.models.billing.plan import Plan
+from app.models.billing.plan_feature import PlanFeature
+from app.models.enums import FeatureKey
+from app.repositories.billing.plan_repository import PlanRepository
+from app.repositories.billing.subscription_repository import SubscriptionRepository
+
+# Plano concedido a todo usuário sem assinatura paga. Precisa existir no
+# banco com este slug exato (seed dos planos — Etapa 6); se não existir,
+# `get_effective_plan` levanta `NotFoundError` de propósito, em vez de
+# assumir silenciosamente "sem features", para deixar o problema de
+# configuração óbvio em vez de mascarado.
+FREE_PLAN_SLUG = "free"
+
+
+class FeatureGateService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._subscriptions = SubscriptionRepository(session)
+        self._plans = PlanRepository(session)
+
+    async def get_effective_plan(self, user_id: uuid.UUID) -> Plan:
+        """Plano efetivo do usuário: o da assinatura ativa, ou FREE."""
+        subscription = await self._subscriptions.get_active_by_user(user_id)
+        if subscription is not None:
+            return subscription.plan
+
+        plan = await self._plans.get_by_slug_with_features(FREE_PLAN_SLUG)
+        if plan is None:
+            raise NotFoundError(
+                f"Plano padrão '{FREE_PLAN_SLUG}' não está cadastrado. Rode o seed de planos."
+            )
+        return plan
+
+    async def has_feature(self, user_id: uuid.UUID, key: FeatureKey) -> bool:
+        plan = await self.get_effective_plan(user_id)
+        return _find_plan_feature(plan, key) is not None
+
+    async def assert_feature(self, user_id: uuid.UUID, key: FeatureKey) -> None:
+        """Levanta `ForbiddenError` se o plano efetivo não inclui `key`."""
+        if not await self.has_feature(user_id, key):
+            raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
+
+    async def get_quota_limit(self, user_id: uuid.UUID, key: FeatureKey) -> int | None:
+        """Limite de quota da feature no plano efetivo (`None` = ilimitado).
+
+        Levanta `ForbiddenError` se o plano nem tem acesso à feature — mesmo
+        comportamento de `assert_feature`, para quem for chamar isto direto.
+        """
+        plan = await self.get_effective_plan(user_id)
+        plan_feature = _find_plan_feature(plan, key)
+        if plan_feature is None:
+            raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
+        return plan_feature.quota_limit
+
+    async def assert_within_quota(self, user_id: uuid.UUID, key: FeatureKey, current_usage: int) -> None:
+        """Levanta `ForbiddenError` se `current_usage` já atingiu o limite do
+        plano efetivo para `key`. Uso típico em `practice`/`learning` antes
+        de criar um novo registro contado pela quota (ex.: `daily_questions`).
+        """
+        limit = await self.get_quota_limit(user_id, key)
+        if limit is not None and current_usage >= limit:
+            raise ForbiddenError(f"Limite do seu plano foi atingido para '{key.value}' ({limit}).")
+
+
+def _find_plan_feature(plan: Plan, key: FeatureKey) -> PlanFeature | None:
+    return next((pf for pf in plan.plan_features if pf.feature.key == key), None)
 </file>
 
 <file path="app/services/identity/auth_service.py">
@@ -31124,6 +30443,127 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         )
 </file>
 
+<file path="app/models/learning/notebook_folder.py">
+# app/models/learning/notebook_folder.py
+"""Modelo de pasta para organização hierárquica de cadernos."""
+
+import uuid
+from typing import List, Optional
+
+from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.base import TimestampMixin, UUIDPKMixin
+
+
+class NotebookFolder(UUIDPKMixin, TimestampMixin, Base):
+    """Pasta para organizar cadernos em hierarquia."""
+
+    __tablename__ = "notebook_folders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_notebook_folder_user_name"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("notebook_folders.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Relacionamentos
+    parent: Mapped[Optional["NotebookFolder"]] = relationship(
+        "NotebookFolder",
+        remote_side="NotebookFolder.id",
+        backref="children",
+        single_parent=True,
+    )
+    notebooks: Mapped[List["Notebook"]] = relationship(
+        "Notebook",
+        back_populates="folder",
+        cascade="save-update, merge",
+    )
+</file>
+
+<file path="app/models/learning/notebook.py">
+# app/models/learning/notebook.py
+"""Modelo de caderno do usuário."""
+
+import uuid
+from typing import List, Optional
+
+from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.base import TimestampMixin, UUIDPKMixin
+
+# 🔥 CORREÇÃO: Importar a tabela do arquivo correto
+from app.models.learning.notebook_tag import notebook_tag_links
+from app.models.learning.notebook_folder import NotebookFolder
+from app.models.learning.notebook_question import NotebookQuestion
+from app.models.learning.notebook_tag import NotebookTag
+
+
+class Notebook(UUIDPKMixin, TimestampMixin, Base):
+    """Caderno do usuário para organizar questões."""
+
+    __tablename__ = "notebooks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_notebook_user_name"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("notebook_folders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Relacionamentos
+    folder: Mapped[Optional["NotebookFolder"]] = relationship(
+        "NotebookFolder",
+        back_populates="notebooks",
+        foreign_keys=[folder_id],
+    )
+    questions: Mapped[List["NotebookQuestion"]] = relationship(
+        "NotebookQuestion",
+        back_populates="notebook",
+        cascade="all, delete-orphan",
+        order_by="NotebookQuestion.added_at.desc()",
+    )
+
+    @property
+    def question_count(self) -> int:
+        """Quantidade de questões do caderno para serialização segura."""
+        return int(getattr(self, "_question_count", 0))
+
+    tags: Mapped[List["NotebookTag"]] = relationship(
+        "NotebookTag",
+        secondary=notebook_tag_links,
+        back_populates="notebooks",
+    )
+</file>
+
 <file path="app/repositories/billing/subscription_history_repository.py">
 """Repositório de acesso a dados de `SubscriptionHistory`.
 
@@ -31431,6 +30871,77 @@ class QuestionFacetsResponse(BaseModel):
     organization_id: list[FacetBucket]
     year: list[FacetBucket]
     difficulty: list[FacetBucket]
+</file>
+
+<file path="app/schemas/learning/notebook.py">
+# app/schemas/learning/notebook.py
+"""Schemas de request/response de cadernos."""
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.learning.notebook_question import NotebookQuestionResponse
+from app.schemas.learning.notebook_folder import NotebookFolderResponse
+
+
+class NotebookResponse(BaseModel):
+    """Resposta de um caderno (metadados)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    name: str
+    description: str | None
+    folder_id: uuid.UUID | None
+    folder: NotebookFolderResponse | None
+    is_favorite: bool
+    created_at: datetime
+    updated_at: datetime
+
+    question_count: int = 0
+
+
+class NotebookDetailResponse(NotebookResponse):
+    """Resposta detalhada de um caderno (com questões)."""
+
+    questions: list[NotebookQuestionResponse] = Field(default_factory=list)
+
+
+class NotebookCreateRequest(BaseModel):
+    """Request para criar um caderno."""
+
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1000)
+    folder_id: uuid.UUID | None = None
+    tag_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class NotebookUpdateRequest(BaseModel):
+    """Request para atualizar um caderno."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1000)
+    folder_id: uuid.UUID | None = None
+    is_favorite: bool | None = None
+    tag_ids: list[uuid.UUID] | None = None
+
+
+class NotebookListResponse(BaseModel):
+    """Lista de cadernos do usuário."""
+
+    items: list[NotebookResponse]
+    total: int
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class NotebookFavoriteToggleRequest(BaseModel):
+    """Request para alternar favorito."""
+
+    is_favorite: bool
 </file>
 
 <file path="app/services/assessment/exam_attempt_service.py">
@@ -33254,6 +32765,537 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 </file>
 
+<file path="app/services/learning/notebook_service.py">
+# app/services/learning/notebook_service.py
+"""Regras de negócio de cadernos."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError, ForbiddenError
+from app.database.uow import UnitOfWork
+from app.models.learning.notebook import Notebook
+from app.models.learning.notebook_folder import NotebookFolder
+from app.models.learning.notebook_question import NotebookQuestion
+from app.models.learning.notebook_tag import NotebookTag
+from app.repositories.content.question_repository import QuestionRepository
+from app.repositories.learning.notebook_folder_repository import NotebookFolderRepository
+from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
+from app.repositories.learning.notebook_repository import NotebookRepository
+from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
+from app.services.billing.feature_gate_service import FeatureGateService
+from app.models.enums import FeatureKey
+
+
+class NotebookService:
+    """Serviço de cadernos."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._notebooks = NotebookRepository(session)
+        self._questions = NotebookQuestionRepository(session)
+        self._folders = NotebookFolderRepository(session)
+        self._tags = NotebookTagRepository(session)
+        self._question_repo = QuestionRepository(session)
+        self._feature_gate = FeatureGateService(session)
+
+    # ==================================================================== #
+    # FOLDERS
+    # ==================================================================== #
+
+    async def list_folders(self, user_id: uuid.UUID) -> list[NotebookFolder]:
+        """Lista todas as pastas do usuário."""
+        return await self._folders.list_by_user(user_id)
+
+    async def create_folder(
+        self,
+        user_id: uuid.UUID,
+        name: str,
+        parent_id: Optional[uuid.UUID] = None,
+    ) -> NotebookFolder:
+        """Cria uma nova pasta."""
+        existing = await self._folders.get_by_name(user_id, name)
+        if existing:
+            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
+
+        if parent_id:
+            parent = await self._folders.get_owned(parent_id, user_id)
+            if not parent:
+                raise NotFoundError("Pasta pai não encontrada.")
+
+        folder = NotebookFolder(
+            user_id=user_id,
+            name=name.strip(),
+            parent_id=parent_id,
+        )
+
+        async with UnitOfWork(self._session):
+            await self._folders.add(folder)
+
+        return folder
+
+    async def update_folder(
+        self,
+        folder_id: uuid.UUID,
+        user_id: uuid.UUID,
+        name: str,
+    ) -> NotebookFolder:
+        """Renomeia uma pasta."""
+        folder = await self._folders.get_owned(folder_id, user_id)
+        if not folder:
+            raise NotFoundError("Pasta não encontrada.")
+
+        existing = await self._folders.get_by_name(user_id, name.strip())
+        if existing and existing.id != folder_id:
+            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
+
+        folder.name = name.strip()
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+
+        return folder
+
+    async def delete_folder(self, folder_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        """Exclui uma pasta (move cadernos para root)."""
+        folder = await self._folders.get_owned(folder_id, user_id)
+        if not folder:
+            raise NotFoundError("Pasta não encontrada.")
+
+        # Mover cadernos para root
+        notebooks, _ = await self._notebooks.list_by_user(
+            user_id, limit=1000, folder_id=folder_id
+        )
+        for notebook in notebooks:
+            notebook.folder_id = None
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+            await self._folders.delete_cascade(folder_id)
+
+    # ==================================================================== #
+    # TAGS
+    # ==================================================================== #
+
+    async def list_tags(self) -> list[NotebookTag]:
+        """Lista todas as tags disponíveis."""
+        return await self._tags.list_all()
+
+    async def create_tag(self, name: str) -> NotebookTag:
+        """Cria uma nova tag."""
+        existing = await self._tags.get_by_name(name.strip())
+        if existing:
+            return existing
+
+        import re
+        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+
+        tag = NotebookTag(name=name.strip(), slug=slug)
+
+        async with UnitOfWork(self._session):
+            await self._tags.add(tag)
+
+        return tag
+
+    # ==================================================================== #
+    # NOTEBOOKS
+    # ==================================================================== #
+
+    async def list_notebooks(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 20,
+        cursor_id: Optional[uuid.UUID] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        favorite: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[Notebook], int]:
+        """Lista cadernos do usuário."""
+        notebooks, total = await self._notebooks.list_by_user(
+            user_id=user_id,
+            limit=limit,
+            cursor_id=cursor_id,
+            folder_id=folder_id,
+            favorite=favorite,
+            search=search,
+        )
+        for notebook in notebooks:
+            notebook._question_count = await self._notebooks.count_questions(notebook.id)
+        return notebooks, total
+
+    async def get_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Notebook:
+        """Busca um caderno específico, com as questões carregadas."""
+        notebook = await self._notebooks.get_with_questions(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        notebook._question_count = len(notebook.questions)
+        return notebook
+
+    async def create_notebook(
+        self,
+        user_id: uuid.UUID,
+        name: str,
+        description: Optional[str] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        tag_ids: Optional[list[uuid.UUID]] = None,
+    ) -> Notebook:
+        """Cria um novo caderno."""
+        # Verificar feature gate
+        has_feature = await self._feature_gate.has_feature(user_id, FeatureKey.NOTEBOOKS)
+        if not has_feature:
+            raise ForbiddenError(
+                "Seu plano atual não inclui a criação de cadernos. "
+                "Faça upgrade para o plano Standard ou Pro."
+            )
+
+        existing = await self._notebooks.get_by_name(user_id, name.strip())
+        if existing:
+            raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
+
+        if folder_id:
+            folder = await self._folders.get_owned(folder_id, user_id)
+            if not folder:
+                raise NotFoundError("Pasta não encontrada.")
+
+        tags = []
+        if tag_ids:
+            tags = await self._tags.list_by_ids(tag_ids)
+            if len(tags) != len(tag_ids):
+                raise NotFoundError("Uma ou mais tags não foram encontradas.")
+
+        notebook = Notebook(
+            user_id=user_id,
+            name=name.strip(),
+            description=description.strip() if description else None,
+            folder_id=folder_id,
+        )
+        notebook.tags = tags
+
+        async with UnitOfWork(self._session):
+            await self._notebooks.add(notebook)
+
+        # 🔥 CRÍTICO: Refresh do objeto e recarregar relações para evitar
+        # MissingGreenlet quando o router acessar notebook.folder/tags.
+        await self._session.refresh(notebook)
+
+        if notebook.folder_id:
+            folder = await self._folders.get_owned(notebook.folder_id, user_id)
+            notebook.folder = folder
+
+        if tag_ids:
+            tags = await self._tags.list_by_ids(tag_ids)
+            notebook.tags = tags
+
+        notebook._question_count = 0
+        return notebook
+
+    async def update_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        is_favorite: Optional[bool] = None,
+        tag_ids: Optional[list[uuid.UUID]] = None,
+    ) -> Notebook:
+        """Atualiza um caderno."""
+        # Buscar com relações já carregadas
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        if name is not None and name.strip() != notebook.name:
+            existing = await self._notebooks.get_by_name(user_id, name.strip())
+            if existing and existing.id != notebook_id:
+                raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
+            notebook.name = name.strip()
+
+        if description is not None:
+            notebook.description = description.strip() if description else None
+
+        if folder_id is not None:
+            if folder_id:
+                folder = await self._folders.get_owned(folder_id, user_id)
+                if not folder:
+                    raise NotFoundError("Pasta não encontrada.")
+            notebook.folder_id = folder_id
+
+        if is_favorite is not None:
+            notebook.is_favorite = is_favorite
+
+        if tag_ids is not None:
+            tags = await self._tags.list_by_ids(tag_ids)
+            if len(tags) != len(tag_ids):
+                raise NotFoundError("Uma ou mais tags não foram encontradas.")
+            notebook.tags = tags
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+
+            # 🔥 CRÍTICO: Refresh do objeto para recarregar todas as colunas
+            # do banco, incluindo updated_at que é atualizado pelo trigger
+            await self._session.refresh(notebook)
+
+            # Recarregar relações explicitamente
+            if notebook.folder_id:
+                folder = await self._folders.get_owned(notebook.folder_id, user_id)
+                notebook.folder = folder
+
+            # Recarregar tags
+            if tag_ids is not None:
+                tags = await self._tags.list_by_ids(tag_ids)
+                notebook.tags = tags
+
+        notebook._question_count = await self._notebooks.count_questions(notebook_id)
+        return notebook
+
+    async def delete_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> None:
+        """Exclui um caderno (cascade exclui relações)."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        async with UnitOfWork(self._session):
+            await self._notebooks.delete(notebook_id)
+            await self._session.flush()
+
+    # ==================================================================== #
+    # QUESTIONS IN NOTEBOOK
+    # ==================================================================== #
+
+    async def list_notebook_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        limit: int = 20,
+        cursor_id: Optional[uuid.UUID] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[NotebookQuestion], int]:
+        """Lista questões de um caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        return await self._questions.list_by_notebook(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            limit=limit,
+            cursor_id=cursor_id,
+            search=search,
+        )
+
+
+    async def list_export_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Notebook, list[NotebookQuestion]]:
+        """Valida posse e carrega as questões completas para exportação."""
+        notebook = await self.get_notebook(notebook_id, user_id)
+        items = await self._questions.list_for_export(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            question_ids=question_ids,
+        )
+        return notebook, items
+
+    async def add_question(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> NotebookQuestion:
+        """Adiciona uma questão ao caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        question = await self._question_repo.get_by_id(question_id)
+        if not question:
+            raise NotFoundError("Questão não encontrada.")
+
+        if await self._questions.exists(notebook_id, question_id):
+            raise ConflictError("Esta questão já está no caderno.")
+
+        current_count = await self._notebooks.count_questions(notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count >= quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões por caderno foi atingido."
+            )
+
+        notebook_question = NotebookQuestion(
+            notebook_id=notebook_id,
+            question_id=question_id,
+        )
+
+        async with UnitOfWork(self._session):
+            await self._questions.add(notebook_question)
+
+        return await self._questions.get_owned(notebook_id, question_id, user_id)
+
+    async def add_questions_bulk(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Adiciona múltiplas questões ao caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        current_count = await self._notebooks.count_questions(notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões por caderno seria excedido."
+            )
+
+        # Remover duplicatas
+        to_add = []
+        for qid in question_ids:
+            if not await self._questions.exists(notebook_id, qid):
+                to_add.append(qid)
+
+        if not to_add:
+            return []
+
+        # Verificar se todas as questões existem
+        questions = await self._question_repo.list_by_ids(to_add)
+        if len(questions) != len(to_add):
+            raise NotFoundError("Uma ou mais questões não foram encontradas.")
+
+        async with UnitOfWork(self._session):
+            result = await self._questions.bulk_create(notebook_id, to_add)
+        return result
+
+    async def remove_question(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> None:
+        """Remove uma questão do caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        async with UnitOfWork(self._session):
+            removed = await self._questions.delete_by_notebook_and_question(
+                notebook_id, question_id
+            )
+            if not removed:
+                raise NotFoundError("Questão não encontrada neste caderno.")
+
+    async def move_questions(
+        self,
+        source_notebook_id: uuid.UUID,
+        target_notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Move questões para outro caderno."""
+        if source_notebook_id == target_notebook_id:
+            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
+
+        source = await self._notebooks.get_owned(source_notebook_id, user_id)
+        if not source:
+            raise NotFoundError("Caderno de origem não encontrado.")
+
+        target = await self._notebooks.get_owned(target_notebook_id, user_id)
+        if not target:
+            raise NotFoundError("Caderno de destino não encontrado.")
+
+        current_count = await self._notebooks.count_questions(target_notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões no caderno destino seria excedido."
+            )
+
+        moved_ids: list[uuid.UUID] = []
+        async with UnitOfWork(self._session):
+            for qid in question_ids:
+                if not await self._questions.exists(source_notebook_id, qid):
+                    continue
+
+                await self._questions.delete_by_notebook_and_question(
+                    source_notebook_id, qid
+                )
+
+                if not await self._questions.exists(target_notebook_id, qid):
+                    nq = NotebookQuestion(
+                        notebook_id=target_notebook_id,
+                        question_id=qid,
+                    )
+                    await self._questions.add(nq)
+                    moved_ids.append(nq.id)
+
+        return await self._questions.list_by_ids_with_relations(moved_ids)
+
+    async def copy_questions(
+        self,
+        source_notebook_id: uuid.UUID,
+        target_notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Copia questões para outro caderno."""
+        if source_notebook_id == target_notebook_id:
+            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
+
+        source = await self._notebooks.get_owned(source_notebook_id, user_id)
+        if not source:
+            raise NotFoundError("Caderno de origem não encontrado.")
+
+        target = await self._notebooks.get_owned(target_notebook_id, user_id)
+        if not target:
+            raise NotFoundError("Caderno de destino não encontrado.")
+
+        current_count = await self._notebooks.count_questions(target_notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+
+        # Remover duplicatas
+        to_add = []
+        for qid in question_ids:
+            if not await self._questions.exists(target_notebook_id, qid):
+                to_add.append(qid)
+
+        if not to_add:
+            return []
+
+        if quota_limit is not None and current_count + len(to_add) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões no caderno destino seria excedido."
+            )
+
+        async with UnitOfWork(self._session):
+            result = await self._questions.bulk_create(target_notebook_id, to_add)
+        return result
+</file>
+
 <file path="app/api/v1/content/questions.py">
 """Endpoints HTTP de questões.
 
@@ -33583,6 +33625,535 @@ async def report_question(
     service = QuestionReportService(session)
     report = await service.create_report(current_user.id, question_id, body)
     return Envelope(data=QuestionReportResponse.model_validate(report))
+</file>
+
+<file path="app/api/v1/learning/notebooks.py">
+# app/api/v1/learning/notebooks.py
+"""Endpoints HTTP de cadernos."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
+from urllib.parse import quote
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.models.enums import FeatureKey
+from app.schemas.content.question import QuestionListItem
+from app.schemas.learning.notebook import (
+    NotebookCreateRequest,
+    NotebookDetailResponse,
+    NotebookFavoriteToggleRequest,
+    NotebookListResponse,
+    NotebookResponse,
+    NotebookUpdateRequest,
+)
+from app.schemas.learning.notebook_folder import (
+    NotebookFolderCreateRequest,
+    NotebookFolderListResponse,
+    NotebookFolderResponse,
+    NotebookFolderUpdateRequest,
+)
+from app.schemas.learning.notebook_question import (
+    NotebookQuestionAddRequest,
+    NotebookQuestionBulkAddRequest,
+    NotebookQuestionCopyRequest,
+    NotebookQuestionListResponse,
+    NotebookQuestionMoveRequest,
+    NotebookQuestionResponse,
+)
+from app.schemas.learning.notebook_tag import (
+    NotebookTagCreateRequest,
+    NotebookTagListResponse,
+    NotebookTagResponse,
+)
+from app.security.dependencies import CurrentUser, RequireFeature
+from app.services.learning.notebook_service import NotebookService
+from app.services.export.notebook_pdf_service import build_notebook_pdf
+from app.core.exceptions import NotFoundError
+
+router = APIRouter()
+
+
+def get_notebook_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> NotebookService:
+    return NotebookService(session)
+
+
+NotebookServiceDep = Annotated[NotebookService, Depends(get_notebook_service)]
+
+
+# ==================================================================== #
+# FOLDERS                                                             #
+# ==================================================================== #
+
+
+@router.get("/folders", response_model=Envelope[NotebookFolderListResponse])
+async def list_folders(
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookFolderListResponse]:
+    """Lista todas as pastas do usuário."""
+    folders = await notebook_service.list_folders(current_user.id)
+    return Envelope(
+        data=NotebookFolderListResponse(
+            items=[NotebookFolderResponse.model_validate(f) for f in folders],
+            total=len(folders),
+        )
+    )
+
+
+@router.post(
+    "/folders",
+    response_model=Envelope[NotebookFolderResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_folder(
+    body: NotebookFolderCreateRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookFolderResponse]:
+    """Cria uma nova pasta."""
+    folder = await notebook_service.create_folder(
+        user_id=current_user.id,
+        name=body.name,
+        parent_id=body.parent_id,
+    )
+    return Envelope(data=NotebookFolderResponse.model_validate(folder))
+
+
+@router.patch("/folders/{folder_id}", response_model=Envelope[NotebookFolderResponse])
+async def update_folder(
+    folder_id: uuid.UUID,
+    body: NotebookFolderUpdateRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookFolderResponse]:
+    """Renomeia uma pasta."""
+    folder = await notebook_service.update_folder(
+        folder_id=folder_id,
+        user_id=current_user.id,
+        name=body.name,
+    )
+    return Envelope(data=NotebookFolderResponse.model_validate(folder))
+
+
+@router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_folder(
+    folder_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> None:
+    """Exclui uma pasta (move cadernos para root)."""
+    await notebook_service.delete_folder(folder_id, current_user.id)
+
+
+# ==================================================================== #
+# TAGS                                                                #
+# ==================================================================== #
+
+
+@router.get("/tags", response_model=Envelope[NotebookTagListResponse])
+async def list_tags(
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookTagListResponse]:
+    """Lista todas as tags disponíveis."""
+    tags = await notebook_service.list_tags()
+    return Envelope(
+        data=NotebookTagListResponse(
+            items=[NotebookTagResponse.model_validate(t) for t in tags],
+            total=len(tags),
+        )
+    )
+
+
+@router.post(
+    "/tags",
+    response_model=Envelope[NotebookTagResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tag(
+    body: NotebookTagCreateRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookTagResponse]:
+    """Cria uma nova tag."""
+    tag = await notebook_service.create_tag(name=body.name)
+    return Envelope(data=NotebookTagResponse.model_validate(tag))
+
+
+# ==================================================================== #
+# NOTEBOOKS                                                           #
+# ==================================================================== #
+
+
+@router.get("", response_model=Envelope[NotebookListResponse])
+async def list_notebooks(
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+    folder_id: Annotated[uuid.UUID | None, Query()] = None,
+    favorite: Annotated[bool | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+) -> Envelope[NotebookListResponse]:
+    """Lista cadernos do usuário com filtros."""
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    notebooks, total = await notebook_service.list_notebooks(
+        user_id=current_user.id,
+        limit=limit,
+        cursor_id=cursor_id,
+        folder_id=folder_id,
+        favorite=favorite,
+        search=search,
+    )
+
+    next_cursor = (
+        CursorPage.encode_cursor(str(notebooks[-1].id))
+        if len(notebooks) == limit and notebooks
+        else None
+    )
+
+    return Envelope(
+        data=NotebookListResponse(
+            items=[NotebookResponse.model_validate(n) for n in notebooks],
+            total=total,
+            next_cursor=next_cursor,
+            has_more=next_cursor is not None,
+        )
+    )
+
+
+@router.post(
+    "",
+    response_model=Envelope[NotebookResponse],
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(RequireFeature(FeatureKey.NOTEBOOKS))],
+)
+async def create_notebook(
+    body: NotebookCreateRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookResponse]:
+    """Cria um novo caderno."""
+    notebook = await notebook_service.create_notebook(
+        user_id=current_user.id,
+        name=body.name,
+        description=body.description,
+        folder_id=body.folder_id,
+        tag_ids=body.tag_ids,
+    )
+
+    # Construção manual para evitar MissingGreenlet
+    response_data = NotebookResponse(
+        id=notebook.id,
+        user_id=notebook.user_id,
+        name=notebook.name,
+        description=notebook.description,
+        folder_id=notebook.folder_id,
+        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
+        is_favorite=notebook.is_favorite,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+    )
+    response_data._question_count = 0
+
+    return Envelope(data=response_data)
+
+
+
+
+@router.get("/{notebook_id}/download", response_class=Response)
+async def download_notebook_pdf(
+    notebook_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+    selected: Annotated[str | None, Query(max_length=8000)] = None,
+    include_answer_key: Annotated[bool, Query()] = False,
+) -> Response:
+    """Gera e baixa o caderno em PDF.
+
+    `selected` aceita IDs separados por vírgula. Quando omitido, todas as
+    questões do caderno são exportadas. A posse do caderno e das questões é
+    sempre validada no backend.
+    """
+    selected_ids: list[uuid.UUID] | None = None
+    if selected:
+        try:
+            selected_ids = [uuid.UUID(value) for value in selected.split(",") if value]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Um ou mais IDs de questão são inválidos.") from exc
+
+    notebook, items = await notebook_service.list_export_questions(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        question_ids=selected_ids,
+    )
+
+    if selected_ids and len(items) != len(set(selected_ids)):
+        raise NotFoundError("Uma ou mais questões selecionadas não pertencem a este caderno.")
+    if not items:
+        raise NotFoundError("Este caderno não possui questões para exportar.")
+
+    pdf_bytes, filename = build_notebook_pdf(
+        notebook,
+        items,
+        include_answer_key=include_answer_key,
+    )
+
+    encoded_filename = quote(filename)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="caderno.pdf"; filename*=UTF-8''{encoded_filename}'
+            ),
+            "Content-Length": str(len(pdf_bytes)),
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/{notebook_id}", response_model=Envelope[NotebookDetailResponse])
+async def get_notebook(
+    notebook_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookDetailResponse]:
+    """Detalhe de um caderno."""
+    notebook = await notebook_service.get_notebook(notebook_id, current_user.id)
+
+    # Extrair questões
+    questions = []
+    for nq in notebook.questions:
+        if nq.question:
+            questions.append(nq.question)
+
+    response = NotebookDetailResponse(
+        id=notebook.id,
+        user_id=notebook.user_id,
+        name=notebook.name,
+        description=notebook.description,
+        folder_id=notebook.folder_id,
+        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
+        is_favorite=notebook.is_favorite,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+        questions=[QuestionListItem.model_validate(q) for q in questions],
+    )
+    response._question_count = len(questions)
+
+    return Envelope(data=response)
+
+
+@router.patch("/{notebook_id}", response_model=Envelope[NotebookResponse])
+async def update_notebook(
+    notebook_id: uuid.UUID,
+    body: NotebookUpdateRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookResponse]:
+    """Atualiza um caderno."""
+    notebook = await notebook_service.update_notebook(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        name=body.name,
+        description=body.description,
+        folder_id=body.folder_id,
+        is_favorite=body.is_favorite,
+        tag_ids=body.tag_ids,
+    )
+
+    # Construção manual para evitar MissingGreenlet
+    response_data = NotebookResponse(
+        id=notebook.id,
+        user_id=notebook.user_id,
+        name=notebook.name,
+        description=notebook.description,
+        folder_id=notebook.folder_id,
+        folder=NotebookFolderResponse.model_validate(notebook.folder) if notebook.folder else None,
+        is_favorite=notebook.is_favorite,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+    )
+    response_data._question_count = notebook._question_count if hasattr(notebook, "_question_count") else 0
+
+    return Envelope(data=response_data)
+
+
+@router.patch("/{notebook_id}/favorite", response_model=Envelope[NotebookResponse])
+async def toggle_favorite(
+    notebook_id: uuid.UUID,
+    body: NotebookFavoriteToggleRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookResponse]:
+    """Alterna o estado de favorito de um caderno."""
+    notebook = await notebook_service.update_notebook(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        is_favorite=body.is_favorite,
+    )
+
+    notebook._question_count = await notebook_service._notebooks.count_questions(notebook_id)
+
+    return Envelope(data=NotebookResponse.model_validate(notebook))
+
+
+@router.delete("/{notebook_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_notebook(
+    notebook_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> None:
+    """Exclui um caderno (remove as relações com questões)."""
+    await notebook_service.delete_notebook(notebook_id, current_user.id)
+
+
+# ==================================================================== #
+# QUESTIONS IN NOTEBOOK                                                #
+# ==================================================================== #
+
+
+@router.get("/{notebook_id}/questions", response_model=Envelope[NotebookQuestionListResponse])
+async def list_notebook_questions(
+    notebook_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+) -> Envelope[NotebookQuestionListResponse]:
+    """Lista questões de um caderno."""
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    questions, total = await notebook_service.list_notebook_questions(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        limit=limit,
+        cursor_id=cursor_id,
+        search=search,
+    )
+
+    next_cursor = (
+        CursorPage.encode_cursor(str(questions[-1].id))
+        if len(questions) == limit and questions
+        else None
+    )
+
+    return Envelope(
+        data=NotebookQuestionListResponse(
+            items=[NotebookQuestionResponse.model_validate(q) for q in questions],
+            total=total,
+            next_cursor=next_cursor,
+            has_more=next_cursor is not None,
+        )
+    )
+
+
+@router.post(
+    "/{notebook_id}/questions",
+    response_model=Envelope[NotebookQuestionResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_question_to_notebook(
+    notebook_id: uuid.UUID,
+    body: NotebookQuestionAddRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[NotebookQuestionResponse]:
+    """Adiciona uma questão ao caderno."""
+    notebook_question = await notebook_service.add_question(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        question_id=body.question_id,
+    )
+    return Envelope(data=NotebookQuestionResponse.model_validate(notebook_question))
+
+
+@router.post(
+    "/{notebook_id}/questions/bulk",
+    response_model=Envelope[list[NotebookQuestionResponse]],
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_questions_to_notebook(
+    notebook_id: uuid.UUID,
+    body: NotebookQuestionBulkAddRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[list[NotebookQuestionResponse]]:
+    """Adiciona múltiplas questões ao caderno."""
+    notebook_questions = await notebook_service.add_questions_bulk(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        question_ids=body.question_ids,
+    )
+    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in notebook_questions])
+
+
+@router.delete(
+    "/{notebook_id}/questions/{question_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_question_from_notebook(
+    notebook_id: uuid.UUID,
+    question_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> None:
+    """Remove uma questão do caderno."""
+    await notebook_service.remove_question(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        question_id=question_id,
+    )
+
+
+@router.post("/{notebook_id}/questions/move", response_model=Envelope[list[NotebookQuestionResponse]])
+async def move_questions(
+    notebook_id: uuid.UUID,
+    body: NotebookQuestionMoveRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[list[NotebookQuestionResponse]]:
+    """Move questões para outro caderno."""
+    result = await notebook_service.move_questions(
+        source_notebook_id=notebook_id,
+        target_notebook_id=body.target_notebook_id,
+        user_id=current_user.id,
+        question_ids=body.question_ids,
+    )
+    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
+
+
+@router.post("/{notebook_id}/questions/copy", response_model=Envelope[list[NotebookQuestionResponse]])
+async def copy_questions(
+    notebook_id: uuid.UUID,
+    body: NotebookQuestionCopyRequest,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+) -> Envelope[list[NotebookQuestionResponse]]:
+    """Copia questões para outro caderno."""
+    result = await notebook_service.copy_questions(
+        source_notebook_id=notebook_id,
+        target_notebook_id=body.target_notebook_id,
+        user_id=current_user.id,
+        question_ids=body.question_ids,
+    )
+    return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
 </file>
 
 <file path="app/models/billing/subscription.py">
@@ -34997,81 +35568,6 @@ class TrainingSessionService:
         return await self.get_session(session_id, user_id)
 </file>
 
-<file path="pyproject.toml">
-[tool.poetry]
-name = "foco-policial-backend"
-version = "0.1.0"
-description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
-authors = ["Foco Policial <dev@focopolicial.com>"]
-readme = "README.md"
-package-mode = false
-
-[tool.poetry.dependencies]
-python = "^3.13"
-fastapi = "^0.115.0"
-uvicorn = { extras = ["standard"], version = "^0.32.0" }
-sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
-asyncpg = "^0.30.0"
-alembic = "^1.13.3"
-pydantic = "^2.9.2"
-pydantic-settings = "^2.6.0"
-email-validator = "^2.2.0"
-pyjwt = "^2.9.0"
-argon2-cffi = "^23.1.0"
-redis = { extras = ["hiredis"], version = "^5.1.1" }
-python-multipart = "^0.0.12"
-structlog = "^24.4.0"
-apscheduler = "^3.10.4"
-prometheus-client = "^0.26.0"
-httpx = "^0.27.0"
-boto3 = "^1.43.76"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.7.1"
-mypy = "^1.13.0"
-pytest = "^8.3.3"
-pytest-asyncio = "^0.24.0"
-pytest-cov = "^5.0.0"
-httpx = "^0.27.2"
-factory-boy = "^3.3.1"
-testcontainers = {extras = ["postgres"], version = "^4.15.0"}
-psycopg2-binary = "^2.9.12"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-src = ["app", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
-ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
-
-[tool.ruff.lint.isort]
-known-first-party = ["app"]
-
-[tool.mypy]
-python_version = "3.13"
-plugins = ["pydantic.mypy"]
-strict = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-exclude = ["migrations/"]
-
-[[tool.mypy.overrides]]
-module = "app.models.*"
-# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
-# revisitar conforme o plugin oficial evolui.
-disallow_untyped_defs = false
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-</file>
-
 <file path="app/schemas/practice/training_session.py">
 # app/schemas/practice/training_session.py
 """Schemas de request/response de sessões de treino."""
@@ -35619,6 +36115,86 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+</file>
+
+<file path="pyproject.toml">
+[tool.poetry]
+name = "foco-policial-backend"
+version = "0.1.0"
+description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
+authors = ["Foco Policial <dev@focopolicial.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.13"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = "^0.30.0"
+alembic = "^1.13.3"
+pydantic = "^2.9.2"
+pydantic-settings = "^2.6.0"
+email-validator = "^2.2.0"
+pyjwt = "^2.9.0"
+argon2-cffi = "^23.1.0"
+redis = { extras = ["hiredis"], version = "^5.1.1" }
+python-multipart = "^0.0.12"
+structlog = "^24.4.0"
+apscheduler = "^3.10.4"
+prometheus-client = "^0.26.0"
+httpx = "^0.27.0"
+boto3 = "^1.43.76"
+reportlab = "^4.2.5"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.7.1"
+mypy = "^1.13.0"
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+httpx = "^0.27.2"
+factory-boy = "^3.3.1"
+testcontainers = {extras = ["postgres"], version = "^4.15.0"}
+psycopg2-binary = "^2.9.12"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = "reportlab.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "app.models.*"
+# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
+# revisitar conforme o plugin oficial evolui.
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 </file>
 
 <file path="app/models/enums.py">
@@ -36186,6 +36762,7 @@ class Settings(BaseSettings):
     S3_PUBLIC_BASE_URL: str = Field(default="")
     # Prefixo (pasta) dentro do bucket, pra organizar por tipo de conteúdo.
     S3_QUESTIONS_PREFIX: str = Field(default="questions/attachments")
+    S3_PROFILE_PREFIX: str = Field(default="profiles/avatars")
     # Segundos de validade da URL assinada de upload.
     S3_PRESIGN_EXPIRES_SECONDS: int = Field(default=300, ge=60, le=3600)
     # Tamanho máximo aceito por imagem (bytes). 8 MB é generoso pra

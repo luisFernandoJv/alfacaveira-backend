@@ -13,14 +13,23 @@ from app.repositories.base import BaseRepository
 
 # 🔥 CORREÇÃO: eager-load da árvore completa de `Question`, não só o objeto
 # raso. `QuestionListItem` (usado por `NotebookQuestionResponse.question`)
-# exige discipline/subject/topic/exam_board/exam_edition/organization/tags;
-# sem carregar cada um deles, o Pydantic tenta lazy-load fora do contexto
-# assíncrono da sessão ao serializar e estoura `MissingGreenlet`.
+# exige discipline/subject/topic/exam_board/exam_edition/organization/tags
+# E attachments (adicionado depois para indicador de "questão com imagem"
+# na listagem); sem carregar cada um deles, o Pydantic tenta lazy-load fora
+# do contexto assíncrono da sessão ao serializar e estoura `MissingGreenlet`.
 # Mesmo conjunto de relações usado por `QuestionRepository._RELATIONS`
 # (app/repositories/content/question_repository.py) — mantido em espelho
 # aqui porque `NotebookQuestion.question` é carregado a partir de outra
 # raiz de query (NotebookQuestion, não Question), então não dá para
 # reaproveitar a tupla de lá diretamente.
+#
+# 🔥 CORREÇÃO (2026-08-21): faltava `attachments` aqui. `QuestionListItem`
+# passou a expor `attachments` na listagem (indicador de imagem) e
+# `list_for_export` já carregava isso à parte — mas o caminho normal de
+# listagem de questões do caderno (`list_by_notebook`, usado por
+# GET /notebooks/{id}/questions) não tinha esse selectinload. Resultado:
+# 500 (`MissingGreenlet`) toda vez que o Pydantic tentava ler
+# `question.attachments` fora do contexto async da sessão.
 _QUESTION_RELATIONS = (
     selectinload(NotebookQuestion.question).selectinload(Question.discipline),
     selectinload(NotebookQuestion.question).selectinload(Question.subject),
@@ -29,6 +38,7 @@ _QUESTION_RELATIONS = (
     selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
     selectinload(NotebookQuestion.question).selectinload(Question.organization),
     selectinload(NotebookQuestion.question).selectinload(Question.tags),
+    selectinload(NotebookQuestion.question).selectinload(Question.attachments),
 )
 
 # Mantido por compatibilidade com quem já importava `_RELATIONS` deste módulo.
@@ -83,9 +93,6 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
 
         if search:
             search_term = f"%{search}%"
-            # 🔥 CORREÇÃO: `statement` não existia neste escopo (NameError
-            # silencioso — só estourava quando alguém de fato usava ?search=).
-            # O correto é filtrar pela coluna `Question.statement`.
             stmt = stmt.where(
                 or_(
                     NotebookQuestion.question.has(Question.statement.ilike(search_term)),
@@ -179,10 +186,6 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
 
         await self.session.flush()
 
-        # 🔥 CORREÇÃO: recarregar em uma única query com as relações de
-        # `question` já carregadas (`self.get_by_id`, herdado de
-        # `BaseRepository`, não aplica nenhum `selectinload` — o retorno
-        # anterior quebrava na serialização com `MissingGreenlet`).
         ids = [item.id for item in items]
         return await self.list_by_ids_with_relations(ids)
 
@@ -198,7 +201,6 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
         )
         result = await self.session.execute(stmt)
         return result.rowcount > 0
-
 
     async def list_for_export(
         self,
@@ -220,7 +222,6 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
             .options(
                 *_QUESTION_RELATIONS,
                 selectinload(NotebookQuestion.question).selectinload(Question.alternatives),
-                selectinload(NotebookQuestion.question).selectinload(Question.attachments),
             )
             .order_by(NotebookQuestion.added_at.asc(), NotebookQuestion.id.asc())
         )
