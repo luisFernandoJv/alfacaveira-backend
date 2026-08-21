@@ -29,7 +29,6 @@ _QUESTION_RELATIONS = (
     selectinload(NotebookQuestion.question).selectinload(Question.exam_edition),
     selectinload(NotebookQuestion.question).selectinload(Question.organization),
     selectinload(NotebookQuestion.question).selectinload(Question.tags),
-    selectinload(NotebookQuestion.question).selectinload(Question.attachments),
 )
 
 # Mantido por compatibilidade com quem já importava `_RELATIONS` deste módulo.
@@ -199,6 +198,37 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
         )
         result = await self.session.execute(stmt)
         return result.rowcount > 0
+
+
+    async def list_for_export(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID] | None = None,
+    ) -> list[NotebookQuestion]:
+        """Carrega as questões do caderno com alternativas para exportação PDF.
+
+        A posse do caderno é sempre validada na própria query.
+        """
+        stmt = (
+            select(NotebookQuestion)
+            .join(NotebookQuestion.notebook)
+            .where(
+                NotebookQuestion.notebook_id == notebook_id,
+                NotebookQuestion.notebook.has(user_id=user_id),
+            )
+            .options(
+                *_QUESTION_RELATIONS,
+                selectinload(NotebookQuestion.question).selectinload(Question.alternatives),
+                selectinload(NotebookQuestion.question).selectinload(Question.attachments),
+            )
+            .order_by(NotebookQuestion.added_at.asc(), NotebookQuestion.id.asc())
+        )
+        if question_ids:
+            stmt = stmt.where(NotebookQuestion.question_id.in_(question_ids))
+
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
 
     async def delete_by_notebook(
         self,

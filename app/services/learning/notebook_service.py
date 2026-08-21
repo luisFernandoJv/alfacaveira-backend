@@ -48,13 +48,9 @@ class NotebookService:
         parent_id: Optional[uuid.UUID] = None,
     ) -> NotebookFolder:
         """Cria uma nova pasta."""
-        normalized_name = name.strip()
-        if not normalized_name:
-            raise ConflictError("O nome da pasta não pode ficar vazio.")
-
-        existing = await self._folders.get_by_name(user_id, normalized_name)
+        existing = await self._folders.get_by_name(user_id, name)
         if existing:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{normalized_name}'.")
+            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
 
         if parent_id:
             parent = await self._folders.get_owned(parent_id, user_id)
@@ -63,7 +59,7 @@ class NotebookService:
 
         folder = NotebookFolder(
             user_id=user_id,
-            name=normalized_name,
+            name=name.strip(),
             parent_id=parent_id,
         )
 
@@ -331,6 +327,22 @@ class NotebookService:
             cursor_id=cursor_id,
             search=search,
         )
+
+
+    async def list_export_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Notebook, list[NotebookQuestion]]:
+        """Valida posse e carrega as questões completas para exportação."""
+        notebook = await self.get_notebook(notebook_id, user_id)
+        items = await self._questions.list_for_export(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            question_ids=question_ids,
+        )
+        return notebook, items
 
     async def add_question(
         self,

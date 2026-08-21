@@ -52,7 +52,11 @@ def _get_client():
     return boto3.client("s3", **kwargs)
 
 
-def create_presigned_upload(filename: str, content_type: str) -> dict:
+def create_presigned_upload(
+    filename: str,
+    content_type: str,
+    prefix: str | None = None,
+) -> dict:
     """Gera uma URL assinada de upload (PUT) + a URL pública final do objeto.
 
     A chave do objeto é gerada no backend (UUID), nunca a partir do nome
@@ -66,7 +70,8 @@ def create_presigned_upload(filename: str, content_type: str) -> dict:
         )
 
     extension = ALLOWED_CONTENT_TYPES[content_type]
-    key = f"{settings.S3_QUESTIONS_PREFIX}/{uuid.uuid4().hex}{extension}"
+    object_prefix = (prefix or settings.S3_QUESTIONS_PREFIX).strip("/")
+    key = f"{object_prefix}/{uuid.uuid4().hex}{extension}"
 
     client = _get_client()
     try:

@@ -253,6 +253,7 @@ class Settings(BaseSettings):
     S3_PUBLIC_BASE_URL: str = Field(default="")
     # Prefixo (pasta) dentro do bucket, pra organizar por tipo de conteúdo.
     S3_QUESTIONS_PREFIX: str = Field(default="questions/attachments")
+    S3_PROFILE_PREFIX: str = Field(default="profiles/avatars")
     # Segundos de validade da URL assinada de upload.
     S3_PRESIGN_EXPIRES_SECONDS: int = Field(default=300, ge=60, le=3600)
     # Tamanho máximo aceito por imagem (bytes). 8 MB é generoso pra

@@ -11,6 +11,7 @@ from app.core.responses import Envelope, Meta
 from app.database.session import get_db
 from app.schemas.identity import (
     AdminUserListItem,
+    AvatarPresignRequest,
     ChangePasswordRequest,
     MeResponse,
     UpdateAccountRequest,
@@ -20,6 +21,8 @@ from app.schemas.identity import (
 )
 from app.security.dependencies import CurrentAdminUser, CurrentUser
 from app.services.identity import UserService
+from app.core.config import settings
+from app.services.storage.s3_service import create_presigned_upload
 
 router = APIRouter()
 
@@ -68,6 +71,21 @@ async def update_me(
             profile=UserProfileResponse.model_validate(profile),
         )
     )
+
+
+
+@router.post("/me/avatar/presign", response_model=Envelope[dict])
+async def presign_my_avatar(
+    body: AvatarPresignRequest,
+    current_user: CurrentUser,
+) -> Envelope[dict]:
+    """Gera URL presignada para upload da foto de perfil no S3."""
+    upload = create_presigned_upload(
+        filename=body.filename,
+        content_type=body.content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    return Envelope(data=upload)
 
 
 @router.patch("/me/profile", response_model=Envelope[UserProfileResponse])

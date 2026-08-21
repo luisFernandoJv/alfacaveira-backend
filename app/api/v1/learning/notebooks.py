@@ -4,13 +4,15 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
 from app.models.enums import FeatureKey
+from app.schemas.content.question import QuestionListItem
 from app.schemas.learning.notebook import (
     NotebookCreateRequest,
     NotebookDetailResponse,
@@ -40,6 +42,8 @@ from app.schemas.learning.notebook_tag import (
 )
 from app.security.dependencies import CurrentUser, RequireFeature
 from app.services.learning.notebook_service import NotebookService
+from app.services.export.notebook_pdf_service import build_notebook_pdf
+from app.core.exceptions import NotFoundError
 
 router = APIRouter()
 
@@ -229,10 +233,60 @@ async def create_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
-        question_count=0,
     )
+    response_data._question_count = 0
 
     return Envelope(data=response_data)
+
+
+
+
+@router.get("/{notebook_id}/download", response_class=Response)
+async def download_notebook_pdf(
+    notebook_id: uuid.UUID,
+    current_user: CurrentUser,
+    notebook_service: NotebookServiceDep,
+    selected: Annotated[str | None, Query(max_length=8000)] = None,
+    include_answer_key: Annotated[bool, Query()] = False,
+) -> Response:
+    """Gera e baixa o caderno em PDF.
+
+    `selected` aceita IDs separados por vírgula. Quando omitido, todas as
+    questões do caderno são exportadas. A posse do caderno e das questões é
+    sempre validada no backend.
+    """
+    selected_ids: list[uuid.UUID] | None = None
+    if selected:
+        try:
+            selected_ids = [uuid.UUID(value) for value in selected.split(",") if value]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Um ou mais IDs de questão são inválidos.") from exc
+
+    notebook, items = await notebook_service.list_export_questions(
+        notebook_id=notebook_id,
+        user_id=current_user.id,
+        question_ids=selected_ids,
+    )
+
+    if selected_ids and len(items) != len(set(selected_ids)):
+        raise NotFoundError("Uma ou mais questões selecionadas não pertencem a este caderno.")
+    if not items:
+        raise NotFoundError("Este caderno não possui questões para exportar.")
+
+    pdf_bytes, filename = build_notebook_pdf(
+        notebook,
+        items,
+        include_answer_key=include_answer_key,
+    )
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.get("/{notebook_id}", response_model=Envelope[NotebookDetailResponse])
@@ -260,12 +314,9 @@ async def get_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
-        question_count=len(questions),
-        questions=[
-            NotebookQuestionResponse.model_validate(nq)
-            for nq in notebook.questions
-        ],
+        questions=[QuestionListItem.model_validate(q) for q in questions],
     )
+    response._question_count = len(questions)
 
     return Envelope(data=response)
 
@@ -299,8 +350,8 @@ async def update_notebook(
         is_favorite=notebook.is_favorite,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
-        question_count=getattr(notebook, "_question_count", 0),
     )
+    response_data._question_count = notebook._question_count if hasattr(notebook, "_question_count") else 0
 
     return Envelope(data=response_data)
 

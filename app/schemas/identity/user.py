@@ -16,6 +16,13 @@ class UserProfileResponse(BaseModel):
     birth_date: date | None = None
 
 
+
+class AvatarPresignRequest(BaseModel):
+    """Solicita uma URL presignada para foto de perfil."""
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
+
+
 class MeResponse(BaseModel):
     """Usuário autenticado com o perfil embutido (usado em GET /users/me)."""
 
