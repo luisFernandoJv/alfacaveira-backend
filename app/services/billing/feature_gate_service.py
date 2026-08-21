@@ -1,18 +1,8 @@
+# app/services/billing/feature_gate_service.py
 """Único ponto de leitura de "o usuário X tem direito à feature Y" que
 módulos fora de `billing` podem importar (`practice`, `learning`,
 `analytics`, etc.). Nenhum outro módulo deve importar `Plan`, `Subscription`
 ou `PlanFeature` diretamente — só conhece `FeatureKey` (enum) e este service.
-
-Resolução do plano efetivo do usuário:
-    assinatura ATIVA (`SubscriptionRepository.get_active_by_user`) → o plano
-    dela; sem assinatura ativa → plano FREE (`FREE_PLAN_SLUG`), por
-    convenção nunca representado por uma linha em `subscriptions`.
-
-Decisão registrada no doc de acompanhamento: sem dependência de Redis por
-enquanto — a leitura já é uma única query com `selectinload` (sem N+1) via
-`SubscriptionRepository.get_active_by_user`/`PlanRepository.
-get_by_slug_with_features`. Cache entra só se isso aparecer como gargalo real
-(KISS/YAGNI).
 """
 
 import uuid
@@ -26,11 +16,6 @@ from app.models.enums import FeatureKey
 from app.repositories.billing.plan_repository import PlanRepository
 from app.repositories.billing.subscription_repository import SubscriptionRepository
 
-# Plano concedido a todo usuário sem assinatura paga. Precisa existir no
-# banco com este slug exato (seed dos planos — Etapa 6); se não existir,
-# `get_effective_plan` levanta `NotFoundError` de propósito, em vez de
-# assumir silenciosamente "sem features", para deixar o problema de
-# configuração óbvio em vez de mascarado.
 FREE_PLAN_SLUG = "free"
 
 
@@ -63,22 +48,21 @@ class FeatureGateService:
             raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
 
     async def get_quota_limit(self, user_id: uuid.UUID, key: FeatureKey) -> int | None:
-        """Limite de quota da feature no plano efetivo (`None` = ilimitado).
-
-        Levanta `ForbiddenError` se o plano nem tem acesso à feature — mesmo
-        comportamento de `assert_feature`, para quem for chamar isto direto.
-        """
+        """Limite de quota da feature no plano efetivo (`None` = ilimitado)."""
         plan = await self.get_effective_plan(user_id)
         plan_feature = _find_plan_feature(plan, key)
+        
         if plan_feature is None:
+            # 🔥 CORREÇÃO BUG 4: Evita Forbiddens injustos para limites de cadernos omitidos num plano pro 
+            if key == FeatureKey.NOTEBOOK_MAX_QUESTIONS and _find_plan_feature(plan, FeatureKey.NOTEBOOKS):
+                return None
+                
             raise ForbiddenError(f"Seu plano atual não inclui a feature '{key.value}'.")
+            
         return plan_feature.quota_limit
 
     async def assert_within_quota(self, user_id: uuid.UUID, key: FeatureKey, current_usage: int) -> None:
-        """Levanta `ForbiddenError` se `current_usage` já atingiu o limite do
-        plano efetivo para `key`. Uso típico em `practice`/`learning` antes
-        de criar um novo registro contado pela quota (ex.: `daily_questions`).
-        """
+        """Levanta `ForbiddenError` se `current_usage` já atingiu o limite."""
         limit = await self.get_quota_limit(user_id, key)
         if limit is not None and current_usage >= limit:
             raise ForbiddenError(f"Limite do seu plano foi atingido para '{key.value}' ({limit}).")

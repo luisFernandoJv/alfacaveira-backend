@@ -44,5 +44,5 @@ class NotebookFolder(UUIDPKMixin, TimestampMixin, Base):
     notebooks: Mapped[List["Notebook"]] = relationship(
         "Notebook",
         back_populates="folder",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",  # 🔥 CORREÇÃO BUG 2: Removido 'delete-orphan' letal
     )
