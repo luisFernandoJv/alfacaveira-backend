@@ -84,6 +84,14 @@ async def _build_detail(
                 difficulty=question.difficulty,
                 alternatives=question.alternatives,
                 tags=question.tags,
+                # 🔥 CORREÇÃO: faltava passar `attachments` aqui. O schema
+                # tem `default_factory=list`, então o Pydantic não acusava
+                # erro nenhum — só preenchia a lista vazia em silêncio, e a
+                # imagem sumia na tela de resolução mesmo com o anexo salvo
+                # certinho no banco e carregado por `get_session_questions`
+                # (`QuestionRepository.list_by_ids` já faz `selectinload`
+                # de `Question.attachments`; só faltava repassar adiante).
+                attachments=question.attachments,
                 position=questions_by_position[question.id],
                 answered=question.id in answered_ids,
             )
