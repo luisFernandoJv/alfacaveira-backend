@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
+from urllib.parse import quote
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import CursorPage
@@ -279,12 +280,17 @@ async def download_notebook_pdf(
         include_answer_key=include_answer_key,
     )
 
+    encoded_filename = quote(filename)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "private, no-store",
+            "Content-Disposition": (
+                f'attachment; filename="caderno.pdf"; filename*=UTF-8''{encoded_filename}'
+            ),
+            "Content-Length": str(len(pdf_bytes)),
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

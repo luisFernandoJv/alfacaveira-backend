@@ -12,6 +12,7 @@ from app.schemas.identity.auth import (
 )
 from app.schemas.identity.user import (
     AdminUserListItem,
+    AvatarPresignRequest,
     ChangePasswordRequest,
     MeResponse,
     UpdateAccountRequest,
@@ -22,6 +23,7 @@ from app.schemas.identity.user import (
 
 __all__ = [
     "AdminUserListItem",
+    "AvatarPresignRequest",
     "ChangePasswordRequest",
     "ForgotPasswordRequest",
     "LoginRequest",

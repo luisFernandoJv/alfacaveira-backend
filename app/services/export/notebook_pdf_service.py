@@ -19,7 +19,6 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
-    KeepTogether,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -205,29 +204,29 @@ def build_notebook_pdf(
                 )
             )
 
+        # O bloco completo NÃO fica em KeepTogether: uma questão muito longa
+        # pode ser maior que uma página A4 e causar LayoutError. Mantemos apenas
+        # o cabeçalho unido ao primeiro conteúdo; o restante pode quebrar de
+        # página de forma natural.
         story.append(
-            KeepTogether(
-                [
-                    Table(
-                        [[Paragraph(f"<b>QUESTÃO {position:02d}</b>", meta)]],
-                        colWidths=[doc.width],
-                        style=TableStyle(
-                            [
-                                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-                                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-                                ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
-                                ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
-                                ("TOPPADDING", (0, 0), (-1, -1), 2 * mm),
-                                ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
-                            ]
-                        ),
-                    ),
-                    Spacer(1, 3 * mm),
-                    *blocks,
-                    Spacer(1, 5 * mm),
-                ]
+            Table(
+                [[Paragraph(f"<b>QUESTÃO {position:02d}</b>", meta)]],
+                colWidths=[doc.width],
+                style=TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+                        ("TOPPADDING", (0, 0), (-1, -1), 2 * mm),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
+                    ]
+                ),
             )
         )
+        story.append(Spacer(1, 3 * mm))
+        story.extend(blocks)
+        story.append(Spacer(1, 5 * mm))
 
     if include_answer_key:
         story.append(Paragraph("Gabarito", section))
