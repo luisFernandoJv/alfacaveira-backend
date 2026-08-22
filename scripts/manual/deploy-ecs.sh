@@ -28,6 +28,7 @@ PLATFORM="linux/arm64"                  # task roda em ARM64 (Fargate) — build
 # alguma variável.
 declare -A ENFORCED_ENV_VARS=(
   [SMTP_FROM_NAME]="Alfa Caveira"
+  [GOOGLE_CLIENT_ID]="344958051466-1bphge6deod8cg1ugav422tlmvmaik3e.apps.googleusercontent.com"
 )
 # --------------------------------------------------------------------
 

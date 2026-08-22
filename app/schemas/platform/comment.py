@@ -100,6 +100,7 @@ class CommentResponse(BaseModel):
     # Campos extras que serão preenchidos pelo serviço
     user_name: str | None = Field(default=None, description="Nome do usuário")
     user_initials: str | None = Field(default=None, description="Iniciais do usuário")
+    user_avatar_url: str | None = Field(default=None, description="Avatar do usuário")
     user_vote: str | None = Field(default=None, description="Voto do usuário atual")
     can_edit: bool = Field(default=False, description="Se o usuário atual pode editar")
     can_delete: bool = Field(default=False, description="Se o usuário atual pode deletar")

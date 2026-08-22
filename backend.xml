@@ -141,6 +141,7 @@ app/
       taxonomy.py
     identity/
       __init__.py
+      auth_provider.py
       password_reset_token.py
       refresh_token.py
       user.py
@@ -197,6 +198,7 @@ app/
       taxonomy_repository.py
     identity/
       __init__.py
+      auth_provider_repository.py
       password_reset_token_repository.py
       refresh_token_repository.py
       user_profile_repository.py
@@ -355,6 +357,7 @@ migrations/
     0022_add_question_reports.py
     0023_update_standard_plan_to_padrao.py
     0024_update_pro_plan_price.py
+    0025_add_google_auth.py
     00c71973182e_create_reviews_table.py
     087474b8bf9d_create_reviews_table.py
     09d28b1818f6_add_reviews_table.py
@@ -3966,6 +3969,37 @@ class QuestionTag(UUIDPKMixin, TimestampMixin, Base):
     )
 </file>
 
+<file path="app/models/identity/auth_provider.py">
+"""Identidades externas vinculadas às contas da plataforma."""
+
+import uuid
+
+from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.base import TimestampMixin, UUIDPKMixin
+
+
+class UserAuthProvider(UUIDPKMixin, TimestampMixin, Base):
+    """Vínculo entre um usuário local e um provedor de identidade externo."""
+
+    __tablename__ = "user_auth_providers"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_subject", name="uq_user_auth_provider_subject"),
+        UniqueConstraint("user_id", "provider", name="uq_user_auth_provider_user_provider"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="auth_providers")
+</file>
+
 <file path="app/models/identity/password_reset_token.py">
 """Token opaco de recuperação de senha (hash armazenado), de uso único."""
 
@@ -6136,6 +6170,45 @@ class TopicRepository(BaseRepository[Topic]):
         stmt = select(Topic).where(Topic.subject_id == subject_id).order_by(Topic.name.asc())
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+</file>
+
+<file path="app/repositories/identity/auth_provider_repository.py">
+"""Repositório de identidades externas vinculadas a usuários."""
+
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.identity.auth_provider import UserAuthProvider
+from app.repositories.base import BaseRepository
+
+
+class UserAuthProviderRepository(BaseRepository[UserAuthProvider]):
+    model = UserAuthProvider
+
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
+
+    async def get_by_provider_subject(
+        self, provider: str, provider_subject: str
+    ) -> UserAuthProvider | None:
+        stmt = select(UserAuthProvider).where(
+            UserAuthProvider.provider == provider,
+            UserAuthProvider.provider_subject == provider_subject,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_user_and_provider(
+        self, user_id: uuid.UUID, provider: str
+    ) -> UserAuthProvider | None:
+        stmt = select(UserAuthProvider).where(
+            UserAuthProvider.user_id == user_id,
+            UserAuthProvider.provider == provider,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
 </file>
 
 <file path="app/repositories/identity/password_reset_token_repository.py">
@@ -13168,6 +13241,66 @@ def downgrade() -> None:
         SET price_cents = 4990
         WHERE slug = 'pro';
         """
+    )
+</file>
+
+<file path="migrations/versions/0025_add_google_auth.py">
+"""Adiciona autenticação externa com Google.
+
+Revision ID: 0025_add_google_auth
+Revises: 0024_update_pro_price
+Create Date: 2026-08-22
+"""
+
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+revision: str = "0025_add_google_auth"
+down_revision: Union[str, None] = "0024_update_pro_price"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # Contas criadas exclusivamente por Google não possuem senha local.
+    op.alter_column(
+        "users",
+        "password_hash",
+        existing_type=sa.String(length=255),
+        nullable=True,
+    )
+
+    op.create_table(
+        "user_auth_providers",
+        sa.Column("user_id", sa.UUID(), nullable=False),
+        sa.Column("provider", sa.String(length=50), nullable=False),
+        sa.Column("provider_subject", sa.String(length=255), nullable=False),
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("provider", "provider_subject", name="uq_user_auth_provider_subject"),
+        sa.UniqueConstraint("user_id", "provider", name="uq_user_auth_provider_user_provider"),
+    )
+    op.create_index(
+        "ix_user_auth_providers_user_id",
+        "user_auth_providers",
+        ["user_id"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_user_auth_providers_user_id", table_name="user_auth_providers")
+    op.drop_table("user_auth_providers")
+    op.alter_column(
+        "users",
+        "password_hash",
+        existing_type=sa.String(length=255),
+        nullable=False,
     )
 </file>
 
@@ -21472,16 +21605,6 @@ class Topic(UUIDPKMixin, TimestampMixin, Base):
     subject: Mapped["Subject"] = relationship(back_populates="topics")
 </file>
 
-<file path="app/models/identity/__init__.py">
-"""Models do contexto 'identity'."""
-
-from app.models.identity.password_reset_token import PasswordResetToken
-from app.models.identity.refresh_token import RefreshToken
-from app.models.identity.user import User, UserProfile
-
-__all__ = ["User", "UserProfile", "RefreshToken", "PasswordResetToken"]
-</file>
-
 <file path="app/models/learning/__init__.py">
 # app/models/learning/__init__.py
 """Models do contexto 'learning' (flashcards, revisão espaçada SM-2 e notebooks)."""
@@ -21702,24 +21825,6 @@ class PaymentRepository(BaseRepository[Payment]):
         )
         result = await self.session.execute(stmt)
         return result.rowcount == 1
-</file>
-
-<file path="app/repositories/identity/__init__.py">
-"""Repositórios do contexto 'identity'."""
-
-from app.repositories.identity.password_reset_token_repository import (
-    PasswordResetTokenRepository,
-)
-from app.repositories.identity.refresh_token_repository import RefreshTokenRepository
-from app.repositories.identity.user_profile_repository import UserProfileRepository
-from app.repositories.identity.user_repository import UserRepository
-
-__all__ = [
-    "PasswordResetTokenRepository",
-    "RefreshTokenRepository",
-    "UserProfileRepository",
-    "UserRepository",
-]
 </file>
 
 <file path="app/repositories/identity/refresh_token_repository.py">
@@ -22463,61 +22568,6 @@ __all__ = [
     "PaymentResponse",
     "PaymentWebhookEventRequest",
 ]
-</file>
-
-<file path="app/schemas/identity/auth.py">
-"""Schemas de request/response do fluxo de autenticação."""
-
-import uuid
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-
-
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
-    full_name: str = Field(min_length=2, max_length=255)
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=1, max_length=128)
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
-class LogoutRequest(BaseModel):
-    refresh_token: str
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str = Field(min_length=1)
-    new_password: str = Field(min_length=8, max_length=128)
-
-
-class UserResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    is_admin: bool
-    is_active: bool
-    created_at: datetime
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int
 </file>
 
 <file path="app/schemas/identity/user.py">
@@ -23744,16 +23794,6 @@ class PlanService:
         plan = await self._session.get(Plan, plan_id)
         plan.features = cache
         await self._session.flush()
-</file>
-
-<file path="app/services/identity/__init__.py">
-"""Serviços do contexto 'identity'."""
-
-from app.services.identity.auth_service import AuthService, AuthTokens
-from app.services.identity.email_service import EmailService
-from app.services.identity.user_service import UserService
-
-__all__ = ["AuthService", "AuthTokens", "EmailService", "UserService"]
 </file>
 
 <file path="app/services/learning/__init__.py">
@@ -25689,102 +25729,6 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 </file>
 
-<file path="app/api/v1/identity/auth.py">
-"""Endpoints HTTP de autenticação: registro, login, refresh, logout, /me,
-recuperação e redefinição de senha."""
-
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.responses import Envelope
-from app.database.session import get_db
-from app.schemas.identity import (
-    ForgotPasswordRequest,
-    LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
-    RegisterRequest,
-    ResetPasswordRequest,
-    TokenResponse,
-)
-from app.services.identity import AuthService
-
-router = APIRouter()
-
-
-def get_auth_service(session: Annotated[AsyncSession, Depends(get_db)]) -> AuthService:
-    return AuthService(session)
-
-
-AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
-
-
-@router.post(
-    "/register",
-    response_model=Envelope[TokenResponse],
-    status_code=status.HTTP_201_CREATED,
-)
-async def register(body: RegisterRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
-    """Cria a conta e já retorna os tokens (auto-login), evitando que o
-    aluno precise digitar a senha novamente logo após se cadastrar."""
-    tokens = await auth_service.register(
-        email=body.email, password=body.password, full_name=body.full_name
-    )
-    return Envelope(
-        data=TokenResponse(
-            access_token=tokens.access_token,
-            refresh_token=tokens.refresh_token,
-            expires_in=tokens.expires_in,
-        )
-    )
-
-
-@router.post("/login", response_model=Envelope[TokenResponse])
-async def login(body: LoginRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
-    tokens = await auth_service.login(email=body.email, password=body.password)
-    return Envelope(
-        data=TokenResponse(
-            access_token=tokens.access_token,
-            refresh_token=tokens.refresh_token,
-            expires_in=tokens.expires_in,
-        )
-    )
-
-
-@router.post("/refresh", response_model=Envelope[TokenResponse])
-async def refresh(body: RefreshRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
-    tokens = await auth_service.refresh(body.refresh_token)
-    return Envelope(
-        data=TokenResponse(
-            access_token=tokens.access_token,
-            refresh_token=tokens.refresh_token,
-            expires_in=tokens.expires_in,
-        )
-    )
-
-
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(body: LogoutRequest, auth_service: AuthServiceDep) -> None:
-    await auth_service.logout(body.refresh_token)
-
-
-@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
-async def forgot_password(body: ForgotPasswordRequest, auth_service: AuthServiceDep) -> None:
-    """Sempre responde 204, exista ou não uma conta com o e-mail informado.
-
-    A resposta não deve variar conforme o e-mail existe ou não (evita
-    enumeração de contas); ver `AuthService.forgot_password`.
-    """
-    await auth_service.forgot_password(body.email)
-
-
-@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
-async def reset_password(body: ResetPasswordRequest, auth_service: AuthServiceDep) -> None:
-    await auth_service.reset_password(body.token, body.new_password)
-</file>
-
 <file path="app/core/exceptions.py">
 # app/core/exceptions.py
 """Exceções de domínio e seus handlers HTTP.
@@ -26100,57 +26044,15 @@ class QuestionAlternative(UUIDPKMixin, TimestampMixin, Base):
     __table_args__ = (UniqueConstraint("question_id", "letter", name="uq_question_alternative_letter"),)
 </file>
 
-<file path="app/models/identity/user.py">
-"""Usuário da plataforma."""
+<file path="app/models/identity/__init__.py">
+"""Models do contexto 'identity'."""
 
-import uuid
-from datetime import date, datetime
+from app.models.identity.auth_provider import UserAuthProvider
+from app.models.identity.password_reset_token import PasswordResetToken
+from app.models.identity.refresh_token import RefreshToken
+from app.models.identity.user import User, UserProfile
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database.base import Base
-from app.models.base import TimestampMixin, UUIDPKMixin
-
-
-class User(UUIDPKMixin, TimestampMixin, Base):
-    """Conta de acesso do aluno (ou administrador)."""
-
-    __tablename__ = "users"
-
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    profile: Mapped["UserProfile"] = relationship(back_populates="user", uselist=False)
-    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user")
-    password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
-    )
-    question_states: Mapped[list["UserQuestionState"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
-    )
-
-
-class UserProfile(UUIDPKMixin, TimestampMixin, Base):
-    """Dados complementares de perfil do aluno (1:1 com User)."""
-
-    __tablename__ = "user_profiles"
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
-    )
-    target_exam: Mapped[str | None] = mapped_column(String(255))
-    avatar_url: Mapped[str | None] = mapped_column(String(500))
-    bio: Mapped[str | None] = mapped_column(String(1000))
-    phone: Mapped[str | None] = mapped_column(String(30))
-    birth_date: Mapped[date | None] = mapped_column(Date)
-
-    user: Mapped["User"] = relationship(back_populates="profile")
+__all__ = ["User", "UserProfile", "RefreshToken", "PasswordResetToken", "UserAuthProvider"]
 </file>
 
 <file path="app/models/practice/__init__.py">
@@ -26161,6 +26063,24 @@ from app.models.practice.training_session import TrainingSession, TrainingSessio
 from app.models.practice.user_question_state import UserQuestionState
 
 __all__ = ["TrainingSession", "TrainingSessionQuestion", "QuestionAttempt", "UserQuestionState"]
+</file>
+
+<file path="app/repositories/identity/__init__.py">
+"""Repositórios do contexto 'identity'."""
+
+from app.repositories.identity.auth_provider_repository import UserAuthProviderRepository
+from app.repositories.identity.password_reset_token_repository import PasswordResetTokenRepository
+from app.repositories.identity.refresh_token_repository import RefreshTokenRepository
+from app.repositories.identity.user_profile_repository import UserProfileRepository
+from app.repositories.identity.user_repository import UserRepository
+
+__all__ = [
+    "PasswordResetTokenRepository",
+    "RefreshTokenRepository",
+    "UserAuthProviderRepository",
+    "UserProfileRepository",
+    "UserRepository",
+]
 </file>
 
 <file path="app/repositories/learning/notebook_repository.py">
@@ -26462,48 +26382,65 @@ class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
         return list(result.scalars().unique().all())
 </file>
 
-<file path="app/schemas/identity/__init__.py">
-"""Schemas do contexto 'identity'."""
+<file path="app/schemas/identity/auth.py">
+"""Schemas de request/response do fluxo de autenticação."""
 
-from app.schemas.identity.auth import (
-    ForgotPasswordRequest,
-    LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
-    RegisterRequest,
-    ResetPasswordRequest,
-    TokenResponse,
-    UserResponse,
-)
-from app.schemas.identity.user import (
-    AdminUserListItem,
-    AvatarPresignRequest,
-    ChangePasswordRequest,
-    MeResponse,
-    UpdateAccountRequest,
-    UpdateProfileRequest,
-    UpdateUserStatusRequest,
-    UserProfileResponse,
-)
+import uuid
+from datetime import datetime
 
-__all__ = [
-    "AdminUserListItem",
-    "AvatarPresignRequest",
-    "ChangePasswordRequest",
-    "ForgotPasswordRequest",
-    "LoginRequest",
-    "LogoutRequest",
-    "MeResponse",
-    "RefreshRequest",
-    "RegisterRequest",
-    "ResetPasswordRequest",
-    "TokenResponse",
-    "UpdateAccountRequest",
-    "UpdateProfileRequest",
-    "UpdateUserStatusRequest",
-    "UserProfileResponse",
-    "UserResponse",
-]
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str = Field(min_length=2, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+
+class GoogleLoginRequest(BaseModel):
+    """Credencial emitida pelo Google Identity Services no navegador."""
+
+    credential: str = Field(min_length=1, max_length=10000)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
 </file>
 
 <file path="app/services/billing/feature_gate_service.py">
@@ -27121,192 +27058,14 @@ def build_notebook_pdf(
     return buffer.getvalue(), f"{_filename(notebook.name)}.pdf"
 </file>
 
-<file path="app/services/identity/auth_service.py">
-"""Regras de negócio de autenticação: registro, login, refresh (com rotação),
-logout e recuperação de senha."""
+<file path="app/services/identity/__init__.py">
+"""Serviços do contexto 'identity'."""
 
-import hashlib
-import secrets
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.config import settings
-from app.core.exceptions import ConflictError, UnauthorizedError
-from app.database.uow import UnitOfWork
-from app.models.identity.password_reset_token import PasswordResetToken
-from app.models.identity.refresh_token import RefreshToken
-from app.models.identity.user import User, UserProfile
-from app.repositories.identity.password_reset_token_repository import (
-    PasswordResetTokenRepository,
-)
-from app.repositories.identity.refresh_token_repository import RefreshTokenRepository
-from app.repositories.identity.user_repository import UserRepository
-from app.security.jwt import create_access_token, generate_refresh_token, hash_refresh_token
-from app.security.password import hash_password, verify_password
+from app.services.identity.auth_service import AuthService, AuthTokens
 from app.services.identity.email_service import EmailService
+from app.services.identity.user_service import UserService
 
-
-@dataclass
-class AuthTokens:
-    user: User
-    access_token: str
-    refresh_token: str
-    expires_in: int
-
-
-class AuthService:
-    """Orquestra os repositórios de `identity` para os casos de uso de autenticação.
-
-    Services nunca levantam `HTTPException` diretamente (ver `core/exceptions.py`):
-    sempre `DomainError` e subclasses, traduzidas para HTTP pelos handlers globais.
-    """
-
-    def __init__(self, session: AsyncSession, email_service: EmailService | None = None) -> None:
-        self._session = session
-        self._users = UserRepository(session)
-        self._refresh_tokens = RefreshTokenRepository(session)
-        self._password_reset_tokens = PasswordResetTokenRepository(session)
-        self._email_service = email_service or EmailService()
-
-    async def register(self, email: str, password: str, full_name: str) -> AuthTokens:
-        existing = await self._users.get_by_email(email)
-        if existing is not None:
-            raise ConflictError("Já existe uma conta cadastrada com este e-mail.")
-
-        user = User(
-            email=email,
-            password_hash=hash_password(password),
-            full_name=full_name,
-        )
-        async with UnitOfWork(self._session):
-            await self._users.add(user)
-            profile = UserProfile(user_id=user.id)
-            self._session.add(profile)
-
-        # Auto-login: evita que o aluno precise digitar a senha de novo
-        # logo após se cadastrar (ver `app/api/v1/identity/auth.py::register`).
-        return await self._issue_tokens(user)
-
-    async def login(self, email: str, password: str) -> AuthTokens:
-        user = await self._users.get_by_email(email)
-        if user is None or not verify_password(password, user.password_hash):
-            raise UnauthorizedError("E-mail ou senha inválidos.")
-        if not user.is_active:
-            raise UnauthorizedError("Esta conta está desativada.")
-
-        return await self._issue_tokens(user)
-
-    async def refresh(self, plain_refresh_token: str) -> AuthTokens:
-        token_hash = hash_refresh_token(plain_refresh_token)
-        stored_token = await self._refresh_tokens.get_by_hash(token_hash)
-
-        if stored_token is None or stored_token.revoked_at is not None:
-            raise UnauthorizedError("Refresh token inválido ou revogado.")
-
-        if stored_token.expires_at < datetime.now(UTC):
-            raise UnauthorizedError("Refresh token expirado.")
-
-        user = await self._users.get_by_id(stored_token.user_id)
-        if user is None or not user.is_active:
-            raise UnauthorizedError("Usuário inválido ou inativo.")
-
-        async with UnitOfWork(self._session):
-            new_plain_token, new_token_hash, new_expires_at = generate_refresh_token()
-            new_token = RefreshToken(
-                user_id=user.id,
-                token_hash=new_token_hash,
-                expires_at=new_expires_at,
-            )
-            await self._refresh_tokens.add(new_token)
-            await self._refresh_tokens.revoke(stored_token, replaced_by_token_id=new_token.id)
-
-        access_token, expires_in = create_access_token(user.id)
-        return AuthTokens(
-            user=user,
-            access_token=access_token,
-            refresh_token=new_plain_token,
-            expires_in=expires_in,
-        )
-
-    async def logout(self, plain_refresh_token: str) -> None:
-        token_hash = hash_refresh_token(plain_refresh_token)
-        stored_token = await self._refresh_tokens.get_by_hash(token_hash)
-        if stored_token is None or stored_token.revoked_at is not None:
-            return
-        async with UnitOfWork(self._session):
-            await self._refresh_tokens.revoke(stored_token)
-
-    async def forgot_password(self, email: str) -> None:
-        """Inicia a recuperação de senha.
-
-        Por design, não revela se o e-mail existe ou não na base: o método
-        sempre "funciona" do ponto de vista do chamador (endpoint sempre
-        responde 204). Se o e-mail pertencer a um usuário ativo, um link de
-        redefinição é enviado; caso contrário, a chamada é um no-op. Isso
-        evita que o endpoint seja usado para enumerar contas cadastradas.
-        """
-        user = await self._users.get_by_email(email)
-        if user is None or not user.is_active:
-            return
-
-        async with UnitOfWork(self._session):
-            # Invalida qualquer link de recuperação anterior ainda válido,
-            # para que só o mais recente funcione.
-            await self._password_reset_tokens.invalidate_all_for_user(user.id)
-
-            plain_token = secrets.token_urlsafe(32)
-            token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
-            expires_at = datetime.now(UTC) + timedelta(
-                minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
-            )
-            reset_token = PasswordResetToken(
-                user_id=user.id, token_hash=token_hash, expires_at=expires_at
-            )
-            await self._password_reset_tokens.add(reset_token)
-
-        reset_url = f"{settings.FRONTEND_URL}/redefinir-senha?token={plain_token}"
-        await self._email_service.send_password_reset_email(
-            to_email=user.email, to_name=user.full_name, reset_url=reset_url
-        )
-
-    async def reset_password(self, plain_token: str, new_password: str) -> None:
-        token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
-        stored_token = await self._password_reset_tokens.get_valid_by_hash(token_hash)
-        if stored_token is None:
-            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
-
-        user = await self._users.get_by_id(stored_token.user_id)
-        if user is None or not user.is_active:
-            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
-
-        async with UnitOfWork(self._session):
-            user.password_hash = hash_password(new_password)
-            await self._password_reset_tokens.mark_used(stored_token)
-            # Redefinir a senha revoga todas as sessões ativas (refresh tokens):
-            # se a conta foi comprometida, isso derruba qualquer acesso indevido
-            # em outros dispositivos assim que a senha é trocada.
-            for refresh_token in await self._refresh_tokens.list_active_for_user(user.id):
-                await self._refresh_tokens.revoke(refresh_token)
-
-    async def _issue_tokens(self, user: User) -> AuthTokens:
-        access_token, expires_in = create_access_token(user.id)
-        plain_refresh_token, token_hash, expires_at = generate_refresh_token()
-        refresh_token_row = RefreshToken(
-            user_id=user.id,
-            token_hash=token_hash,
-            expires_at=expires_at,
-        )
-        async with UnitOfWork(self._session):
-            await self._refresh_tokens.add(refresh_token_row)
-
-        return AuthTokens(
-            user=user,
-            access_token=access_token,
-            refresh_token=plain_refresh_token,
-            expires_in=expires_in,
-        )
+__all__ = ["AuthService", "AuthTokens", "EmailService", "UserService"]
 </file>
 
 <file path="app/services/identity/email_service.py">
@@ -30354,6 +30113,113 @@ ses-dns-records.json
 }
 </file>
 
+<file path="app/api/v1/identity/auth.py">
+"""Endpoints HTTP de autenticação: registro, login local, Google, refresh,
+logout, recuperação e redefinição de senha."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.responses import Envelope
+from app.database.session import get_db
+from app.schemas.identity import (
+    ForgotPasswordRequest,
+    GoogleLoginRequest,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+)
+from app.services.identity import AuthService
+
+router = APIRouter()
+
+
+def get_auth_service(session: Annotated[AsyncSession, Depends(get_db)]) -> AuthService:
+    return AuthService(session)
+
+
+AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+
+
+@router.post(
+    "/register",
+    response_model=Envelope[TokenResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def register(body: RegisterRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
+    """Cria a conta local e já inicia a sessão."""
+    tokens = await auth_service.register(
+        email=body.email, password=body.password, full_name=body.full_name
+    )
+    return Envelope(
+        data=TokenResponse(
+            access_token=tokens.access_token,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+        )
+    )
+
+
+@router.post("/login", response_model=Envelope[TokenResponse])
+async def login(body: LoginRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
+    tokens = await auth_service.login(email=body.email, password=body.password)
+    return Envelope(
+        data=TokenResponse(
+            access_token=tokens.access_token,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+        )
+    )
+
+
+@router.post("/google", response_model=Envelope[TokenResponse])
+async def login_with_google(
+    body: GoogleLoginRequest, auth_service: AuthServiceDep
+) -> Envelope[TokenResponse]:
+    """Valida a credencial do Google e inicia a sessão local da plataforma."""
+    tokens = await auth_service.login_with_google(body.credential)
+    return Envelope(
+        data=TokenResponse(
+            access_token=tokens.access_token,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+        )
+    )
+
+
+@router.post("/refresh", response_model=Envelope[TokenResponse])
+async def refresh(body: RefreshRequest, auth_service: AuthServiceDep) -> Envelope[TokenResponse]:
+    tokens = await auth_service.refresh(body.refresh_token)
+    return Envelope(
+        data=TokenResponse(
+            access_token=tokens.access_token,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+        )
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(body: LogoutRequest, auth_service: AuthServiceDep) -> None:
+    await auth_service.logout(body.refresh_token)
+
+
+@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+async def forgot_password(body: ForgotPasswordRequest, auth_service: AuthServiceDep) -> None:
+    """Sempre responde 204, exista ou não uma conta com o e-mail informado."""
+    await auth_service.forgot_password(body.email)
+
+
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_password(body: ResetPasswordRequest, auth_service: AuthServiceDep) -> None:
+    await auth_service.reset_password(body.token, body.new_password)
+</file>
+
 <file path="app/api/v1/practice/training_sessions.py">
 """Endpoints HTTP de sessões de treino.
 
@@ -30783,184 +30649,60 @@ def shutdown_scheduler() -> None:
         logger.info("scheduler.stopped")
 </file>
 
-<file path="app/middlewares/rate_limit.py">
-"""Rate limiting baseado em Redis (INCR + EXPIRE por IP), com políticas
-dedicadas por rota e comportamento explícito quando o Redis está
-indisponível.
+<file path="app/models/identity/user.py">
+"""Usuário da plataforma."""
 
-Antes desta versão, toda a API compartilhava um único balde
-(`RATE_LIMIT_PER_MINUTE`, 60 req/min por IP) — o que deixava login/registro
-(alvo de força bruta) e forgot-password (alvo de enumeração/flood de
-e-mail) tão permissivos quanto rotas de leitura pública, e uma falha do
-Redis era engolida em silêncio (`except Exception: pass`), sem log e sem
-decisão declarada sobre o que deveria acontecer nesse caso.
+import uuid
+from datetime import date, datetime
 
-Este módulo resolve, por requisição, qual política se aplica com base no
-prefixo da rota (`_resolve_policy`) e aplica o mesmo algoritmo de janela
-fixa por IP já usado antes, mas com um contador isolado por política
-(`ratelimit:{policy}:{ip}:{window}`), então esgotar o limite de login não
-consome o limite de outra rota nem vice-versa.
-"""
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-import time
-from dataclasses import dataclass
-
-import structlog
-from fastapi import Request, status
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-
-from app.core.config import settings
-from app.core.responses import error_envelope
-
-logger = structlog.get_logger(__name__)
+from app.database.base import Base
+from app.models.base import TimestampMixin, UUIDPKMixin
 
 
-@dataclass(frozen=True)
-class RateLimitPolicy:
-    name: str
-    limit_per_minute: int
+class User(UUIDPKMixin, TimestampMixin, Base):
+    """Conta de acesso do aluno (ou administrador)."""
 
+    __tablename__ = "users"
 
-def _resolve_policy(path: str) -> RateLimitPolicy:
-    """Mapeia o caminho da requisição para a política dedicada mais
-    específica, ou para a política `default` se nenhuma casar.
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    Lê `settings` a cada chamada (não em import-time) de propósito: os
-    valores continuam configuráveis via variável de ambiente/override em
-    teste sem exigir recarregar o módulo.
-    """
-    prefix = settings.API_V1_PREFIX
-    route_policies: tuple[tuple[str, str, int], ...] = (
-        (f"{prefix}/auth/login", "login", settings.RATE_LIMIT_LOGIN_PER_MINUTE),
-        (f"{prefix}/auth/register", "register", settings.RATE_LIMIT_REGISTER_PER_MINUTE),
-        (
-            f"{prefix}/auth/forgot-password",
-            "forgot_password",
-            settings.RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE,
-        ),
-        (
-            f"{prefix}/auth/reset-password",
-            "reset_password",
-            settings.RATE_LIMIT_RESET_PASSWORD_PER_MINUTE,
-        ),
-        (f"{prefix}/billing", "billing", settings.RATE_LIMIT_BILLING_PER_MINUTE),
+    profile: Mapped["UserProfile"] = relationship(back_populates="user", uselist=False)
+    auth_providers: Mapped[list["UserAuthProvider"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user")
+    password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    question_states: Mapped[list["UserQuestionState"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
     )
 
-    for route_prefix, name, limit in route_policies:
-        if path.startswith(route_prefix):
-            return RateLimitPolicy(name=name, limit_per_minute=limit)
 
-    return RateLimitPolicy(name="default", limit_per_minute=settings.RATE_LIMIT_PER_MINUTE)
+class UserProfile(UUIDPKMixin, TimestampMixin, Base):
+    """Dados complementares de perfil do aluno (1:1 com User)."""
 
+    __tablename__ = "user_profiles"
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Lê o cliente Redis de `request.app.state.redis` (definido no
-    lifespan), em vez de recebê-lo no construtor — o middleware é montado
-    antes do lifespan rodar, então o client ainda não existiria nesse
-    momento.
-    """
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    target_exam: Mapped[str | None] = mapped_column(String(255))
+    avatar_url: Mapped[str | None] = mapped_column(String(500))
+    bio: Mapped[str | None] = mapped_column(String(1000))
+    phone: Mapped[str | None] = mapped_column(String(30))
+    birth_date: Mapped[date | None] = mapped_column(Date)
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[no-untyped-def]
-        policy = _resolve_policy(request.url.path)
-        redis_client = getattr(request.app.state, "redis", None)
-
-        if redis_client is None:
-            return await self._on_backend_unavailable(
-                request, call_next, policy, reason="redis_client_not_configured"
-            )
-
-        try:
-            client_ip = request.client.host if request.client else "unknown"
-            window = int(time.time() // 60)
-            key = f"ratelimit:{policy.name}:{client_ip}:{window}"
-
-            current = await redis_client.incr(key)
-            if current == 1:
-                await redis_client.expire(key, 60)
-
-            if current > policy.limit_per_minute:
-                logger.warning(
-                    "rate_limit.exceeded",
-                    policy=policy.name,
-                    path=request.url.path,
-                    client_ip=client_ip,
-                    limit=policy.limit_per_minute,
-                )
-                return JSONResponse(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    content=error_envelope(
-                        "rate_limited", "Muitas requisições. Tente novamente em instantes."
-                    ),
-                )
-        except Exception as exc:  # noqa: BLE001 - Redis pode falhar de várias formas
-            return await self._on_backend_unavailable(
-                request, call_next, policy, reason=repr(exc)
-            )
-
-        # 🔥 CORREÇÃO: `call_next(request)` estava FORA do try/except acima.
-        # O try/except só protegia as chamadas ao Redis — qualquer exceção
-        # que escapasse do processamento downstream real (router/service),
-        # inclusive falhas conhecidas do `Starlette.BaseHTTPMiddleware`
-        # durante o streaming interno da resposta, não passava pelo
-        # `@app.exception_handler(Exception)` genérico do FastAPI e ia
-        # parar direto no `ServerErrorMiddleware` do Starlette — que
-        # devolve texto puro, não JSON. Do lado do cliente isso aparece
-        # como corpo não-parseável (`response.json()` falhando), mesmo
-        # com o handler genérico já implementado e funcionando para
-        # exceções levantadas dentro do próprio endpoint.
-        try:
-            return await call_next(request)
-        except Exception as exc:  # noqa: BLE001 - qualquer falha downstream
-            # Não fazemos `raise` aqui: relançar deixaria a exceção seguir
-            # para o `ServerErrorMiddleware` do Starlette (texto puro, sem
-            # JSON) exatamente como antes — o que estamos corrigindo é
-            # justamente essa fuga. Devolvemos o mesmo formato de envelope
-            # de erro que `@app.exception_handler(Exception)` usaria.
-            logger.error(
-                "rate_limit.downstream_unhandled_exception",
-                policy=policy.name,
-                path=request.url.path,
-                error=repr(exc),
-                error_type=type(exc).__name__,
-            )
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content=error_envelope(
-                    "internal_error", "Erro interno do servidor."
-                ),
-            )
-
-    async def _on_backend_unavailable(
-        self,
-        request: Request,
-        call_next: RequestResponseEndpoint,
-        policy: RateLimitPolicy,
-        reason: str,
-    ):  # type: ignore[no-untyped-def]
-        """Comportamento explícito e observável quando o Redis está
-        indisponível — controlado por `settings.RATE_LIMIT_FAIL_OPEN`. Ver
-        docstring do campo em `app/core/config.py` para a decisão de
-        negócio por trás do default.
-        """
-        logger.warning(
-            "rate_limit.backend_unavailable",
-            policy=policy.name,
-            path=request.url.path,
-            reason=reason,
-            fail_open=settings.RATE_LIMIT_FAIL_OPEN,
-        )
-
-        if settings.RATE_LIMIT_FAIL_OPEN:
-            return await call_next(request)
-
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=error_envelope(
-                "rate_limit_unavailable",
-                "Serviço de proteção contra abuso indisponível. Tente novamente em instantes.",
-            ),
-        )
+    user: Mapped["User"] = relationship(back_populates="profile")
 </file>
 
 <file path="app/models/learning/notebook_folder.py">
@@ -31637,6 +31379,52 @@ class QuestionFacetsResponse(BaseModel):
     organization_id: list[FacetBucket]
     year: list[FacetBucket]
     difficulty: list[FacetBucket]
+</file>
+
+<file path="app/schemas/identity/__init__.py">
+"""Schemas do contexto 'identity'."""
+
+from app.schemas.identity.auth import (
+    ForgotPasswordRequest,
+    GoogleLoginRequest,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    UserResponse,
+)
+from app.schemas.identity.user import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+)
+
+__all__ = [
+    "AdminUserListItem",
+    "AvatarPresignRequest",
+    "ChangePasswordRequest",
+    "ForgotPasswordRequest",
+    "GoogleLoginRequest",
+    "LoginRequest",
+    "LogoutRequest",
+    "MeResponse",
+    "RefreshRequest",
+    "RegisterRequest",
+    "ResetPasswordRequest",
+    "TokenResponse",
+    "UpdateAccountRequest",
+    "UpdateProfileRequest",
+    "UpdateUserStatusRequest",
+    "UserProfileResponse",
+    "UserResponse",
+]
 </file>
 
 <file path="app/schemas/learning/notebook.py">
@@ -33531,6 +33319,288 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 </file>
 
+<file path="app/services/identity/auth_service.py">
+"""Regras de negócio de autenticação: registro, login, refresh (com rotação),
+logout e recuperação de senha."""
+
+import asyncio
+import hashlib
+import secrets
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
+
+from app.core.config import settings
+from app.repositories.identity.auth_provider_repository import UserAuthProviderRepository
+from app.core.exceptions import ConflictError, UnauthorizedError
+from app.database.uow import UnitOfWork
+from app.models.identity.password_reset_token import PasswordResetToken
+from app.models.identity.refresh_token import RefreshToken
+from app.models.identity.auth_provider import UserAuthProvider
+from app.models.identity.user import User, UserProfile
+from app.repositories.identity.password_reset_token_repository import (
+    PasswordResetTokenRepository,
+)
+from app.repositories.identity.refresh_token_repository import RefreshTokenRepository
+from app.repositories.identity.user_repository import UserRepository
+from app.security.jwt import create_access_token, generate_refresh_token, hash_refresh_token
+from app.security.password import hash_password, verify_password
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token as google_id_token
+from app.services.identity.email_service import EmailService
+
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class AuthTokens:
+    user: User
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+class AuthService:
+    """Orquestra os repositórios de `identity` para os casos de uso de autenticação.
+
+    Services nunca levantam `HTTPException` diretamente (ver `core/exceptions.py`):
+    sempre `DomainError` e subclasses, traduzidas para HTTP pelos handlers globais.
+    """
+
+    def __init__(self, session: AsyncSession, email_service: EmailService | None = None) -> None:
+        self._session = session
+        self._users = UserRepository(session)
+        self._refresh_tokens = RefreshTokenRepository(session)
+        self._password_reset_tokens = PasswordResetTokenRepository(session)
+        self._auth_providers = UserAuthProviderRepository(session)
+        self._email_service = email_service or EmailService()
+
+    async def register(self, email: str, password: str, full_name: str) -> AuthTokens:
+        existing = await self._users.get_by_email(email)
+        if existing is not None:
+            raise ConflictError("Já existe uma conta cadastrada com este e-mail.")
+
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+            full_name=full_name,
+        )
+        async with UnitOfWork(self._session):
+            await self._users.add(user)
+            profile = UserProfile(user_id=user.id)
+            self._session.add(profile)
+
+        # Auto-login: evita que o aluno precise digitar a senha de novo
+        # logo após se cadastrar (ver `app/api/v1/identity/auth.py::register`).
+        return await self._issue_tokens(user)
+
+    async def login(self, email: str, password: str) -> AuthTokens:
+        user = await self._users.get_by_email(email)
+        if user is None or user.password_hash is None or not verify_password(password, user.password_hash):
+            raise UnauthorizedError("E-mail ou senha inválidos.")
+        if not user.is_active:
+            raise UnauthorizedError("Esta conta está desativada.")
+
+        return await self._issue_tokens(user)
+
+    async def login_with_google(self, credential: str) -> AuthTokens:
+        """Valida uma credencial do Google e cria/vincula a conta local.
+
+        A identidade do Google nunca é confiada diretamente do navegador: o
+        backend valida o ID token e a audiência contra GOOGLE_CLIENT_ID antes
+        de criar a sessão própria da plataforma.
+        """
+        if not settings.GOOGLE_CLIENT_ID:
+            raise UnauthorizedError("Login com Google ainda não está configurado.")
+
+        try:
+            payload = await asyncio.to_thread(
+                google_id_token.verify_oauth2_token,
+                credential,
+                GoogleRequest(),
+                settings.GOOGLE_CLIENT_ID,
+            )
+        except Exception as exc:  # noqa: BLE001 - biblioteca Google usa exceções variadas
+            logger.warning("auth.google.invalid_credential", error=str(exc))
+            raise UnauthorizedError("Credencial do Google inválida ou expirada.") from exc
+
+        if payload.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+            raise UnauthorizedError("Emissor da credencial Google inválido.")
+
+        subject = str(payload.get("sub") or "").strip()
+        email = str(payload.get("email") or "").strip().lower()
+        email_verified = bool(payload.get("email_verified"))
+        full_name = str(payload.get("name") or "").strip()
+
+        if not subject or not email or not email_verified:
+            raise UnauthorizedError("A conta Google precisa ter um e-mail verificado.")
+
+        provider = "google"
+        linked = await self._auth_providers.get_by_provider_subject(provider, subject)
+        user = None
+
+        if linked is not None:
+            user = await self._users.get_by_id(linked.user_id)
+
+        if user is None:
+            user = await self._users.get_by_email(email)
+
+        now = datetime.now(UTC)
+
+        if user is None:
+            user = User(
+                email=email,
+                password_hash=None,
+                full_name=full_name or email.split("@", 1)[0],
+                email_verified_at=now,
+            )
+            async with UnitOfWork(self._session):
+                await self._users.add(user)
+                self._session.add(UserProfile(user_id=user.id))
+                self._session.add(
+                    UserAuthProvider(
+                        user_id=user.id,
+                        provider=provider,
+                        provider_subject=subject,
+                    )
+                )
+        else:
+            if not user.is_active:
+                raise UnauthorizedError("Esta conta está desativada.")
+
+            existing_provider = await self._auth_providers.get_by_user_and_provider(user.id, provider)
+            if existing_provider is None:
+                async with UnitOfWork(self._session):
+                    self._session.add(
+                        UserAuthProvider(
+                            user_id=user.id,
+                            provider=provider,
+                            provider_subject=subject,
+                        )
+                    )
+
+            if user.email_verified_at is None:
+                user.email_verified_at = now
+
+            if not user.full_name.strip() and full_name:
+                user.full_name = full_name
+
+        return await self._issue_tokens(user)
+
+    async def refresh(self, plain_refresh_token: str) -> AuthTokens:
+        token_hash = hash_refresh_token(plain_refresh_token)
+        stored_token = await self._refresh_tokens.get_by_hash(token_hash)
+
+        if stored_token is None or stored_token.revoked_at is not None:
+            raise UnauthorizedError("Refresh token inválido ou revogado.")
+
+        if stored_token.expires_at < datetime.now(UTC):
+            raise UnauthorizedError("Refresh token expirado.")
+
+        user = await self._users.get_by_id(stored_token.user_id)
+        if user is None or not user.is_active:
+            raise UnauthorizedError("Usuário inválido ou inativo.")
+
+        async with UnitOfWork(self._session):
+            new_plain_token, new_token_hash, new_expires_at = generate_refresh_token()
+            new_token = RefreshToken(
+                user_id=user.id,
+                token_hash=new_token_hash,
+                expires_at=new_expires_at,
+            )
+            await self._refresh_tokens.add(new_token)
+            await self._refresh_tokens.revoke(stored_token, replaced_by_token_id=new_token.id)
+
+        access_token, expires_in = create_access_token(user.id)
+        return AuthTokens(
+            user=user,
+            access_token=access_token,
+            refresh_token=new_plain_token,
+            expires_in=expires_in,
+        )
+
+    async def logout(self, plain_refresh_token: str) -> None:
+        token_hash = hash_refresh_token(plain_refresh_token)
+        stored_token = await self._refresh_tokens.get_by_hash(token_hash)
+        if stored_token is None or stored_token.revoked_at is not None:
+            return
+        async with UnitOfWork(self._session):
+            await self._refresh_tokens.revoke(stored_token)
+
+    async def forgot_password(self, email: str) -> None:
+        """Inicia a recuperação de senha.
+
+        Por design, não revela se o e-mail existe ou não na base: o método
+        sempre "funciona" do ponto de vista do chamador (endpoint sempre
+        responde 204). Se o e-mail pertencer a um usuário ativo, um link de
+        redefinição é enviado; caso contrário, a chamada é um no-op. Isso
+        evita que o endpoint seja usado para enumerar contas cadastradas.
+        """
+        user = await self._users.get_by_email(email)
+        if user is None or not user.is_active:
+            return
+
+        async with UnitOfWork(self._session):
+            # Invalida qualquer link de recuperação anterior ainda válido,
+            # para que só o mais recente funcione.
+            await self._password_reset_tokens.invalidate_all_for_user(user.id)
+
+            plain_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+            expires_at = datetime.now(UTC) + timedelta(
+                minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+            )
+            reset_token = PasswordResetToken(
+                user_id=user.id, token_hash=token_hash, expires_at=expires_at
+            )
+            await self._password_reset_tokens.add(reset_token)
+
+        reset_url = f"{settings.FRONTEND_URL}/redefinir-senha?token={plain_token}"
+        await self._email_service.send_password_reset_email(
+            to_email=user.email, to_name=user.full_name, reset_url=reset_url
+        )
+
+    async def reset_password(self, plain_token: str, new_password: str) -> None:
+        token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+        stored_token = await self._password_reset_tokens.get_valid_by_hash(token_hash)
+        if stored_token is None:
+            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
+
+        user = await self._users.get_by_id(stored_token.user_id)
+        if user is None or not user.is_active:
+            raise UnauthorizedError("Link de redefinição inválido ou expirado.")
+
+        async with UnitOfWork(self._session):
+            user.password_hash = hash_password(new_password)
+            await self._password_reset_tokens.mark_used(stored_token)
+            # Redefinir a senha revoga todas as sessões ativas (refresh tokens):
+            # se a conta foi comprometida, isso derruba qualquer acesso indevido
+            # em outros dispositivos assim que a senha é trocada.
+            for refresh_token in await self._refresh_tokens.list_active_for_user(user.id):
+                await self._refresh_tokens.revoke(refresh_token)
+
+    async def _issue_tokens(self, user: User) -> AuthTokens:
+        access_token, expires_in = create_access_token(user.id)
+        plain_refresh_token, token_hash, expires_at = generate_refresh_token()
+        refresh_token_row = RefreshToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        async with UnitOfWork(self._session):
+            await self._refresh_tokens.add(refresh_token_row)
+
+        return AuthTokens(
+            user=user,
+            access_token=access_token,
+            refresh_token=plain_refresh_token,
+            expires_in=expires_in,
+        )
+</file>
+
 <file path="app/services/learning/notebook_service.py">
 # app/services/learning/notebook_service.py
 """Regras de negócio de cadernos."""
@@ -34393,6 +34463,187 @@ async def report_question(
     return Envelope(data=QuestionReportResponse.model_validate(report))
 </file>
 
+<file path="app/middlewares/rate_limit.py">
+"""Rate limiting baseado em Redis (INCR + EXPIRE por IP), com políticas
+dedicadas por rota e comportamento explícito quando o Redis está
+indisponível.
+
+Antes desta versão, toda a API compartilhava um único balde
+(`RATE_LIMIT_PER_MINUTE`, 60 req/min por IP) — o que deixava login/registro
+(alvo de força bruta) e forgot-password (alvo de enumeração/flood de
+e-mail) tão permissivos quanto rotas de leitura pública, e uma falha do
+Redis era engolida em silêncio (`except Exception: pass`), sem log e sem
+decisão declarada sobre o que deveria acontecer nesse caso.
+
+Este módulo resolve, por requisição, qual política se aplica com base no
+prefixo da rota (`_resolve_policy`) e aplica o mesmo algoritmo de janela
+fixa por IP já usado antes, mas com um contador isolado por política
+(`ratelimit:{policy}:{ip}:{window}`), então esgotar o limite de login não
+consome o limite de outra rota nem vice-versa.
+"""
+
+import time
+from dataclasses import dataclass
+
+import structlog
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from app.core.config import settings
+from app.core.responses import error_envelope
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class RateLimitPolicy:
+    name: str
+    limit_per_minute: int
+
+
+def _resolve_policy(path: str) -> RateLimitPolicy:
+    """Mapeia o caminho da requisição para a política dedicada mais
+    específica, ou para a política `default` se nenhuma casar.
+
+    Lê `settings` a cada chamada (não em import-time) de propósito: os
+    valores continuam configuráveis via variável de ambiente/override em
+    teste sem exigir recarregar o módulo.
+    """
+    prefix = settings.API_V1_PREFIX
+    route_policies: tuple[tuple[str, str, int], ...] = (
+        (f"{prefix}/auth/login", "login", settings.RATE_LIMIT_LOGIN_PER_MINUTE),
+        (f"{prefix}/auth/google", "google_auth", settings.RATE_LIMIT_GOOGLE_AUTH_PER_MINUTE),
+        (f"{prefix}/auth/register", "register", settings.RATE_LIMIT_REGISTER_PER_MINUTE),
+        (
+            f"{prefix}/auth/forgot-password",
+            "forgot_password",
+            settings.RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE,
+        ),
+        (
+            f"{prefix}/auth/reset-password",
+            "reset_password",
+            settings.RATE_LIMIT_RESET_PASSWORD_PER_MINUTE,
+        ),
+        (f"{prefix}/billing", "billing", settings.RATE_LIMIT_BILLING_PER_MINUTE),
+    )
+
+    for route_prefix, name, limit in route_policies:
+        if path.startswith(route_prefix):
+            return RateLimitPolicy(name=name, limit_per_minute=limit)
+
+    return RateLimitPolicy(name="default", limit_per_minute=settings.RATE_LIMIT_PER_MINUTE)
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Lê o cliente Redis de `request.app.state.redis` (definido no
+    lifespan), em vez de recebê-lo no construtor — o middleware é montado
+    antes do lifespan rodar, então o client ainda não existiria nesse
+    momento.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[no-untyped-def]
+        policy = _resolve_policy(request.url.path)
+        redis_client = getattr(request.app.state, "redis", None)
+
+        if redis_client is None:
+            return await self._on_backend_unavailable(
+                request, call_next, policy, reason="redis_client_not_configured"
+            )
+
+        try:
+            client_ip = request.client.host if request.client else "unknown"
+            window = int(time.time() // 60)
+            key = f"ratelimit:{policy.name}:{client_ip}:{window}"
+
+            current = await redis_client.incr(key)
+            if current == 1:
+                await redis_client.expire(key, 60)
+
+            if current > policy.limit_per_minute:
+                logger.warning(
+                    "rate_limit.exceeded",
+                    policy=policy.name,
+                    path=request.url.path,
+                    client_ip=client_ip,
+                    limit=policy.limit_per_minute,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content=error_envelope(
+                        "rate_limited", "Muitas requisições. Tente novamente em instantes."
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001 - Redis pode falhar de várias formas
+            return await self._on_backend_unavailable(
+                request, call_next, policy, reason=repr(exc)
+            )
+
+        # 🔥 CORREÇÃO: `call_next(request)` estava FORA do try/except acima.
+        # O try/except só protegia as chamadas ao Redis — qualquer exceção
+        # que escapasse do processamento downstream real (router/service),
+        # inclusive falhas conhecidas do `Starlette.BaseHTTPMiddleware`
+        # durante o streaming interno da resposta, não passava pelo
+        # `@app.exception_handler(Exception)` genérico do FastAPI e ia
+        # parar direto no `ServerErrorMiddleware` do Starlette — que
+        # devolve texto puro, não JSON. Do lado do cliente isso aparece
+        # como corpo não-parseável (`response.json()` falhando), mesmo
+        # com o handler genérico já implementado e funcionando para
+        # exceções levantadas dentro do próprio endpoint.
+        try:
+            return await call_next(request)
+        except Exception as exc:  # noqa: BLE001 - qualquer falha downstream
+            # Não fazemos `raise` aqui: relançar deixaria a exceção seguir
+            # para o `ServerErrorMiddleware` do Starlette (texto puro, sem
+            # JSON) exatamente como antes — o que estamos corrigindo é
+            # justamente essa fuga. Devolvemos o mesmo formato de envelope
+            # de erro que `@app.exception_handler(Exception)` usaria.
+            logger.error(
+                "rate_limit.downstream_unhandled_exception",
+                policy=policy.name,
+                path=request.url.path,
+                error=repr(exc),
+                error_type=type(exc).__name__,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=error_envelope(
+                    "internal_error", "Erro interno do servidor."
+                ),
+            )
+
+    async def _on_backend_unavailable(
+        self,
+        request: Request,
+        call_next: RequestResponseEndpoint,
+        policy: RateLimitPolicy,
+        reason: str,
+    ):  # type: ignore[no-untyped-def]
+        """Comportamento explícito e observável quando o Redis está
+        indisponível — controlado por `settings.RATE_LIMIT_FAIL_OPEN`. Ver
+        docstring do campo em `app/core/config.py` para a decisão de
+        negócio por trás do default.
+        """
+        logger.warning(
+            "rate_limit.backend_unavailable",
+            policy=policy.name,
+            path=request.url.path,
+            reason=reason,
+            fail_open=settings.RATE_LIMIT_FAIL_OPEN,
+        )
+
+        if settings.RATE_LIMIT_FAIL_OPEN:
+            return await call_next(request)
+
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=error_envelope(
+                "rate_limit_unavailable",
+                "Serviço de proteção contra abuso indisponível. Tente novamente em instantes.",
+            ),
+        )
+</file>
+
 <file path="app/models/billing/subscription.py">
 """Assinatura ativa de um usuário a um plano."""
 
@@ -34484,77 +34735,6 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
     renewal_reminder_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-</file>
-
-<file path="app/models/__init__.py">
-# app/models/__init__.py
-"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
-
-from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
-from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
-from app.models.billing import Feature, Payment, Plan, PlanFeature, Subscription, SubscriptionHistory
-from app.models.content import (
-    Discipline,
-    ExamBoard,
-    ExamEdition,
-    Organization,
-    Question,
-    QuestionAlternative,
-    QuestionAttachment,
-    QuestionRevision,
-    QuestionTag,
-    Subject,
-    Topic,
-)
-from app.models.identity import RefreshToken, User, UserProfile
-from app.models.learning import Flashcard, FlashcardReview
-from app.models.learning.notebook import Notebook
-from app.models.learning.notebook_folder import NotebookFolder
-from app.models.learning.notebook_question import NotebookQuestion
-from app.models.learning.notebook_tag import NotebookTag
-from app.models.platform import AdminAuditLog, Notification
-from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
-
-__all__ = [
-    "User",
-    "UserProfile",
-    "RefreshToken",
-    "Discipline",
-    "Subject",
-    "Topic",
-    "ExamBoard",
-    "Organization",
-    "ExamEdition",
-    "Question",
-    "QuestionAlternative",
-    "QuestionAttachment",
-    "QuestionRevision",
-    "QuestionTag",
-    "TrainingSession",
-    "TrainingSessionQuestion",
-    "QuestionAttempt",
-    "UserQuestionState",
-    "ExamTemplate",
-    "ExamAttempt",
-    "ExamAttemptQuestion",
-    "Flashcard",
-    "FlashcardReview",
-    "UserDailyStat",
-    "UserSubjectStat",
-    "StudyStreak",
-    "Plan",
-    "PlanFeature",
-    "Feature",
-    "Subscription",
-    "SubscriptionHistory",
-    "Payment",
-    "Notification",
-    "AdminAuditLog",
-    "Notebook",
-    "NotebookFolder",
-    "NotebookQuestion",
-    "NotebookTag",
-]
 </file>
 
 <file path="app/repositories/billing/subscription_repository.py">
@@ -36335,6 +36515,78 @@ async def copy_questions(
     return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
 </file>
 
+<file path="app/models/__init__.py">
+# app/models/__init__.py
+"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
+
+from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
+from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
+from app.models.billing import Feature, Payment, Plan, PlanFeature, Subscription, SubscriptionHistory
+from app.models.content import (
+    Discipline,
+    ExamBoard,
+    ExamEdition,
+    Organization,
+    Question,
+    QuestionAlternative,
+    QuestionAttachment,
+    QuestionRevision,
+    QuestionTag,
+    Subject,
+    Topic,
+)
+from app.models.identity import RefreshToken, User, UserAuthProvider, UserProfile
+from app.models.learning import Flashcard, FlashcardReview
+from app.models.learning.notebook import Notebook
+from app.models.learning.notebook_folder import NotebookFolder
+from app.models.learning.notebook_question import NotebookQuestion
+from app.models.learning.notebook_tag import NotebookTag
+from app.models.platform import AdminAuditLog, Notification
+from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
+
+__all__ = [
+    "User",
+    "UserProfile",
+    "RefreshToken",
+    "UserAuthProvider",
+    "Discipline",
+    "Subject",
+    "Topic",
+    "ExamBoard",
+    "Organization",
+    "ExamEdition",
+    "Question",
+    "QuestionAlternative",
+    "QuestionAttachment",
+    "QuestionRevision",
+    "QuestionTag",
+    "TrainingSession",
+    "TrainingSessionQuestion",
+    "QuestionAttempt",
+    "UserQuestionState",
+    "ExamTemplate",
+    "ExamAttempt",
+    "ExamAttemptQuestion",
+    "Flashcard",
+    "FlashcardReview",
+    "UserDailyStat",
+    "UserSubjectStat",
+    "StudyStreak",
+    "Plan",
+    "PlanFeature",
+    "Feature",
+    "Subscription",
+    "SubscriptionHistory",
+    "Payment",
+    "Notification",
+    "AdminAuditLog",
+    "Notebook",
+    "NotebookFolder",
+    "NotebookQuestion",
+    "NotebookTag",
+]
+</file>
+
 <file path="app/schemas/practice/training_session.py">
 # app/schemas/practice/training_session.py
 """Schemas de request/response de sessões de treino."""
@@ -36884,86 +37136,6 @@ if __name__ == "__main__":
     asyncio.run(main())
 </file>
 
-<file path="pyproject.toml">
-[tool.poetry]
-name = "foco-policial-backend"
-version = "0.1.0"
-description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
-authors = ["Foco Policial <dev@focopolicial.com>"]
-readme = "README.md"
-package-mode = false
-
-[tool.poetry.dependencies]
-python = "^3.13"
-fastapi = "^0.115.0"
-uvicorn = { extras = ["standard"], version = "^0.32.0" }
-sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
-asyncpg = "^0.30.0"
-alembic = "^1.13.3"
-pydantic = "^2.9.2"
-pydantic-settings = "^2.6.0"
-email-validator = "^2.2.0"
-pyjwt = "^2.9.0"
-argon2-cffi = "^23.1.0"
-redis = { extras = ["hiredis"], version = "^5.1.1" }
-python-multipart = "^0.0.12"
-structlog = "^24.4.0"
-apscheduler = "^3.10.4"
-prometheus-client = "^0.26.0"
-httpx = "^0.27.0"
-boto3 = "^1.43.76"
-reportlab = "^4.2.5"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.7.1"
-mypy = "^1.13.0"
-pytest = "^8.3.3"
-pytest-asyncio = "^0.24.0"
-pytest-cov = "^5.0.0"
-httpx = "^0.27.2"
-factory-boy = "^3.3.1"
-testcontainers = {extras = ["postgres"], version = "^4.15.0"}
-psycopg2-binary = "^2.9.12"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-src = ["app", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
-ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
-
-[tool.ruff.lint.isort]
-known-first-party = ["app"]
-
-[tool.mypy]
-python_version = "3.13"
-plugins = ["pydantic.mypy"]
-strict = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-exclude = ["migrations/"]
-
-[[tool.mypy.overrides]]
-module = "reportlab.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "app.models.*"
-# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
-# revisitar conforme o plugin oficial evolui.
-disallow_untyped_defs = false
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-</file>
-
 <file path="app/models/enums.py">
 """Enums compartilhados entre models de diferentes bounded contexts."""
 
@@ -37273,6 +37445,223 @@ SCHEDULER_ENABLED=true
 SCHEDULER_LOCK_TTL_SECONDS=300
 </file>
 
+<file path="pyproject.toml">
+[tool.poetry]
+name = "foco-policial-backend"
+version = "0.1.0"
+description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
+authors = ["Foco Policial <dev@focopolicial.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.13"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = "^0.30.0"
+alembic = "^1.13.3"
+pydantic = "^2.9.2"
+pydantic-settings = "^2.6.0"
+email-validator = "^2.2.0"
+pyjwt = "^2.9.0"
+argon2-cffi = "^23.1.0"
+redis = { extras = ["hiredis"], version = "^5.1.1" }
+python-multipart = "^0.0.12"
+structlog = "^24.4.0"
+apscheduler = "^3.10.4"
+prometheus-client = "^0.26.0"
+httpx = "^0.27.0"
+boto3 = "^1.43.76"
+reportlab = "^4.2.5"
+google-auth = ">=2.0.0,<3.0.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.7.1"
+mypy = "^1.13.0"
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+httpx = "^0.27.2"
+factory-boy = "^3.3.1"
+testcontainers = {extras = ["postgres"], version = "^4.15.0"}
+psycopg2-binary = "^2.9.12"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = "reportlab.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "app.models.*"
+# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
+# revisitar conforme o plugin oficial evolui.
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+</file>
+
+<file path="app/api/v1/router.py">
+"""Router agregador da API v1."""
+
+from fastapi import APIRouter
+from app.api.v1.content.exam_papers import router as exam_papers_router
+from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
+from app.api.v1.assessment.exam_templates import router as exam_templates_router
+from app.api.v1.billing.plans import router as billing_plans_router
+from app.api.v1.billing.subscriptions import router as billing_subscriptions_router
+from app.api.v1.billing.webhooks import router as billing_webhooks_router
+from app.api.v1.content.exam_sources import router as exam_sources_router
+from app.api.v1.content.questions import router as questions_router
+from app.api.v1.content.question_states import router as question_states_router
+from app.api.v1.content.question_stats import router as question_stats_router
+from app.api.v1.content.taxonomy import router as taxonomy_router
+from app.api.v1.identity.auth import router as auth_router
+from app.api.v1.identity.users import router as users_router
+from app.api.v1.practice.attempts import router as attempts_router
+from app.api.v1.practice.training_sessions import router as training_sessions_router
+from app.api.v1.practice.reviews import router as reviews_router
+from app.api.v1.analytics.ranking import router as ranking_router
+from app.api.v1.platform.comments import router as comments_router
+from app.api.v1.platform.notifications import router as notifications_router
+from app.api.v1.analytics.user_stats import router as user_stats_router
+from app.api.v1.learning.notebooks import router as notebooks_router
+from app.api.v1.learning.flashcards import router as flashcards_router
+from app.api.v1.admin import router as admin_router
+
+api_router = APIRouter()
+
+# Auth
+api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
+
+# Users
+api_router.include_router(users_router, prefix="/users", tags=["users"])
+
+# ⚠️ IMPORTANTE: question_stats_router DEVE vir ANTES de questions_router
+# para que /questions/stats não seja capturado como um question_id
+api_router.include_router(
+    question_stats_router,
+    prefix="/questions",
+    tags=["questions"],
+)
+
+api_router.include_router(
+    question_states_router,
+    prefix="/questions",
+    tags=["questions"],
+)
+
+api_router.include_router(questions_router, prefix="/questions", tags=["questions"])
+api_router.include_router(taxonomy_router, tags=["taxonomy"])
+api_router.include_router(exam_sources_router, tags=["exam-sources"])
+
+# Practice
+api_router.include_router(
+    training_sessions_router, prefix="/training-sessions", tags=["training-sessions"]
+)
+api_router.include_router(attempts_router, prefix="/attempts", tags=["attempts"])
+
+# Assessment
+api_router.include_router(
+    exam_templates_router, prefix="/exam-templates", tags=["exam-templates"]
+)
+api_router.include_router(
+    exam_attempts_router, prefix="/exam-attempts", tags=["exam-attempts"]
+)
+
+# Billing
+api_router.include_router(billing_plans_router, prefix="/billing/plans", tags=["billing"])
+api_router.include_router(
+    billing_subscriptions_router, prefix="/billing/subscriptions", tags=["billing"]
+)
+api_router.include_router(
+    billing_webhooks_router, prefix="/billing/webhooks", tags=["billing"]
+)
+
+# Reviews
+api_router.include_router(
+    reviews_router,
+    prefix="/reviews",
+    tags=["reviews"],
+)
+
+# Exam Papers
+api_router.include_router(
+    exam_papers_router,
+    prefix="/exam-papers",
+    tags=["exam-papers"],
+)
+
+# Ranking
+api_router.include_router(
+    ranking_router,
+    prefix="/ranking",
+    tags=["ranking"],
+)
+
+# Platform - Comments
+api_router.include_router(
+    comments_router,
+    prefix="/comments",
+    tags=["comments"],
+)
+
+# Platform - Notifications
+api_router.include_router(
+    notifications_router,
+    prefix="/notifications",
+    tags=["notifications"],
+)
+
+# Analytics
+api_router.include_router(
+    user_stats_router,
+    prefix="/analytics",
+    tags=["analytics"],
+)
+
+# Learning - Notebooks
+api_router.include_router(
+    notebooks_router,
+    prefix="/notebooks",
+    tags=["notebooks"],
+)
+
+# Learning - Flashcards
+api_router.include_router(
+    flashcards_router,
+    prefix="/flashcards",
+    tags=["flashcards"],
+)
+
+api_router.include_router(admin_router, prefix="/admin", tags=["admin"])
+</file>
+
 <file path="app/core/config.py">
 """Configurações da aplicação lidas de variáveis de ambiente (.env)."""
 
@@ -37312,6 +37701,10 @@ class Settings(BaseSettings):
     # URL base do frontend, usada para montar o link enviado por e-mail
     # (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
     FRONTEND_URL: str = Field(default="http://localhost:3000")
+
+    # Google Identity Services
+    # Mesmo Client ID usado pelo frontend em NEXT_PUBLIC_GOOGLE_CLIENT_ID.
+    GOOGLE_CLIENT_ID: str = Field(default="")
 
     # E-mail transacional
     # EMAIL_DRIVER=console (padrão): apenas loga o e-mail formatado — não exige
@@ -37392,6 +37785,7 @@ class Settings(BaseSettings):
     # isoladamente por IP e por janela de 60s — não compartilham o balde da
     # política padrão (`RATE_LIMIT_PER_MINUTE`) nem entre si.
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
+    RATE_LIMIT_GOOGLE_AUTH_PER_MINUTE: int = 10
     RATE_LIMIT_REGISTER_PER_MINUTE: int = 5
     RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: int = 3
     RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: int = 5
@@ -37557,142 +37951,6 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-</file>
-
-<file path="app/api/v1/router.py">
-"""Router agregador da API v1."""
-
-from fastapi import APIRouter
-from app.api.v1.content.exam_papers import router as exam_papers_router
-from app.api.v1.assessment.exam_attempts import router as exam_attempts_router
-from app.api.v1.assessment.exam_templates import router as exam_templates_router
-from app.api.v1.billing.plans import router as billing_plans_router
-from app.api.v1.billing.subscriptions import router as billing_subscriptions_router
-from app.api.v1.billing.webhooks import router as billing_webhooks_router
-from app.api.v1.content.exam_sources import router as exam_sources_router
-from app.api.v1.content.questions import router as questions_router
-from app.api.v1.content.question_states import router as question_states_router
-from app.api.v1.content.question_stats import router as question_stats_router
-from app.api.v1.content.taxonomy import router as taxonomy_router
-from app.api.v1.identity.auth import router as auth_router
-from app.api.v1.identity.users import router as users_router
-from app.api.v1.practice.attempts import router as attempts_router
-from app.api.v1.practice.training_sessions import router as training_sessions_router
-from app.api.v1.practice.reviews import router as reviews_router
-from app.api.v1.analytics.ranking import router as ranking_router
-from app.api.v1.platform.comments import router as comments_router
-from app.api.v1.platform.notifications import router as notifications_router
-from app.api.v1.analytics.user_stats import router as user_stats_router
-from app.api.v1.learning.notebooks import router as notebooks_router
-from app.api.v1.learning.flashcards import router as flashcards_router
-from app.api.v1.admin import router as admin_router
-
-api_router = APIRouter()
-
-# Auth
-api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
-
-# Users
-api_router.include_router(users_router, prefix="/users", tags=["users"])
-
-# ⚠️ IMPORTANTE: question_stats_router DEVE vir ANTES de questions_router
-# para que /questions/stats não seja capturado como um question_id
-api_router.include_router(
-    question_stats_router,
-    prefix="/questions",
-    tags=["questions"],
-)
-
-api_router.include_router(
-    question_states_router,
-    prefix="/questions",
-    tags=["questions"],
-)
-
-api_router.include_router(questions_router, prefix="/questions", tags=["questions"])
-api_router.include_router(taxonomy_router, tags=["taxonomy"])
-api_router.include_router(exam_sources_router, tags=["exam-sources"])
-
-# Practice
-api_router.include_router(
-    training_sessions_router, prefix="/training-sessions", tags=["training-sessions"]
-)
-api_router.include_router(attempts_router, prefix="/attempts", tags=["attempts"])
-
-# Assessment
-api_router.include_router(
-    exam_templates_router, prefix="/exam-templates", tags=["exam-templates"]
-)
-api_router.include_router(
-    exam_attempts_router, prefix="/exam-attempts", tags=["exam-attempts"]
-)
-
-# Billing
-api_router.include_router(billing_plans_router, prefix="/billing/plans", tags=["billing"])
-api_router.include_router(
-    billing_subscriptions_router, prefix="/billing/subscriptions", tags=["billing"]
-)
-api_router.include_router(
-    billing_webhooks_router, prefix="/billing/webhooks", tags=["billing"]
-)
-
-# Reviews
-api_router.include_router(
-    reviews_router,
-    prefix="/reviews",
-    tags=["reviews"],
-)
-
-# Exam Papers
-api_router.include_router(
-    exam_papers_router,
-    prefix="/exam-papers",
-    tags=["exam-papers"],
-)
-
-# Ranking
-api_router.include_router(
-    ranking_router,
-    prefix="/ranking",
-    tags=["ranking"],
-)
-
-# Platform - Comments
-api_router.include_router(
-    comments_router,
-    prefix="/comments",
-    tags=["comments"],
-)
-
-# Platform - Notifications
-api_router.include_router(
-    notifications_router,
-    prefix="/notifications",
-    tags=["notifications"],
-)
-
-# Analytics
-api_router.include_router(
-    user_stats_router,
-    prefix="/analytics",
-    tags=["analytics"],
-)
-
-# Learning - Notebooks
-api_router.include_router(
-    notebooks_router,
-    prefix="/notebooks",
-    tags=["notebooks"],
-)
-
-# Learning - Flashcards
-api_router.include_router(
-    flashcards_router,
-    prefix="/flashcards",
-    tags=["flashcards"],
-)
-
-api_router.include_router(admin_router, prefix="/admin", tags=["admin"])
 </file>
 
 </files>

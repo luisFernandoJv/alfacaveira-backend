@@ -6,11 +6,17 @@ from typing import Annotated, List
 
 import structlog
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
+from app.models.content.question import Question
+from app.models.identity.user import User
+from app.models.platform.comment import Comment
+from app.models.enums import CommentStatus
 from app.schemas.platform.comment import (
     CommentCreateRequest,
     CommentListResponse,
@@ -39,6 +45,94 @@ CommentServiceDep = Annotated[CommentService, Depends(get_comment_service)]
 # ==================================================================== #
 # LEITURA
 # ==================================================================== #
+
+
+
+@router.get("/community", response_model=Envelope[list[dict]])
+async def community_feed(
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=30)] = 8,
+    user_id: uuid.UUID | None = None,
+) -> Envelope[list[dict]]:
+    """Feed público de questões com discussões recentes e respostas."""
+    stmt = (
+        select(Comment)
+        .join(Comment.question)
+        .where(
+            *( [Comment.user_id == user_id] if user_id else [] ),
+            Comment.parent_id.is_(None),
+            Comment.status == CommentStatus.PUBLICADO,
+            Comment.deleted_at.is_(None),
+        )
+        .options(
+            selectinload(Comment.user).selectinload(User.profile),
+            selectinload(Comment.question).selectinload(Question.discipline),
+            selectinload(Comment.question).selectinload(Question.exam_board),
+        )
+        .order_by(Comment.created_at.desc())
+        .limit(limit * 2)
+    )
+    result = await session.execute(stmt)
+    seed_comments = list(result.scalars().unique().all())
+
+    seen_questions: set[uuid.UUID] = set()
+    feed: list[dict] = []
+
+    for seed in seed_comments:
+        if seed.question_id in seen_questions:
+            continue
+        seen_questions.add(seed.question_id)
+
+        comments, total = await comment_service.list_by_question(
+            question_id=seed.question_id,
+            user_id=current_user.id,
+            limit=4,
+        )
+
+        items = []
+        for comment in comments:
+            comment_dict = {
+                "id": comment.id,
+                "user_id": comment.user_id,
+                "content": comment.content,
+                "created_at": comment.created_at,
+                "upvotes": comment.upvotes,
+                "downvotes": comment.downvotes,
+                "user_name": getattr(comment, "user_name", None),
+                "user_initials": getattr(comment, "user_initials", None),
+                "user_avatar_url": getattr(comment, "user_avatar_url", None),
+                "replies": [],
+            }
+            for reply in getattr(comment, "_replies", [])[:5]:
+                comment_dict["replies"].append({
+                    "id": reply.id,
+                    "user_id": reply.user_id,
+                    "content": reply.content,
+                    "created_at": reply.created_at,
+                    "upvotes": reply.upvotes,
+                    "downvotes": reply.downvotes,
+                    "user_name": getattr(reply, "user_name", None),
+                    "user_initials": getattr(reply, "user_initials", None),
+                    "user_avatar_url": getattr(reply, "user_avatar_url", None),
+                    "replies": [],
+                })
+            items.append(comment_dict)
+
+        feed.append({
+            "question_id": seed.question_id,
+            "question_statement": seed.question.statement,
+            "discipline": getattr(seed.question.discipline, "name", None),
+            "exam_board": getattr(seed.question.exam_board, "acronym", None),
+            "comments": items,
+            "total_comments": total,
+        })
+
+        if len(feed) >= limit:
+            break
+
+    return Envelope(data=feed)
 
 
 @router.get("/question/{question_id}", response_model=Envelope[CommentListResponse])
@@ -81,6 +175,8 @@ async def list_comments(
             "updated_at": comment.updated_at,
             "user_name": getattr(comment, 'user_name', None),
             "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
             "user_vote": getattr(comment, 'user_vote', None),
             "can_edit": getattr(comment, 'can_edit', False),
             "can_delete": getattr(comment, 'can_delete', False),
@@ -107,6 +203,7 @@ async def list_comments(
                     "updated_at": reply.updated_at,
                     "user_name": getattr(reply, 'user_name', None),
                     "user_initials": getattr(reply, 'user_initials', None),
+                    "user_avatar_url": getattr(reply, 'user_avatar_url', None),
                     "user_vote": getattr(reply, 'user_vote', None),
                     "can_edit": getattr(reply, 'can_edit', False),
                     "can_delete": getattr(reply, 'can_delete', False),
@@ -157,6 +254,7 @@ async def get_comment(
         "updated_at": comment.updated_at,
         "user_name": getattr(comment, 'user_name', None),
         "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
         "user_vote": getattr(comment, 'user_vote', None),
         "can_edit": getattr(comment, 'can_edit', False),
         "can_delete": getattr(comment, 'can_delete', False),
@@ -205,6 +303,7 @@ async def create_comment(
         "updated_at": comment.updated_at,
         "user_name": getattr(comment, 'user_name', None),
         "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
         "user_vote": getattr(comment, 'user_vote', None),
         "can_edit": getattr(comment, 'can_edit', False),
         "can_delete": getattr(comment, 'can_delete', False),
@@ -260,6 +359,7 @@ async def update_comment(
         "updated_at": comment.updated_at,
         "user_name": getattr(comment, 'user_name', None),
         "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
         "user_vote": getattr(comment, 'user_vote', None),
         "can_edit": getattr(comment, 'can_edit', False),
         "can_delete": getattr(comment, 'can_delete', False),
@@ -377,6 +477,7 @@ async def moderate_comment(
         "updated_at": comment.updated_at,
         "user_name": getattr(comment, 'user_name', None),
         "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
         "user_vote": getattr(comment, 'user_vote', None),
         "can_edit": getattr(comment, 'can_edit', False),
         "can_delete": getattr(comment, 'can_delete', False),

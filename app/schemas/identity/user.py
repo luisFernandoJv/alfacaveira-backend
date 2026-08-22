@@ -74,3 +74,15 @@ class AdminUserListItem(BaseModel):
 
 class UpdateUserStatusRequest(BaseModel):
     is_active: bool
+
+class PublicUserProfileResponse(BaseModel):
+    """Perfil público seguro para ranking e comunidade."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    full_name: str
+    created_at: datetime
+    profile: UserProfileResponse
+    ranking: dict[str, int | float | None]
+    comments_count: int

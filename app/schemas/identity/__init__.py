@@ -20,6 +20,7 @@ from app.schemas.identity.user import (
     UpdateProfileRequest,
     UpdateUserStatusRequest,
     UserProfileResponse,
+    PublicUserProfileResponse,
 )
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     "UpdateProfileRequest",
     "UpdateUserStatusRequest",
     "UserProfileResponse",
+    "PublicUserProfileResponse",
     "UserResponse",
 ]

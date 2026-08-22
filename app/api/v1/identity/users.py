@@ -3,8 +3,11 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import RedirectResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
@@ -18,11 +21,15 @@ from app.schemas.identity import (
     UpdateProfileRequest,
     UpdateUserStatusRequest,
     UserProfileResponse,
+    PublicUserProfileResponse,
 )
 from app.security.dependencies import CurrentAdminUser, CurrentUser
 from app.services.identity import UserService
 from app.core.config import settings
-from app.services.storage.s3_service import create_presigned_upload
+from app.services.storage.s3_service import create_presigned_upload, create_presigned_download, upload_profile_avatar
+from app.models.identity.user import User
+from app.models.analytics.ranking import UserRanking
+from app.models.platform.comment import Comment
 
 router = APIRouter()
 
@@ -88,6 +95,64 @@ async def presign_my_avatar(
     return Envelope(data=upload)
 
 
+@router.post("/me/avatar", response_model=Envelope[UserProfileResponse])
+async def upload_my_avatar(
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+    file: UploadFile = File(...),
+) -> Envelope[UserProfileResponse]:
+    """Recebe o avatar no backend e envia para o S3 sem CORS no navegador."""
+    content_type = file.content_type
+    if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=422, detail="Tipo de imagem não permitido.")
+
+    data = await file.read(settings.S3_MAX_UPLOAD_BYTES + 1)
+    if len(data) > settings.S3_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="A imagem deve ter no máximo 8 MB.")
+
+    from io import BytesIO
+
+    uploaded = upload_profile_avatar(
+        BytesIO(data),
+        content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    profile = await user_service.update_profile(
+        current_user.id,
+        {"avatar_url": uploaded["public_url"]},
+    )
+    return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+@router.get("/{user_id}/avatar")
+async def get_user_avatar(
+    user_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Redireciona o avatar para uma URL S3 assinada de leitura."""
+    result = await session.execute(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+    if not user or not user.profile or not user.profile.avatar_url:
+        raise HTTPException(status_code=404, detail="Avatar não encontrado.")
+
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(user.profile.avatar_url)
+    key = unquote(parsed.path.lstrip("/"))
+    if not key:
+        raise HTTPException(status_code=404, detail="Avatar não encontrado.")
+
+    return RedirectResponse(
+        url=create_presigned_download(key),
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 @router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
 async def update_my_profile(
     body: UpdateProfileRequest,
@@ -97,6 +162,53 @@ async def update_my_profile(
     fields = body.model_dump(exclude_unset=True)
     profile = await user_service.update_profile(current_user.id, fields)
     return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+
+@router.get("/{user_id}/public-profile", response_model=Envelope[PublicUserProfileResponse])
+async def get_public_profile(
+    user_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Envelope[PublicUserProfileResponse]:
+    """Perfil público seguro, usado no ranking e na comunidade."""
+    result = await session.execute(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    ranking_result = await session.execute(
+        select(UserRanking).where(UserRanking.user_id == user_id)
+    )
+    ranking = ranking_result.scalar_one_or_none()
+
+    comments_count = await session.scalar(
+        select(func.count()).select_from(Comment).where(
+            Comment.user_id == user_id,
+            Comment.deleted_at.is_(None),
+            Comment.status == "publicado",
+        )
+    ) or 0
+
+    return Envelope(
+        data=PublicUserProfileResponse(
+            id=user.id,
+            full_name=user.full_name,
+            created_at=user.created_at,
+            profile=UserProfileResponse.model_validate(user.profile),
+            ranking={
+                "rank": ranking.rank if ranking else None,
+                "total_points": ranking.total_points if ranking else 0,
+                "questions_answered": ranking.questions_answered if ranking else 0,
+                "accuracy": ranking.accuracy if ranking else 0,
+                "streak_days": ranking.streak_days if ranking else 0,
+            },
+            comments_count=comments_count,
+        )
+    )
 
 
 @router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)

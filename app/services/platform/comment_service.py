@@ -96,9 +96,12 @@ class CommentService:
                 comment.user_initials = name_parts[0][:2].upper()
             else:
                 comment.user_initials = "??"
+            profile = getattr(comment.user, "profile", None)
+            comment.user_avatar_url = getattr(profile, "avatar_url", None)
         else:
             comment.user_name = "Usuário"
             comment.user_initials = "??"
+            comment.user_avatar_url = None
 
         # Verificar se o usuário atual votou
         comment.user_vote = None

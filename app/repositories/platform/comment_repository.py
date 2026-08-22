@@ -10,13 +10,14 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import CommentStatus, CommentVoteType
+from app.models.identity.user import User
 from app.models.platform.comment import Comment, CommentReport, CommentVote
 from app.repositories.base import BaseRepository
 
 logger = structlog.get_logger(__name__)
 
 _RELATIONS = (
-    selectinload(Comment.user),
+    selectinload(Comment.user).selectinload(User.profile),
     selectinload(Comment.votes),
     selectinload(Comment.reports),
 )
