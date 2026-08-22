@@ -278,6 +278,7 @@ async def download_notebook_pdf(
         notebook,
         items,
         include_answer_key=include_answer_key,
+        student_name=current_user.full_name,
     )
 
     encoded_filename = quote(filename)
