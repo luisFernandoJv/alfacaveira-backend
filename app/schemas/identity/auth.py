@@ -17,6 +17,12 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class GoogleLoginRequest(BaseModel):
+    """Credencial emitida pelo Google Identity Services no navegador."""
+
+    credential: str = Field(min_length=1, max_length=10000)
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 

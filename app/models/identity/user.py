@@ -17,13 +17,16 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     profile: Mapped["UserProfile"] = relationship(back_populates="user", uselist=False)
+    auth_providers: Mapped[list["UserAuthProvider"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user")
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

@@ -26,6 +26,7 @@ prometheus-client = "^0.26.0"
 httpx = "^0.27.0"
 boto3 = "^1.43.76"
 reportlab = "^4.2.5"
+google-auth = ">=2.0.0,<3.0.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.7.1"

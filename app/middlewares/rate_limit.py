@@ -47,6 +47,7 @@ def _resolve_policy(path: str) -> RateLimitPolicy:
     prefix = settings.API_V1_PREFIX
     route_policies: tuple[tuple[str, str, int], ...] = (
         (f"{prefix}/auth/login", "login", settings.RATE_LIMIT_LOGIN_PER_MINUTE),
+        (f"{prefix}/auth/google", "google_auth", settings.RATE_LIMIT_GOOGLE_AUTH_PER_MINUTE),
         (f"{prefix}/auth/register", "register", settings.RATE_LIMIT_REGISTER_PER_MINUTE),
         (
             f"{prefix}/auth/forgot-password",

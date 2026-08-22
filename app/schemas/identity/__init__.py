@@ -2,6 +2,7 @@
 
 from app.schemas.identity.auth import (
     ForgotPasswordRequest,
+    GoogleLoginRequest,
     LoginRequest,
     LogoutRequest,
     RefreshRequest,
@@ -26,6 +27,7 @@ __all__ = [
     "AvatarPresignRequest",
     "ChangePasswordRequest",
     "ForgotPasswordRequest",
+    "GoogleLoginRequest",
     "LoginRequest",
     "LogoutRequest",
     "MeResponse",

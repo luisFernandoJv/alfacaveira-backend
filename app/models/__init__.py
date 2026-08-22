@@ -17,7 +17,7 @@ from app.models.content import (
     Subject,
     Topic,
 )
-from app.models.identity import RefreshToken, User, UserProfile
+from app.models.identity import RefreshToken, User, UserAuthProvider, UserProfile
 from app.models.learning import Flashcard, FlashcardReview
 from app.models.learning.notebook import Notebook
 from app.models.learning.notebook_folder import NotebookFolder
@@ -30,6 +30,7 @@ __all__ = [
     "User",
     "UserProfile",
     "RefreshToken",
+    "UserAuthProvider",
     "Discipline",
     "Subject",
     "Topic",

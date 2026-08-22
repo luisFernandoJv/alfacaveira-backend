@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
     FRONTEND_URL: str = Field(default="http://localhost:3000")
 
+    # Google Identity Services
+    # Mesmo Client ID usado pelo frontend em NEXT_PUBLIC_GOOGLE_CLIENT_ID.
+    GOOGLE_CLIENT_ID: str = Field(default="")
+
     # E-mail transacional
     # EMAIL_DRIVER=console (padrão): apenas loga o e-mail formatado — não exige
     # nenhuma infra externa, ideal para desenvolvimento e para novos ambientes
@@ -116,6 +120,7 @@ class Settings(BaseSettings):
     # isoladamente por IP e por janela de 60s — não compartilham o balde da
     # política padrão (`RATE_LIMIT_PER_MINUTE`) nem entre si.
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
+    RATE_LIMIT_GOOGLE_AUTH_PER_MINUTE: int = 10
     RATE_LIMIT_REGISTER_PER_MINUTE: int = 5
     RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: int = 3
     RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: int = 5
