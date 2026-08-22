@@ -298,6 +298,7 @@ app/
       __init__.py
       assets.py
       notebook_pdf_service.py
+      s3_service.py
     identity/
       __init__.py
       auth_service.py
@@ -384,6 +385,7 @@ scripts/
     test_subscription_upgrade_downgrade_staging.py
     test_subscription_upgrade_downgrade_staging.sh
   .gitkeep
+  configure_s3_cors.py
   grant_premium_access.py
   import_questions.py
   seed_alfacaveira_admin.py
@@ -2050,396 +2052,6 @@ async def list_topics(
 
 <file path="app/api/v1/platform/__init__.py">
 """Endpoints HTTP do contexto 'platform'."""
-</file>
-
-<file path="app/api/v1/platform/comments.py">
-# app/api/v1/platform/comments.py
-"""Endpoints HTTP de comentários."""
-
-import uuid
-from typing import Annotated, List
-
-import structlog
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.schemas.platform.comment import (
-    CommentCreateRequest,
-    CommentListResponse,
-    CommentModerateRequest,
-    CommentReportRequest,
-    CommentResponse,
-    CommentUpdateRequest,
-    CommentVoteRequest,
-)
-from app.security.dependencies import CurrentAdminUser, CurrentUser
-from app.services.platform.comment_service import CommentService
-
-router = APIRouter()
-logger = structlog.get_logger(__name__)
-
-
-def get_comment_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> CommentService:
-    return CommentService(session)
-
-
-CommentServiceDep = Annotated[CommentService, Depends(get_comment_service)]
-
-
-# ==================================================================== #
-# LEITURA
-# ==================================================================== #
-
-
-@router.get("/question/{question_id}", response_model=Envelope[CommentListResponse])
-async def list_comments(
-    question_id: uuid.UUID,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    cursor: Annotated[str | None, Query()] = None,
-) -> Envelope[CommentListResponse]:
-    """Lista comentários de uma questão."""
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    comments, total = await comment_service.list_by_question(
-        question_id=question_id,
-        user_id=current_user.id,
-        limit=limit,
-        cursor_id=cursor_id,
-    )
-
-    # 🔥 CORREÇÃO: Construir respostas manualmente para evitar MissingGreenlet
-    items = []
-    for comment in comments:
-        # Converter campos básicos
-        comment_dict = {
-            "id": comment.id,
-            "user_id": comment.user_id,
-            "question_id": comment.question_id,
-            "parent_id": comment.parent_id,
-            "content": comment.content,
-            "status": comment.status,
-            "upvotes": comment.upvotes,
-            "downvotes": comment.downvotes,
-            "report_count": comment.report_count,
-            "is_edited": comment.is_edited,
-            "edited_at": comment.edited_at,
-            "created_at": comment.created_at,
-            "updated_at": comment.updated_at,
-            "user_name": getattr(comment, 'user_name', None),
-            "user_initials": getattr(comment, 'user_initials', None),
-            "user_vote": getattr(comment, 'user_vote', None),
-            "can_edit": getattr(comment, 'can_edit', False),
-            "can_delete": getattr(comment, 'can_delete', False),
-            "is_owner": getattr(comment, 'is_owner', False),
-            "replies": []
-        }
-        
-        # Adicionar replies se existirem
-        if hasattr(comment, '_replies') and comment._replies:
-            for reply in comment._replies:
-                reply_dict = {
-                    "id": reply.id,
-                    "user_id": reply.user_id,
-                    "question_id": reply.question_id,
-                    "parent_id": reply.parent_id,
-                    "content": reply.content,
-                    "status": reply.status,
-                    "upvotes": reply.upvotes,
-                    "downvotes": reply.downvotes,
-                    "report_count": reply.report_count,
-                    "is_edited": reply.is_edited,
-                    "edited_at": reply.edited_at,
-                    "created_at": reply.created_at,
-                    "updated_at": reply.updated_at,
-                    "user_name": getattr(reply, 'user_name', None),
-                    "user_initials": getattr(reply, 'user_initials', None),
-                    "user_vote": getattr(reply, 'user_vote', None),
-                    "can_edit": getattr(reply, 'can_edit', False),
-                    "can_delete": getattr(reply, 'can_delete', False),
-                    "is_owner": getattr(reply, 'is_owner', False),
-                    "replies": []
-                }
-                comment_dict["replies"].append(CommentResponse(**reply_dict))
-        
-        items.append(CommentResponse(**comment_dict))
-
-    next_cursor = (
-        CursorPage.encode_cursor(str(comments[-1].id)) if len(comments) == limit else None
-    )
-
-    return Envelope(
-        data=CommentListResponse(
-            items=items,
-            total=total,
-            next_cursor=next_cursor,
-            has_more=next_cursor is not None,
-        )
-    )
-
-
-@router.get("/{comment_id}", response_model=Envelope[CommentResponse])
-async def get_comment(
-    comment_id: uuid.UUID,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> Envelope[CommentResponse]:
-    """Detalhe de um comentário."""
-    comment = await comment_service.get_comment(comment_id, current_user.id)
-    
-    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
-    comment_dict = {
-        "id": comment.id,
-        "user_id": comment.user_id,
-        "question_id": comment.question_id,
-        "parent_id": comment.parent_id,
-        "content": comment.content,
-        "status": comment.status,
-        "upvotes": comment.upvotes,
-        "downvotes": comment.downvotes,
-        "report_count": comment.report_count,
-        "is_edited": comment.is_edited,
-        "edited_at": comment.edited_at,
-        "created_at": comment.created_at,
-        "updated_at": comment.updated_at,
-        "user_name": getattr(comment, 'user_name', None),
-        "user_initials": getattr(comment, 'user_initials', None),
-        "user_vote": getattr(comment, 'user_vote', None),
-        "can_edit": getattr(comment, 'can_edit', False),
-        "can_delete": getattr(comment, 'can_delete', False),
-        "is_owner": getattr(comment, 'is_owner', False),
-        "replies": []
-    }
-    
-    return Envelope(data=CommentResponse(**comment_dict))
-
-
-# ==================================================================== #
-# ESCRITA
-# ==================================================================== #
-
-
-@router.post(
-    "",
-    response_model=Envelope[CommentResponse],
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_comment(
-    body: CommentCreateRequest,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> Envelope[CommentResponse]:
-    """Cria um novo comentário."""
-    comment = await comment_service.create_comment(
-        user_id=current_user.id,
-        data=body,
-    )
-    
-    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
-    comment_dict = {
-        "id": comment.id,
-        "user_id": comment.user_id,
-        "question_id": comment.question_id,
-        "parent_id": comment.parent_id,
-        "content": comment.content,
-        "status": comment.status,
-        "upvotes": comment.upvotes,
-        "downvotes": comment.downvotes,
-        "report_count": comment.report_count,
-        "is_edited": comment.is_edited,
-        "edited_at": comment.edited_at,
-        "created_at": comment.created_at,
-        "updated_at": comment.updated_at,
-        "user_name": getattr(comment, 'user_name', None),
-        "user_initials": getattr(comment, 'user_initials', None),
-        "user_vote": getattr(comment, 'user_vote', None),
-        "can_edit": getattr(comment, 'can_edit', False),
-        "can_delete": getattr(comment, 'can_delete', False),
-        "is_owner": getattr(comment, 'is_owner', False),
-        "replies": []
-    }
-    
-    return Envelope(data=CommentResponse(**comment_dict))
-
-
-# app/api/v1/platform/comments.py
-
-@router.put("/{comment_id}", response_model=Envelope[CommentResponse])
-async def update_comment(
-    comment_id: uuid.UUID,
-    body: CommentUpdateRequest,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> Envelope[CommentResponse]:
-    """Edita um comentário existente."""
-    # 🔥 CORREÇÃO: o try/except aqui capturava QUALQUER exceção (inclusive
-    # NotFoundError/ConflictError do domínio) e devolvia
-    # `Envelope(data=None, error=None)`. Isso é inválido: o response_model
-    # declarado é `Envelope[CommentResponse]`, que exige `data` não-nulo —
-    # o FastAPI tentava validar/serializar esse retorno contra o schema e
-    # falhava, gerando uma exceção NÃO tratada (sem handler genérico
-    # registrado, isso resultava em resposta vazia/corrompida para o
-    # cliente). Além disso, engolir o erro escondia falhas reais do
-    # usuário (ex: "comentário não encontrado" virava uma resposta "vazia
-    # e sem erro"). Agora deixamos a exceção propagar — os handlers em
-    # `app/core/exceptions.py` (DomainError + genérico) cuidam de
-    # devolver o envelope de erro correto com o status HTTP certo.
-    comment = await comment_service.update_comment(
-        comment_id=comment_id,
-        user_id=current_user.id,
-        data=body,
-    )
-
-    # Converter manualmente para evitar MissingGreenlet
-    comment_dict = {
-        "id": comment.id,
-        "user_id": comment.user_id,
-        "question_id": comment.question_id,
-        "parent_id": comment.parent_id,
-        "content": comment.content,
-        "status": comment.status,
-        "upvotes": comment.upvotes,
-        "downvotes": comment.downvotes,
-        "report_count": comment.report_count,
-        "is_edited": comment.is_edited,
-        "edited_at": comment.edited_at,
-        "created_at": comment.created_at,
-        "updated_at": comment.updated_at,
-        "user_name": getattr(comment, 'user_name', None),
-        "user_initials": getattr(comment, 'user_initials', None),
-        "user_vote": getattr(comment, 'user_vote', None),
-        "can_edit": getattr(comment, 'can_edit', False),
-        "can_delete": getattr(comment, 'can_delete', False),
-        "is_owner": getattr(comment, 'is_owner', False),
-        "replies": []
-    }
-
-    return Envelope(data=CommentResponse(**comment_dict))
-
-
-@router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_comment(
-    comment_id: uuid.UUID,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> None:
-    """Deleta (soft delete) um comentário."""
-    try:
-        await comment_service.delete_comment(
-            comment_id=comment_id,
-            user_id=current_user.id,
-        )
-        # 🔥 CORREÇÃO: Retornar None para 204 No Content
-        return None
-    except Exception:
-        logger.exception("comment.delete_failed", comment_id=str(comment_id))
-        raise
-
-
-# ==================================================================== #
-# VOTAÇÃO
-# ==================================================================== #
-
-
-@router.post("/{comment_id}/vote", response_model=Envelope[dict])
-async def vote_comment(
-    comment_id: uuid.UUID,
-    body: CommentVoteRequest,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> Envelope[dict]:
-    """Vota em um comentário (up/down)."""
-    result = await comment_service.vote_comment(
-        comment_id=comment_id,
-        user_id=current_user.id,
-        vote_type=body.vote_type,
-    )
-    return Envelope(data=result)
-
-
-# ==================================================================== #
-# DENÚNCIA
-# ==================================================================== #
-
-
-@router.post("/{comment_id}/report", status_code=status.HTTP_204_NO_CONTENT)
-async def report_comment(
-    comment_id: uuid.UUID,
-    body: CommentReportRequest,
-    current_user: CurrentUser,
-    comment_service: CommentServiceDep,
-) -> None:
-    """Denuncia um comentário."""
-    try:
-        await comment_service.report_comment(
-            comment_id=comment_id,
-            user_id=current_user.id,
-            reason=body.reason,
-        )
-        # 🔥 CORREÇÃO: Retornar None para 204 No Content
-        return None
-    except Exception:
-        logger.exception("comment.report_failed", comment_id=str(comment_id))
-        raise
-
-
-# ==================================================================== #
-# MODERAÇÃO (Admin)
-# ==================================================================== #
-
-
-@router.post("/{comment_id}/moderate", response_model=Envelope[CommentResponse])
-async def moderate_comment(
-    comment_id: uuid.UUID,
-    body: CommentModerateRequest,
-    current_user: CurrentAdminUser,
-    comment_service: CommentServiceDep,
-) -> Envelope[CommentResponse]:
-    """Ação de moderação em um comentário (apenas admin)."""
-    # 🔥 CORREÇÃO P0 (2026-08-12): `action`/`reason` eram parâmetros soltos,
-    # interpretados pelo FastAPI como query params — o frontend envia no
-    # corpo JSON (padrão igual a vote/report), causando 422. Ver
-    # docs/IMPLEMENTATION_LOG.md e ADR-020 em docs/DECISIONS.md.
-    comment = await comment_service.moderate_comment(
-        comment_id=comment_id,
-        admin_user_id=current_user.id,
-        action=body.action,
-        reason=body.reason,
-    )
-    
-    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
-    comment_dict = {
-        "id": comment.id,
-        "user_id": comment.user_id,
-        "question_id": comment.question_id,
-        "parent_id": comment.parent_id,
-        "content": comment.content,
-        "status": comment.status,
-        "upvotes": comment.upvotes,
-        "downvotes": comment.downvotes,
-        "report_count": comment.report_count,
-        "is_edited": comment.is_edited,
-        "edited_at": comment.edited_at,
-        "created_at": comment.created_at,
-        "updated_at": comment.updated_at,
-        "user_name": getattr(comment, 'user_name', None),
-        "user_initials": getattr(comment, 'user_initials', None),
-        "user_vote": getattr(comment, 'user_vote', None),
-        "can_edit": getattr(comment, 'can_edit', False),
-        "can_delete": getattr(comment, 'can_delete', False),
-        "is_owner": getattr(comment, 'is_owner', False),
-        "replies": []
-    }
-    
-    return Envelope(data=CommentResponse(**comment_dict))
 </file>
 
 <file path="app/api/v1/platform/notifications.py">
@@ -6485,431 +6097,6 @@ class NotebookTagRepository(BaseRepository[NotebookTag]):
 """Repositórios do contexto 'platform'."""
 </file>
 
-<file path="app/repositories/platform/comment_repository.py">
-# app/repositories/platform/comment_repository.py
-"""Repositório de acesso a dados de `Comment`."""
-
-import uuid
-from datetime import datetime
-from typing import Optional, List
-
-import structlog
-from sqlalchemy import func, select, text, update
-from sqlalchemy.orm import selectinload
-
-from app.models.enums import CommentStatus, CommentVoteType
-from app.models.platform.comment import Comment, CommentReport, CommentVote
-from app.repositories.base import BaseRepository
-
-logger = structlog.get_logger(__name__)
-
-_RELATIONS = (
-    selectinload(Comment.user),
-    selectinload(Comment.votes),
-    selectinload(Comment.reports),
-)
-
-
-class CommentRepository(BaseRepository[Comment]):
-    """Repositório de comentários."""
-
-    model = Comment
-
-    async def get_with_relations(self, comment_id: uuid.UUID) -> Comment | None:
-        """Busca um comentário com todas as relações carregadas."""
-        stmt = (
-            select(Comment)
-            .where(Comment.id == comment_id)
-            .options(*_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_owned(self, comment_id: uuid.UUID, user_id: uuid.UUID) -> Comment | None:
-        """Busca um comentário restrito ao dono."""
-        stmt = (
-            select(Comment)
-            .where(Comment.id == comment_id, Comment.user_id == user_id)
-            .options(*_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def list_by_question(
-        self,
-        question_id: uuid.UUID,
-        limit: int = 50,
-        cursor_id: Optional[uuid.UUID] = None,
-        include_replies: bool = True,
-    ) -> List[Comment]:
-        """Lista comentários de uma questão (apenas principais, não respostas)."""
-        try:
-            stmt = (
-                select(Comment)
-                .where(
-                    Comment.question_id == question_id,
-                    Comment.parent_id.is_(None),
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-                .options(*_RELATIONS)
-                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
-                .limit(limit)
-            )
-
-            if cursor_id:
-                cursor = await self.get_by_id(cursor_id)
-                if cursor:
-                    stmt = stmt.where(Comment.created_at < cursor.created_at)
-
-            result = await self.session.execute(stmt)
-            comments = list(result.scalars().unique().all())
-
-            # 🔥 CORREÇÃO: Carregar replies separadamente, sem atribuir à relação ORM
-            if include_replies and comments:
-                for comment in comments:
-                    replies = await self.list_replies(comment.id)
-                    # Armazenar em atributo não-ORM
-                    setattr(comment, '_replies', replies)
-
-            return comments
-        except Exception as e:
-            logger.error("comments.list_by_question_error", question_id=str(question_id), error=str(e))
-            return []
-
-    async def list_by_question_with_batch(
-        self,
-        question_id: uuid.UUID,
-        limit: int = 50,
-        cursor_id: Optional[uuid.UUID] = None,
-        include_replies: bool = True,
-    ) -> tuple[List[Comment], int]:
-        """🔥 OTIMIZAÇÃO: Lista comentários com batch loading para replies."""
-        try:
-            # Buscar comentários principais
-            stmt = (
-                select(Comment)
-                .where(
-                    Comment.question_id == question_id,
-                    Comment.parent_id.is_(None),
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-                .options(*_RELATIONS)
-                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
-                .limit(limit)
-            )
-
-            if cursor_id:
-                cursor = await self.get_by_id(cursor_id)
-                if cursor:
-                    stmt = stmt.where(Comment.created_at < cursor.created_at)
-
-            result = await self.session.execute(stmt)
-            comments = list(result.scalars().unique().all())
-
-            # 🔥 OTIMIZAÇÃO: Batch loading de replies
-            if include_replies and comments:
-                parent_ids = [c.id for c in comments]
-                replies_stmt = (
-                    select(Comment)
-                    .where(
-                        Comment.parent_id.in_(parent_ids),
-                        Comment.status == CommentStatus.PUBLICADO,
-                        Comment.deleted_at.is_(None),
-                    )
-                    .options(*_RELATIONS)
-                    .order_by(Comment.created_at.asc())
-                )
-                replies_result = await self.session.execute(replies_stmt)
-                replies = list(replies_result.scalars().unique().all())
-
-                # Agrupar replies por parent_id
-                replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
-                for reply in replies:
-                    if reply.parent_id not in replies_by_parent:
-                        replies_by_parent[reply.parent_id] = []
-                    replies_by_parent[reply.parent_id].append(reply)
-
-                for comment in comments:
-                    setattr(comment, '_replies', replies_by_parent.get(comment.id, []))
-
-            total = await self.count_by_question(question_id)
-            return comments, total
-
-        except Exception as e:
-            logger.error("comments.list_by_question_batch_error", question_id=str(question_id), error=str(e))
-            return [], 0
-
-    async def list_replies(self, parent_id: uuid.UUID) -> List[Comment]:
-        """Lista respostas de um comentário."""
-        try:
-            stmt = (
-                select(Comment)
-                .where(
-                    Comment.parent_id == parent_id,
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-                .options(*_RELATIONS)
-                .order_by(Comment.created_at.asc())
-            )
-            result = await self.session.execute(stmt)
-            return list(result.scalars().unique().all())
-        except Exception as e:
-            logger.error("comments.list_replies_error", parent_id=str(parent_id), error=str(e))
-            return []
-
-    async def count_by_question(self, question_id: uuid.UUID) -> int:
-        """Conta comentários de uma questão."""
-        try:
-            stmt = (
-                select(func.count())
-                .select_from(Comment)
-                .where(
-                    Comment.question_id == question_id,
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-            )
-            result = await self.session.execute(stmt)
-            return result.scalar() or 0
-        except Exception as e:
-            logger.error("comments.count_by_question_error", question_id=str(question_id), error=str(e))
-            return 0
-
-    async def get_vote(self, user_id: uuid.UUID, comment_id: uuid.UUID) -> CommentVote | None:
-        """Busca o voto de um usuário em um comentário."""
-        stmt = select(CommentVote).where(
-            CommentVote.user_id == user_id,
-            CommentVote.comment_id == comment_id,
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def upsert_vote(
-        self,
-        user_id: uuid.UUID,
-        comment_id: uuid.UUID,
-        vote_type: CommentVoteType,
-    ) -> CommentVote | None:
-        """Cria ou atualiza um voto."""
-        existing = await self.get_vote(user_id, comment_id)
-
-        if existing:
-            if existing.vote_type == vote_type:
-                # Remove o voto (toggle)
-                await self.session.delete(existing)
-                await self.session.flush()
-                await self._update_vote_counts(comment_id)
-                return None
-            else:
-                # Muda o voto
-                existing.vote_type = vote_type
-                await self.session.flush()
-                await self._update_vote_counts(comment_id)
-                return existing
-
-        # Novo voto
-        vote = CommentVote(
-            user_id=user_id,
-            comment_id=comment_id,
-            vote_type=vote_type,
-        )
-        self.session.add(vote)
-        await self.session.flush()
-        await self._update_vote_counts(comment_id)
-        return vote
-
-    async def _update_vote_counts(self, comment_id: uuid.UUID) -> None:
-        """Atualiza a contagem de votos de um comentário."""
-        # Contar upvotes
-        up_stmt = select(func.count()).select_from(CommentVote).where(
-            CommentVote.comment_id == comment_id,
-            CommentVote.vote_type == CommentVoteType.UP,
-        )
-        up_result = await self.session.execute(up_stmt)
-        upvotes = up_result.scalar() or 0
-
-        # Contar downvotes
-        down_stmt = select(func.count()).select_from(CommentVote).where(
-            CommentVote.comment_id == comment_id,
-            CommentVote.vote_type == CommentVoteType.DOWN,
-        )
-        down_result = await self.session.execute(down_stmt)
-        downvotes = down_result.scalar() or 0
-
-        # Atualizar comentário
-        stmt = (
-            update(Comment)
-            .where(Comment.id == comment_id)
-            .values(upvotes=upvotes, downvotes=downvotes)
-        )
-        await self.session.execute(stmt)
-        await self.session.flush()
-
-    async def create_report(
-        self,
-        user_id: uuid.UUID,
-        comment_id: uuid.UUID,
-        reason: str,
-    ) -> CommentReport:
-        """Cria uma denúncia para um comentário."""
-        report = CommentReport(
-            user_id=user_id,
-            comment_id=comment_id,
-            reason=reason,
-        )
-        self.session.add(report)
-        await self.session.flush()
-
-        # Incrementar contagem de denúncias
-        stmt = (
-            update(Comment)
-            .where(Comment.id == comment_id)
-            .values(report_count=Comment.report_count + 1)
-        )
-        await self.session.execute(stmt)
-        await self.session.flush()
-
-        return report
-
-    async def get_reports_paginated(
-        self,
-        limit: int = 50,
-        cursor_id: Optional[uuid.UUID] = None,
-    ) -> list[CommentReport]:
-        """Lista denúncias paginadas."""
-        stmt = (
-            select(CommentReport)
-            .where(CommentReport.resolved_at.is_(None))
-            .order_by(CommentReport.created_at.asc())
-            .limit(limit)
-        )
-        if cursor_id:
-            cursor = await self.get_by_id(cursor_id)
-            if cursor:
-                stmt = stmt.where(CommentReport.created_at > cursor.created_at)
-
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    # ==========================================================================
-    # 🔥 NOVOS MÉTODOS PARA P2 — PERFORMANCE
-    # ==========================================================================
-
-    async def get_comments_with_pagination(
-        self,
-        question_id: uuid.UUID,
-        limit: int = 20,
-        cursor: Optional[uuid.UUID] = None,
-    ) -> tuple[List[Comment], bool]:
-        """🔥 P2: Paginação cursor-based para virtualização."""
-        try:
-            stmt = (
-                select(Comment)
-                .where(
-                    Comment.question_id == question_id,
-                    Comment.parent_id.is_(None),
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-                .options(*_RELATIONS)
-                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
-                .limit(limit + 1)  # Buscar um a mais para saber se há mais
-            )
-
-            if cursor:
-                stmt = stmt.where(Comment.created_at < cursor)
-
-            result = await self.session.execute(stmt)
-            items = list(result.scalars().unique().all())
-
-            has_more = len(items) > limit
-            if has_more:
-                items = items[:limit]
-
-            # Carregar replies em batch
-            if items:
-                parent_ids = [c.id for c in items]
-                replies_stmt = (
-                    select(Comment)
-                    .where(
-                        Comment.parent_id.in_(parent_ids),
-                        Comment.status == CommentStatus.PUBLICADO,
-                        Comment.deleted_at.is_(None),
-                    )
-                    .options(*_RELATIONS)
-                    .order_by(Comment.created_at.asc())
-                )
-                replies_result = await self.session.execute(replies_stmt)
-                replies = list(replies_result.scalars().unique().all())
-
-                replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
-                for reply in replies:
-                    if reply.parent_id not in replies_by_parent:
-                        replies_by_parent[reply.parent_id] = []
-                    replies_by_parent[reply.parent_id].append(reply)
-
-                for comment in items:
-                    setattr(comment, '_replies', replies_by_parent.get(comment.id, []))
-
-            return items, has_more
-
-        except Exception as e:
-            logger.error("comments.get_comments_with_pagination_error", question_id=str(question_id), error=str(e))
-            return [], False
-
-    async def count_comments_by_question(self, question_id: uuid.UUID) -> int:
-        """🔥 P2: Contagem rápida de comentários."""
-        try:
-            stmt = (
-                select(func.count())
-                .select_from(Comment)
-                .where(
-                    Comment.question_id == question_id,
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-            )
-            result = await self.session.execute(stmt)
-            return result.scalar() or 0
-        except Exception as e:
-            logger.error("comments.count_comments_by_question_error", question_id=str(question_id), error=str(e))
-            return 0
-
-    async def get_replies_batch(self, parent_ids: List[uuid.UUID]) -> dict[uuid.UUID, List[Comment]]:
-        """🔥 P2: Busca replies em lote para múltiplos comentários."""
-        try:
-            if not parent_ids:
-                return {}
-
-            stmt = (
-                select(Comment)
-                .where(
-                    Comment.parent_id.in_(parent_ids),
-                    Comment.status == CommentStatus.PUBLICADO,
-                    Comment.deleted_at.is_(None),
-                )
-                .options(*_RELATIONS)
-                .order_by(Comment.created_at.asc())
-            )
-            result = await self.session.execute(stmt)
-            replies = list(result.scalars().unique().all())
-
-            replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
-            for reply in replies:
-                if reply.parent_id not in replies_by_parent:
-                    replies_by_parent[reply.parent_id] = []
-                replies_by_parent[reply.parent_id].append(reply)
-
-            return replies_by_parent
-
-        except Exception as e:
-            logger.error("comments.get_replies_batch_error", error=str(e))
-            return {}
-</file>
-
 <file path="app/repositories/platform/notification_repository.py">
 # app/repositories/platform/notification_repository.py
 """Repositório de notificações.
@@ -7782,135 +6969,6 @@ class NotebookTagListResponse(BaseModel):
 
 <file path="app/schemas/platform/__init__.py">
 """Schemas do contexto 'platform'."""
-</file>
-
-<file path="app/schemas/platform/comment.py">
-# app/schemas/platform/comment.py
-"""Schemas de request/response de comentários."""
-
-import uuid
-from datetime import datetime
-from typing import Optional, List, Any
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from app.models.enums import CommentStatus
-
-
-class CommentVoteRequest(BaseModel):
-    """Request para votar em um comentário."""
-
-    vote_type: str = Field(description="'up' ou 'down'")
-
-
-class CommentReportRequest(BaseModel):
-    """Request para denunciar um comentário."""
-
-    reason: str = Field(min_length=1, max_length=500, description="Motivo da denúncia")
-
-
-class CommentModerateRequest(BaseModel):
-    """Request para ação de moderação em um comentário (admin).
-
-    🔥 CORREÇÃO P0 (2026-08-12): antes desse schema, `action`/`reason` eram
-    parâmetros soltos na assinatura do endpoint, o que o FastAPI interpreta
-    como query params. O frontend sempre enviou `{ action }` no corpo JSON,
-    causando 422 (campo obrigatório ausente na query). Ver ADR-020 em
-    docs/DECISIONS.md e docs/IMPLEMENTATION_LOG.md.
-    """
-
-    action: str = Field(description="'remove', 'block' ou 'restore'")
-    reason: str | None = Field(
-        default=None, max_length=500, description="Motivo da ação de moderação"
-    )
-
-    @field_validator("action")
-    @classmethod
-    def validate_action(cls, v: str) -> str:
-        allowed = {"remove", "block", "restore"}
-        if v not in allowed:
-            raise ValueError(f"Ação inválida: {v}. Deve ser uma de {sorted(allowed)}")
-        return v
-
-
-class CommentCreateRequest(BaseModel):
-    """Request para criar um comentário."""
-
-    question_id: uuid.UUID
-    parent_id: uuid.UUID | None = None
-    content: str = Field(min_length=1, max_length=5000)
-
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("O conteúdo não pode estar vazio")
-        return v.strip()
-
-
-class CommentUpdateRequest(BaseModel):
-    """Request para editar um comentário."""
-
-    content: str = Field(min_length=1, max_length=5000)
-
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("O conteúdo não pode estar vazio")
-        return v.strip()
-
-
-class CommentResponse(BaseModel):
-    """Resposta de um comentário."""
-    
-    model_config = ConfigDict(
-        from_attributes=True,
-        # 🔥 CORREÇÃO CRÍTICA: Ignorar atributos não declarados
-        extra="ignore"
-    )
-
-    id: uuid.UUID
-    user_id: uuid.UUID
-    question_id: uuid.UUID
-    parent_id: uuid.UUID | None
-    content: str
-    status: CommentStatus
-    upvotes: int
-    downvotes: int
-    report_count: int
-    is_edited: bool
-    edited_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-    # Campos extras que serão preenchidos pelo serviço
-    user_name: str | None = Field(default=None, description="Nome do usuário")
-    user_initials: str | None = Field(default=None, description="Iniciais do usuário")
-    user_vote: str | None = Field(default=None, description="Voto do usuário atual")
-    can_edit: bool = Field(default=False, description="Se o usuário atual pode editar")
-    can_delete: bool = Field(default=False, description="Se o usuário atual pode deletar")
-    is_owner: bool = Field(default=False, description="Se o usuário atual é o dono")
-    
-    # 🔥 CORREÇÃO: replies não é um campo ORM
-    # Será populado manualmente, não via validação automática
-    replies: List["CommentResponse"] = Field(
-        default_factory=list,
-        description="Respostas (carregadas separadamente)"
-    )
-
-
-class CommentListResponse(BaseModel):
-    """Lista paginada de comentários."""
-
-    items: list[CommentResponse]
-    total: int
-    next_cursor: str | None = None
-    has_more: bool = False
-
-
-# Necessário para referências recursivas
-CommentResponse.model_rebuild()
 </file>
 
 <file path="app/schemas/platform/notification.py">
@@ -9247,6 +8305,154 @@ BRAND_LOGO_PNG_B64 = (
 )
 </file>
 
+<file path="app/services/export/s3_service.py">
+"""Serviço de armazenamento de imagens das questões em S3, via presigned URL.
+
+O backend NUNCA recebe o binário da imagem — só gera uma URL assinada de
+upload (PUT) que o navegador do admin usa para subir o arquivo direto pro
+bucket. Isso mantém a API leve (não bufferiza arquivo grande) e escala sem
+esforço. O RDS Postgres só guarda a URL final (`question_attachments.url`).
+"""
+
+import uuid
+from typing import BinaryIO
+
+import boto3
+from botocore.client import Config as BotoConfig
+from botocore.exceptions import ClientError
+
+from app.core.config import settings
+from app.core.exceptions import DomainError
+
+ALLOWED_CONTENT_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+
+
+class S3ConfigError(DomainError):
+    """S3 não está configurado corretamente (bucket/URL pública ausentes)."""
+
+    code = "s3_not_configured"
+
+
+class S3UploadValidationError(DomainError):
+    """Tipo de arquivo (ou outro parâmetro) inválido para upload."""
+
+    code = "s3_upload_invalid"
+
+
+def _get_client():
+    if not settings.S3_BUCKET_NAME:
+        raise S3ConfigError(
+            "Upload de imagens não está configurado: defina S3_BUCKET_NAME "
+            "e S3_PUBLIC_BASE_URL nas variáveis de ambiente do backend."
+        )
+    kwargs: dict = {
+        "region_name": settings.S3_REGION,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    # Em produção, prefira a Task Role do ECS (não passe credenciais
+    # explícitas). Local/dev pode usar S3_ACCESS_KEY_ID/SECRET no .env.
+    if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = settings.S3_ACCESS_KEY_ID
+        kwargs["aws_secret_access_key"] = settings.S3_SECRET_ACCESS_KEY
+    return boto3.client("s3", **kwargs)
+
+
+def create_presigned_upload(
+    filename: str,
+    content_type: str,
+    prefix: str | None = None,
+) -> dict:
+    """Gera uma URL assinada de upload (PUT) + a URL pública final do objeto.
+
+    A chave do objeto é gerada no backend (UUID), nunca a partir do nome
+    original do arquivo — evita path traversal, colisão de nomes e
+    vazamento do nome original do arquivo do usuário/admin.
+    """
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise S3UploadValidationError(
+            f"Tipo de arquivo não permitido: '{content_type}'. "
+            f"Aceitos: {', '.join(ALLOWED_CONTENT_TYPES)}."
+        )
+
+    extension = ALLOWED_CONTENT_TYPES[content_type]
+    object_prefix = (prefix or settings.S3_QUESTIONS_PREFIX).strip("/")
+    key = f"{object_prefix}/{uuid.uuid4().hex}{extension}"
+
+    client = _get_client()
+    try:
+        upload_url = client.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={
+                "Bucket": settings.S3_BUCKET_NAME,
+                "Key": key,
+                "ContentType": content_type,
+            },
+            ExpiresIn=settings.S3_PRESIGN_EXPIRES_SECONDS,
+        )
+    except ClientError as exc:
+        raise S3ConfigError(f"Falha ao gerar URL de upload: {exc}") from exc
+
+    public_base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
+    return {
+        "upload_url": upload_url,
+        "public_url": f"{public_base}/{key}",
+        "key": key,
+        "expires_in": settings.S3_PRESIGN_EXPIRES_SECONDS,
+    }
+
+def upload_profile_avatar(fileobj: BinaryIO, content_type: str, prefix: str | None = None) -> dict:
+    """Faz upload server-side do avatar para eliminar CORS direto do navegador."""
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise S3UploadValidationError(
+            f"Tipo de arquivo não permitido: '{content_type}'. "
+            f"Aceitos: {', '.join(ALLOWED_CONTENT_TYPES)}."
+        )
+
+    object_prefix = (prefix or settings.S3_PROFILE_PREFIX).strip("/")
+    extension = ALLOWED_CONTENT_TYPES[content_type]
+    key = f"{object_prefix}/{uuid.uuid4().hex}{extension}"
+    client = _get_client()
+
+    try:
+        client.upload_fileobj(
+            fileobj,
+            settings.S3_BUCKET_NAME,
+            key,
+            ExtraArgs={"ContentType": content_type},
+        )
+    except ClientError as exc:
+        raise S3ConfigError(f"Falha ao enviar avatar para o S3: {exc}") from exc
+
+    public_base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
+    return {
+        "key": key,
+        "public_url": f"{public_base}/{key}",
+    }
+
+
+def create_presigned_download(key: str) -> str:
+    """Gera URL assinada de GET sem assinar Content-Type."""
+    if not settings.S3_BUCKET_NAME:
+        raise S3ConfigError("S3_BUCKET_NAME não configurado.")
+
+    client = _get_client()
+    try:
+        return client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.S3_BUCKET_NAME,
+                "Key": key,
+            },
+            ExpiresIn=settings.S3_PRESIGN_EXPIRES_SECONDS,
+        )
+    except ClientError as exc:
+        raise S3ConfigError(f"Falha ao gerar URL de leitura: {exc}") from exc
+</file>
+
 <file path="app/services/identity/user_service.py">
 """Regras de negócio de conta, perfil e administração de usuários."""
 
@@ -9462,359 +8668,6 @@ class CommentCacheService:
 
         await self._cache.clear_pattern(f"comments:question:{question_id}:*")
         logger.info("comments.cache_invalidated", question_id=str(question_id))
-</file>
-
-<file path="app/services/platform/comment_service.py">
-# app/services/platform/comment_service.py
-"""Regras de negócio de comentários."""
-
-import uuid
-from datetime import UTC, datetime
-from typing import Optional, List
-
-import structlog
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
-from app.database.uow import UnitOfWork
-from app.models.enums import CommentStatus, CommentVoteType
-from app.models.platform.comment import Comment, CommentReport
-from app.repositories.content.question_repository import QuestionRepository
-from app.repositories.platform.comment_repository import CommentRepository
-from app.schemas.platform.comment import CommentCreateRequest, CommentUpdateRequest
-from app.services.platform.notification_service import NotificationService
-
-logger = structlog.get_logger(__name__)
-
-
-class CommentService:
-    """Serviço de comentários."""
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._comments = CommentRepository(session)
-        self._questions = QuestionRepository(session)
-        self._notification_service = NotificationService(session)
-
-    # ==================================================================== #
-    # LEITURA
-    # ==================================================================== #
-
-    async def get_comment(self, comment_id: uuid.UUID, user_id: uuid.UUID) -> Comment:
-        """Busca um comentário específico."""
-        comment = await self._comments.get_with_relations(comment_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado.")
-        self._enrich_comment(comment, user_id)
-        return comment
-
-    async def list_by_question(
-        self,
-        question_id: uuid.UUID,
-        user_id: uuid.UUID,
-        limit: int = 50,
-        cursor_id: Optional[uuid.UUID] = None,
-    ) -> tuple[List[Comment], int]:
-        """Lista comentários de uma questão."""
-        # Verificar se a questão existe
-        question = await self._questions.get_by_id(question_id)
-        if not question:
-            raise NotFoundError("Questão não encontrada.")
-
-        # Buscar comentários principais
-        comments = await self._comments.list_by_question(
-            question_id=question_id,
-            limit=limit,
-            cursor_id=cursor_id,
-            include_replies=False,
-        )
-
-        # Contar total
-        total = await self._comments.count_by_question(question_id)
-
-        # Enriquecer cada comentário e carregar replies
-        for comment in comments:
-            self._enrich_comment(comment, user_id)
-
-            # Carregar replies manualmente
-            replies = await self._comments.list_replies(comment.id)
-            for reply in replies:
-                self._enrich_comment(reply, user_id)
-
-            # Armazenar replies em atributo não-ORM
-            setattr(comment, '_replies', replies)
-
-        return comments, total
-
-    def _enrich_comment(self, comment: Comment, user_id: uuid.UUID) -> None:
-        """Adiciona metadados ao comentário para o usuário atual."""
-        # Verificar se é dono
-        comment.is_owner = comment.user_id == user_id
-
-        # Adicionar nome do usuário
-        if comment.user:
-            comment.user_name = comment.user.full_name
-            # Gerar iniciais
-            name_parts = comment.user.full_name.split()
-            if len(name_parts) >= 2:
-                comment.user_initials = f"{name_parts[0][0]}{name_parts[-1][0]}".upper()
-            elif name_parts:
-                comment.user_initials = name_parts[0][:2].upper()
-            else:
-                comment.user_initials = "??"
-        else:
-            comment.user_name = "Usuário"
-            comment.user_initials = "??"
-
-        # Verificar se o usuário atual votou
-        comment.user_vote = None
-        if hasattr(comment, 'votes'):
-            for vote in comment.votes:
-                if vote.user_id == user_id:
-                    comment.user_vote = vote.vote_type.value
-                    break
-
-        # Permissões
-        comment.can_edit = comment.is_owner and comment.status == CommentStatus.PUBLICADO
-        comment.can_delete = comment.is_owner and comment.deleted_at is None
-
-    # ==================================================================== #
-    # ESCRITA
-    # ==================================================================== #
-
-    async def create_comment(
-        self,
-        user_id: uuid.UUID,
-        data: CommentCreateRequest,
-    ) -> Comment:
-        """Cria um novo comentário."""
-        # Verificar se a questão existe
-        question = await self._questions.get_by_id(data.question_id)
-        if not question:
-            raise NotFoundError("Questão não encontrada.")
-
-        # Verificar se o pai existe (se for resposta)
-        if data.parent_id:
-            parent = await self._comments.get_by_id(data.parent_id)
-            if not parent or parent.question_id != data.question_id:
-                raise NotFoundError("Comentário pai não encontrado.")
-
-        # Verificar se o usuário já comentou nesta questão
-        if not data.parent_id:
-            stmt = select(Comment).where(
-                Comment.user_id == user_id,
-                Comment.question_id == data.question_id,
-                Comment.parent_id.is_(None),
-                Comment.status == CommentStatus.PUBLICADO,
-                Comment.deleted_at.is_(None),
-            )
-            result = await self._session.execute(stmt)
-            if result.scalar_one_or_none():
-                raise ConflictError("Você já comentou nesta questão.")
-
-        comment = Comment(
-            user_id=user_id,
-            question_id=data.question_id,
-            parent_id=data.parent_id,
-            content=data.content,
-            status=CommentStatus.PUBLICADO,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._comments.add(comment)
-            await self._session.flush()
-
-        # 🔥 NOTIFICAÇÃO: Notificar autor da questão sobre novo comentário
-        # Erros aqui NUNCA devem bloquear a criação do comentário, que já
-        # foi persistida e commitada acima. `logger.exception` grava o
-        # stacktrace completo (em vez de `print`, que não aparece de forma
-        # confiável em produção nem é estruturado para agregação de logs).
-        try:
-            if not data.parent_id and question.created_by and question.created_by != user_id:
-                await self._notification_service.notify_new_comment(
-                    question_id=data.question_id,
-                    comment_id=comment.id,
-                    comment_author_id=user_id,
-                    question_author_id=question.created_by,
-                    comment_content=comment.content,
-                )
-
-            # 🔥 NOTIFICAÇÃO: Notificar autor do comentário pai sobre nova resposta
-            if data.parent_id:
-                parent_comment = await self._comments.get_by_id(data.parent_id)
-                if parent_comment and parent_comment.user_id != user_id:
-                    await self._notification_service.notify_new_reply(
-                        parent_comment_id=data.parent_id,
-                        reply_id=comment.id,
-                        reply_author_id=user_id,
-                        parent_author_id=parent_comment.user_id,
-                        reply_content=comment.content,
-                    )
-        except Exception:
-            # Log completo do erro (com traceback), mas não bloqueia a
-            # criação do comentário — o comentário já foi persistido.
-            logger.exception(
-                "comment.notification_failed",
-                comment_id=str(comment.id),
-                question_id=str(data.question_id),
-            )
-
-        # Recarregar com relações
-        return await self._comments.get_with_relations(comment.id)
-
-    async def update_comment(
-        self,
-        comment_id: uuid.UUID,
-        user_id: uuid.UUID,
-        data: CommentUpdateRequest,
-    ) -> Comment:
-        """Edita um comentário existente."""
-        comment = await self._comments.get_owned(comment_id, user_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado ou não é seu.")
-
-        if comment.deleted_at:
-            raise ConflictError("Este comentário foi deletado.")
-
-        if comment.status != CommentStatus.PUBLICADO:
-            raise ConflictError("Este comentário não pode ser editado.")
-
-        # Atualizar o conteúdo
-        comment.content = data.content
-        comment.is_edited = True
-        comment.edited_at = datetime.now(UTC)
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-            await self._session.refresh(comment)
-
-        # Recarregar com todas as relações
-        return await self._comments.get_with_relations(comment.id)
-
-    async def delete_comment(
-        self,
-        comment_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> None:
-        """Deleta (soft delete) um comentário."""
-        comment = await self._comments.get_owned(comment_id, user_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado ou não é seu.")
-
-        comment.deleted_at = datetime.now(UTC)
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-
-    async def vote_comment(
-        self,
-        comment_id: uuid.UUID,
-        user_id: uuid.UUID,
-        vote_type: str,
-    ) -> dict:
-        """Vota em um comentário."""
-        comment = await self._comments.get_by_id(comment_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado.")
-
-        if comment.user_id == user_id:
-            raise ForbiddenError("Você não pode votar no seu próprio comentário.")
-
-        vote_enum = CommentVoteType.UP if vote_type == "up" else CommentVoteType.DOWN
-
-        async with UnitOfWork(self._session):
-            vote = await self._comments.upsert_vote(
-                user_id=user_id,
-                comment_id=comment_id,
-                vote_type=vote_enum,
-            )
-            await self._session.flush()
-
-        # 🔥 NOTIFICAÇÃO: Notificar autor do comentário sobre o voto
-        try:
-            if comment.user_id != user_id:
-                await self._notification_service.notify_comment_vote(
-                    comment_id=comment_id,
-                    voter_id=user_id,
-                    comment_author_id=comment.user_id,
-                    vote_type=vote_type,
-                )
-        except Exception:
-            logger.exception(
-                "comment.vote_notification_failed",
-                comment_id=str(comment.id),
-            )
-
-        # Buscar comentário atualizado
-        updated = await self._comments.get_by_id(comment_id)
-
-        return {
-            "upvotes": updated.upvotes,
-            "downvotes": updated.downvotes,
-            "user_vote": vote_type if vote else None,
-        }
-
-    # ==================================================================== #
-    # DENÚNCIA E MODERAÇÃO
-    # ==================================================================== #
-
-    async def report_comment(
-        self,
-        comment_id: uuid.UUID,
-        user_id: uuid.UUID,
-        reason: str,
-    ) -> None:
-        """Denuncia um comentário."""
-        comment = await self._comments.get_by_id(comment_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado.")
-
-        if comment.user_id == user_id:
-            raise ForbiddenError("Você não pode denunciar seu próprio comentário.")
-
-        # Verificar se já denunciou
-        stmt = select(CommentReport).where(
-            CommentReport.user_id == user_id,
-            CommentReport.comment_id == comment_id,
-        )
-        result = await self._session.execute(stmt)
-        if result.scalar_one_or_none():
-            raise ConflictError("Você já denunciou este comentário.")
-
-        async with UnitOfWork(self._session):
-            await self._comments.create_report(user_id, comment_id, reason)
-            await self._session.flush()
-
-    async def moderate_comment(
-        self,
-        comment_id: uuid.UUID,
-        admin_user_id: uuid.UUID,
-        action: str,
-        reason: str | None = None,
-    ) -> Comment:
-        """Ação de moderação em um comentário."""
-        comment = await self._comments.get_with_relations(comment_id)
-        if not comment:
-            raise NotFoundError("Comentário não encontrado.")
-
-        if action == "remove":
-            comment.status = CommentStatus.REMOVIDO
-            comment.deleted_at = datetime.now(UTC)
-        elif action == "block":
-            comment.status = CommentStatus.BLOQUEADO
-            comment.deleted_at = datetime.now(UTC)
-        elif action == "restore":
-            comment.status = CommentStatus.PUBLICADO
-            comment.deleted_at = None
-        else:
-            raise ValueError(f"Ação inválida: {action}")
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-            await self._session.refresh(comment)
-
-        return comment
 </file>
 
 <file path="app/services/platform/notification_service.py">
@@ -14646,6 +13499,54 @@ exit 0
 
 <file path="scripts/.gitkeep">
 
+</file>
+
+<file path="scripts/configure_s3_cors.py">
+#!/usr/bin/env python3
+"""Configura CORS mínimo para o bucket S3 de imagens.
+
+O fluxo novo de avatar usa upload server-side e não depende deste CORS.
+A configuração continua útil para anexos de questões que usam presigned PUT.
+"""
+
+import json
+import os
+
+import boto3
+
+
+def main() -> None:
+    bucket = os.environ["S3_BUCKET_NAME"]
+    origins = [
+        value.strip()
+        for value in os.environ.get(
+            "S3_CORS_ALLOWED_ORIGINS",
+            "https://alfacaveira.com,https://www.alfacaveira.com",
+        ).split(",")
+        if value.strip()
+    ]
+
+    config = {
+        "CORSRules": [
+            {
+                "AllowedOrigins": origins,
+                "AllowedMethods": ["GET", "PUT", "HEAD"],
+                "AllowedHeaders": ["*"],
+                "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
+                "MaxAgeSeconds": 3600,
+            }
+        ]
+    }
+
+    boto3.client("s3", region_name=os.getenv("S3_REGION", "sa-east-1")).put_bucket_cors(
+        Bucket=bucket,
+        CORSConfiguration=config,
+    )
+    print(json.dumps(config, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
 </file>
 
 <file path="scripts/grant_premium_access.py">
@@ -20970,160 +19871,6 @@ async def receive_payment_webhook(
     return Envelope(data=PaymentResponse.model_validate(payment))
 </file>
 
-<file path="app/api/v1/identity/users.py">
-"""Endpoints HTTP de conta, perfil e administração de usuários."""
-
-import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.schemas.identity import (
-    AdminUserListItem,
-    AvatarPresignRequest,
-    ChangePasswordRequest,
-    MeResponse,
-    UpdateAccountRequest,
-    UpdateProfileRequest,
-    UpdateUserStatusRequest,
-    UserProfileResponse,
-)
-from app.security.dependencies import CurrentAdminUser, CurrentUser
-from app.services.identity import UserService
-from app.core.config import settings
-from app.services.storage.s3_service import create_presigned_upload
-
-router = APIRouter()
-
-
-def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
-    return UserService(session)
-
-
-UserServiceDep = Annotated[UserService, Depends(get_user_service)]
-
-
-@router.get("/me", response_model=Envelope[MeResponse])
-async def get_me(
-    current_user: CurrentUser, user_service: UserServiceDep
-) -> Envelope[MeResponse]:
-    profile = await user_service.get_profile(current_user.id)
-    return Envelope(
-        data=MeResponse(
-            id=current_user.id,
-            email=current_user.email,
-            full_name=current_user.full_name,
-            is_admin=current_user.is_admin,
-            is_active=current_user.is_active,
-            created_at=current_user.created_at,
-            profile=UserProfileResponse.model_validate(profile),
-        )
-    )
-
-
-@router.patch("/me", response_model=Envelope[MeResponse])
-async def update_me(
-    body: UpdateAccountRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> Envelope[MeResponse]:
-    user = await user_service.update_account(current_user, full_name=body.full_name)
-    profile = await user_service.get_profile(user.id)
-    return Envelope(
-        data=MeResponse(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            is_admin=user.is_admin,
-            is_active=user.is_active,
-            created_at=user.created_at,
-            profile=UserProfileResponse.model_validate(profile),
-        )
-    )
-
-
-
-@router.post("/me/avatar/presign", response_model=Envelope[dict])
-async def presign_my_avatar(
-    body: AvatarPresignRequest,
-    current_user: CurrentUser,
-) -> Envelope[dict]:
-    """Gera URL presignada para upload da foto de perfil no S3."""
-    upload = create_presigned_upload(
-        filename=body.filename,
-        content_type=body.content_type,
-        prefix=settings.S3_PROFILE_PREFIX,
-    )
-    return Envelope(data=upload)
-
-
-@router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
-async def update_my_profile(
-    body: UpdateProfileRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> Envelope[UserProfileResponse]:
-    fields = body.model_dump(exclude_unset=True)
-    profile = await user_service.update_profile(current_user.id, fields)
-    return Envelope(data=UserProfileResponse.model_validate(profile))
-
-
-@router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)
-async def change_my_password(
-    body: ChangePasswordRequest,
-    current_user: CurrentUser,
-    user_service: UserServiceDep,
-) -> None:
-    await user_service.change_password(
-        current_user, current_password=body.current_password, new_password=body.new_password
-    )
-
-
-@router.get("", response_model=Envelope[list[AdminUserListItem]])
-async def list_users(
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-) -> Envelope[list[AdminUserListItem]]:
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    users = await user_service.list_users(limit=limit, cursor_id=cursor_id)
-    next_cursor = CursorPage.encode_cursor(str(users[-1].id)) if len(users) == limit else None
-
-    return Envelope(
-        data=[AdminUserListItem.model_validate(u) for u in users],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
-    )
-
-
-@router.get("/{user_id}", response_model=Envelope[AdminUserListItem])
-async def get_user(
-    user_id: uuid.UUID,
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-) -> Envelope[AdminUserListItem]:
-    user = await user_service.get_user(user_id)
-    return Envelope(data=AdminUserListItem.model_validate(user))
-
-
-@router.patch("/{user_id}/status", response_model=Envelope[AdminUserListItem])
-async def update_user_status(
-    user_id: uuid.UUID,
-    body: UpdateUserStatusRequest,
-    _admin: CurrentAdminUser,
-    user_service: UserServiceDep,
-) -> Envelope[AdminUserListItem]:
-    user = await user_service.set_active_status(user_id, body.is_active)
-    return Envelope(data=AdminUserListItem.model_validate(user))
-</file>
-
 <file path="app/api/v1/learning/flashcards.py">
 """Endpoints HTTP de flashcards e revisão espaçada (SM-2).
 
@@ -21307,6 +20054,497 @@ async def review_flashcard(
     """Registra a avaliação de confiança do aluno e recalcula o agendamento (SM-2)."""
     flashcard = await flashcard_service.review_flashcard(flashcard_id, current_user.id, body.grade)
     return Envelope(data=FlashcardResponse.from_model(flashcard))
+</file>
+
+<file path="app/api/v1/platform/comments.py">
+# app/api/v1/platform/comments.py
+"""Endpoints HTTP de comentários."""
+
+import uuid
+from typing import Annotated, List
+
+import structlog
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.models.content.question import Question
+from app.models.identity.user import User
+from app.models.platform.comment import Comment
+from app.models.enums import CommentStatus
+from app.schemas.platform.comment import (
+    CommentCreateRequest,
+    CommentListResponse,
+    CommentModerateRequest,
+    CommentReportRequest,
+    CommentResponse,
+    CommentUpdateRequest,
+    CommentVoteRequest,
+)
+from app.security.dependencies import CurrentAdminUser, CurrentUser
+from app.services.platform.comment_service import CommentService
+
+router = APIRouter()
+logger = structlog.get_logger(__name__)
+
+
+def get_comment_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> CommentService:
+    return CommentService(session)
+
+
+CommentServiceDep = Annotated[CommentService, Depends(get_comment_service)]
+
+
+# ==================================================================== #
+# LEITURA
+# ==================================================================== #
+
+
+
+@router.get("/community", response_model=Envelope[list[dict]])
+async def community_feed(
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=30)] = 8,
+    user_id: uuid.UUID | None = None,
+) -> Envelope[list[dict]]:
+    """Feed público de questões com discussões recentes e respostas."""
+    stmt = (
+        select(Comment)
+        .join(Comment.question)
+        .where(
+            *( [Comment.user_id == user_id] if user_id else [] ),
+            Comment.parent_id.is_(None),
+            Comment.status == CommentStatus.PUBLICADO,
+            Comment.deleted_at.is_(None),
+        )
+        .options(
+            selectinload(Comment.user).selectinload(User.profile),
+            selectinload(Comment.question).selectinload(Question.discipline),
+            selectinload(Comment.question).selectinload(Question.exam_board),
+        )
+        .order_by(Comment.created_at.desc())
+        .limit(limit * 2)
+    )
+    result = await session.execute(stmt)
+    seed_comments = list(result.scalars().unique().all())
+
+    seen_questions: set[uuid.UUID] = set()
+    feed: list[dict] = []
+
+    for seed in seed_comments:
+        if seed.question_id in seen_questions:
+            continue
+        seen_questions.add(seed.question_id)
+
+        comments, total = await comment_service.list_by_question(
+            question_id=seed.question_id,
+            user_id=current_user.id,
+            limit=4,
+        )
+
+        items = []
+        for comment in comments:
+            comment_dict = {
+                "id": comment.id,
+                "user_id": comment.user_id,
+                "content": comment.content,
+                "created_at": comment.created_at,
+                "upvotes": comment.upvotes,
+                "downvotes": comment.downvotes,
+                "user_name": getattr(comment, "user_name", None),
+                "user_initials": getattr(comment, "user_initials", None),
+                "user_avatar_url": getattr(comment, "user_avatar_url", None),
+                "replies": [],
+            }
+            for reply in getattr(comment, "_replies", [])[:5]:
+                comment_dict["replies"].append({
+                    "id": reply.id,
+                    "user_id": reply.user_id,
+                    "content": reply.content,
+                    "created_at": reply.created_at,
+                    "upvotes": reply.upvotes,
+                    "downvotes": reply.downvotes,
+                    "user_name": getattr(reply, "user_name", None),
+                    "user_initials": getattr(reply, "user_initials", None),
+                    "user_avatar_url": getattr(reply, "user_avatar_url", None),
+                    "replies": [],
+                })
+            items.append(comment_dict)
+
+        feed.append({
+            "question_id": seed.question_id,
+            "question_statement": seed.question.statement,
+            "discipline": getattr(seed.question.discipline, "name", None),
+            "exam_board": getattr(seed.question.exam_board, "acronym", None),
+            "comments": items,
+            "total_comments": total,
+        })
+
+        if len(feed) >= limit:
+            break
+
+    return Envelope(data=feed)
+
+
+@router.get("/question/{question_id}", response_model=Envelope[CommentListResponse])
+async def list_comments(
+    question_id: uuid.UUID,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[CommentListResponse]:
+    """Lista comentários de uma questão."""
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    comments, total = await comment_service.list_by_question(
+        question_id=question_id,
+        user_id=current_user.id,
+        limit=limit,
+        cursor_id=cursor_id,
+    )
+
+    # 🔥 CORREÇÃO: Construir respostas manualmente para evitar MissingGreenlet
+    items = []
+    for comment in comments:
+        # Converter campos básicos
+        comment_dict = {
+            "id": comment.id,
+            "user_id": comment.user_id,
+            "question_id": comment.question_id,
+            "parent_id": comment.parent_id,
+            "content": comment.content,
+            "status": comment.status,
+            "upvotes": comment.upvotes,
+            "downvotes": comment.downvotes,
+            "report_count": comment.report_count,
+            "is_edited": comment.is_edited,
+            "edited_at": comment.edited_at,
+            "created_at": comment.created_at,
+            "updated_at": comment.updated_at,
+            "user_name": getattr(comment, 'user_name', None),
+            "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+            "user_vote": getattr(comment, 'user_vote', None),
+            "can_edit": getattr(comment, 'can_edit', False),
+            "can_delete": getattr(comment, 'can_delete', False),
+            "is_owner": getattr(comment, 'is_owner', False),
+            "replies": []
+        }
+        
+        # Adicionar replies se existirem
+        if hasattr(comment, '_replies') and comment._replies:
+            for reply in comment._replies:
+                reply_dict = {
+                    "id": reply.id,
+                    "user_id": reply.user_id,
+                    "question_id": reply.question_id,
+                    "parent_id": reply.parent_id,
+                    "content": reply.content,
+                    "status": reply.status,
+                    "upvotes": reply.upvotes,
+                    "downvotes": reply.downvotes,
+                    "report_count": reply.report_count,
+                    "is_edited": reply.is_edited,
+                    "edited_at": reply.edited_at,
+                    "created_at": reply.created_at,
+                    "updated_at": reply.updated_at,
+                    "user_name": getattr(reply, 'user_name', None),
+                    "user_initials": getattr(reply, 'user_initials', None),
+                    "user_avatar_url": getattr(reply, 'user_avatar_url', None),
+                    "user_vote": getattr(reply, 'user_vote', None),
+                    "can_edit": getattr(reply, 'can_edit', False),
+                    "can_delete": getattr(reply, 'can_delete', False),
+                    "is_owner": getattr(reply, 'is_owner', False),
+                    "replies": []
+                }
+                comment_dict["replies"].append(CommentResponse(**reply_dict))
+        
+        items.append(CommentResponse(**comment_dict))
+
+    next_cursor = (
+        CursorPage.encode_cursor(str(comments[-1].id)) if len(comments) == limit else None
+    )
+
+    return Envelope(
+        data=CommentListResponse(
+            items=items,
+            total=total,
+            next_cursor=next_cursor,
+            has_more=next_cursor is not None,
+        )
+    )
+
+
+@router.get("/{comment_id}", response_model=Envelope[CommentResponse])
+async def get_comment(
+    comment_id: uuid.UUID,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> Envelope[CommentResponse]:
+    """Detalhe de um comentário."""
+    comment = await comment_service.get_comment(comment_id, current_user.id)
+    
+    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
+    comment_dict = {
+        "id": comment.id,
+        "user_id": comment.user_id,
+        "question_id": comment.question_id,
+        "parent_id": comment.parent_id,
+        "content": comment.content,
+        "status": comment.status,
+        "upvotes": comment.upvotes,
+        "downvotes": comment.downvotes,
+        "report_count": comment.report_count,
+        "is_edited": comment.is_edited,
+        "edited_at": comment.edited_at,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+        "user_name": getattr(comment, 'user_name', None),
+        "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+        "user_vote": getattr(comment, 'user_vote', None),
+        "can_edit": getattr(comment, 'can_edit', False),
+        "can_delete": getattr(comment, 'can_delete', False),
+        "is_owner": getattr(comment, 'is_owner', False),
+        "replies": []
+    }
+    
+    return Envelope(data=CommentResponse(**comment_dict))
+
+
+# ==================================================================== #
+# ESCRITA
+# ==================================================================== #
+
+
+@router.post(
+    "",
+    response_model=Envelope[CommentResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_comment(
+    body: CommentCreateRequest,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> Envelope[CommentResponse]:
+    """Cria um novo comentário."""
+    comment = await comment_service.create_comment(
+        user_id=current_user.id,
+        data=body,
+    )
+    
+    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
+    comment_dict = {
+        "id": comment.id,
+        "user_id": comment.user_id,
+        "question_id": comment.question_id,
+        "parent_id": comment.parent_id,
+        "content": comment.content,
+        "status": comment.status,
+        "upvotes": comment.upvotes,
+        "downvotes": comment.downvotes,
+        "report_count": comment.report_count,
+        "is_edited": comment.is_edited,
+        "edited_at": comment.edited_at,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+        "user_name": getattr(comment, 'user_name', None),
+        "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+        "user_vote": getattr(comment, 'user_vote', None),
+        "can_edit": getattr(comment, 'can_edit', False),
+        "can_delete": getattr(comment, 'can_delete', False),
+        "is_owner": getattr(comment, 'is_owner', False),
+        "replies": []
+    }
+    
+    return Envelope(data=CommentResponse(**comment_dict))
+
+
+# app/api/v1/platform/comments.py
+
+@router.put("/{comment_id}", response_model=Envelope[CommentResponse])
+async def update_comment(
+    comment_id: uuid.UUID,
+    body: CommentUpdateRequest,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> Envelope[CommentResponse]:
+    """Edita um comentário existente."""
+    # 🔥 CORREÇÃO: o try/except aqui capturava QUALQUER exceção (inclusive
+    # NotFoundError/ConflictError do domínio) e devolvia
+    # `Envelope(data=None, error=None)`. Isso é inválido: o response_model
+    # declarado é `Envelope[CommentResponse]`, que exige `data` não-nulo —
+    # o FastAPI tentava validar/serializar esse retorno contra o schema e
+    # falhava, gerando uma exceção NÃO tratada (sem handler genérico
+    # registrado, isso resultava em resposta vazia/corrompida para o
+    # cliente). Além disso, engolir o erro escondia falhas reais do
+    # usuário (ex: "comentário não encontrado" virava uma resposta "vazia
+    # e sem erro"). Agora deixamos a exceção propagar — os handlers em
+    # `app/core/exceptions.py` (DomainError + genérico) cuidam de
+    # devolver o envelope de erro correto com o status HTTP certo.
+    comment = await comment_service.update_comment(
+        comment_id=comment_id,
+        user_id=current_user.id,
+        data=body,
+    )
+
+    # Converter manualmente para evitar MissingGreenlet
+    comment_dict = {
+        "id": comment.id,
+        "user_id": comment.user_id,
+        "question_id": comment.question_id,
+        "parent_id": comment.parent_id,
+        "content": comment.content,
+        "status": comment.status,
+        "upvotes": comment.upvotes,
+        "downvotes": comment.downvotes,
+        "report_count": comment.report_count,
+        "is_edited": comment.is_edited,
+        "edited_at": comment.edited_at,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+        "user_name": getattr(comment, 'user_name', None),
+        "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+        "user_vote": getattr(comment, 'user_vote', None),
+        "can_edit": getattr(comment, 'can_edit', False),
+        "can_delete": getattr(comment, 'can_delete', False),
+        "is_owner": getattr(comment, 'is_owner', False),
+        "replies": []
+    }
+
+    return Envelope(data=CommentResponse(**comment_dict))
+
+
+@router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_comment(
+    comment_id: uuid.UUID,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> None:
+    """Deleta (soft delete) um comentário."""
+    try:
+        await comment_service.delete_comment(
+            comment_id=comment_id,
+            user_id=current_user.id,
+        )
+        # 🔥 CORREÇÃO: Retornar None para 204 No Content
+        return None
+    except Exception:
+        logger.exception("comment.delete_failed", comment_id=str(comment_id))
+        raise
+
+
+# ==================================================================== #
+# VOTAÇÃO
+# ==================================================================== #
+
+
+@router.post("/{comment_id}/vote", response_model=Envelope[dict])
+async def vote_comment(
+    comment_id: uuid.UUID,
+    body: CommentVoteRequest,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> Envelope[dict]:
+    """Vota em um comentário (up/down)."""
+    result = await comment_service.vote_comment(
+        comment_id=comment_id,
+        user_id=current_user.id,
+        vote_type=body.vote_type,
+    )
+    return Envelope(data=result)
+
+
+# ==================================================================== #
+# DENÚNCIA
+# ==================================================================== #
+
+
+@router.post("/{comment_id}/report", status_code=status.HTTP_204_NO_CONTENT)
+async def report_comment(
+    comment_id: uuid.UUID,
+    body: CommentReportRequest,
+    current_user: CurrentUser,
+    comment_service: CommentServiceDep,
+) -> None:
+    """Denuncia um comentário."""
+    try:
+        await comment_service.report_comment(
+            comment_id=comment_id,
+            user_id=current_user.id,
+            reason=body.reason,
+        )
+        # 🔥 CORREÇÃO: Retornar None para 204 No Content
+        return None
+    except Exception:
+        logger.exception("comment.report_failed", comment_id=str(comment_id))
+        raise
+
+
+# ==================================================================== #
+# MODERAÇÃO (Admin)
+# ==================================================================== #
+
+
+@router.post("/{comment_id}/moderate", response_model=Envelope[CommentResponse])
+async def moderate_comment(
+    comment_id: uuid.UUID,
+    body: CommentModerateRequest,
+    current_user: CurrentAdminUser,
+    comment_service: CommentServiceDep,
+) -> Envelope[CommentResponse]:
+    """Ação de moderação em um comentário (apenas admin)."""
+    # 🔥 CORREÇÃO P0 (2026-08-12): `action`/`reason` eram parâmetros soltos,
+    # interpretados pelo FastAPI como query params — o frontend envia no
+    # corpo JSON (padrão igual a vote/report), causando 422. Ver
+    # docs/IMPLEMENTATION_LOG.md e ADR-020 em docs/DECISIONS.md.
+    comment = await comment_service.moderate_comment(
+        comment_id=comment_id,
+        admin_user_id=current_user.id,
+        action=body.action,
+        reason=body.reason,
+    )
+    
+    # 🔥 CORREÇÃO: Converter manualmente para evitar MissingGreenlet
+    comment_dict = {
+        "id": comment.id,
+        "user_id": comment.user_id,
+        "question_id": comment.question_id,
+        "parent_id": comment.parent_id,
+        "content": comment.content,
+        "status": comment.status,
+        "upvotes": comment.upvotes,
+        "downvotes": comment.downvotes,
+        "report_count": comment.report_count,
+        "is_edited": comment.is_edited,
+        "edited_at": comment.edited_at,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+        "user_name": getattr(comment, 'user_name', None),
+        "user_initials": getattr(comment, 'user_initials', None),
+            "user_avatar_url": getattr(comment, 'user_avatar_url', None),
+        "user_vote": getattr(comment, 'user_vote', None),
+        "can_edit": getattr(comment, 'can_edit', False),
+        "can_delete": getattr(comment, 'can_delete', False),
+        "is_owner": getattr(comment, 'is_owner', False),
+        "replies": []
+    }
+    
+    return Envelope(data=CommentResponse(**comment_dict))
 </file>
 
 <file path="app/database/session.py">
@@ -22116,6 +21354,432 @@ class FlashcardReviewRepository(BaseRepository[FlashcardReview]):
         return [row[0] for row in result.all()]
 </file>
 
+<file path="app/repositories/platform/comment_repository.py">
+# app/repositories/platform/comment_repository.py
+"""Repositório de acesso a dados de `Comment`."""
+
+import uuid
+from datetime import datetime
+from typing import Optional, List
+
+import structlog
+from sqlalchemy import func, select, text, update
+from sqlalchemy.orm import selectinload
+
+from app.models.enums import CommentStatus, CommentVoteType
+from app.models.identity.user import User
+from app.models.platform.comment import Comment, CommentReport, CommentVote
+from app.repositories.base import BaseRepository
+
+logger = structlog.get_logger(__name__)
+
+_RELATIONS = (
+    selectinload(Comment.user).selectinload(User.profile),
+    selectinload(Comment.votes),
+    selectinload(Comment.reports),
+)
+
+
+class CommentRepository(BaseRepository[Comment]):
+    """Repositório de comentários."""
+
+    model = Comment
+
+    async def get_with_relations(self, comment_id: uuid.UUID) -> Comment | None:
+        """Busca um comentário com todas as relações carregadas."""
+        stmt = (
+            select(Comment)
+            .where(Comment.id == comment_id)
+            .options(*_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_owned(self, comment_id: uuid.UUID, user_id: uuid.UUID) -> Comment | None:
+        """Busca um comentário restrito ao dono."""
+        stmt = (
+            select(Comment)
+            .where(Comment.id == comment_id, Comment.user_id == user_id)
+            .options(*_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_by_question(
+        self,
+        question_id: uuid.UUID,
+        limit: int = 50,
+        cursor_id: Optional[uuid.UUID] = None,
+        include_replies: bool = True,
+    ) -> List[Comment]:
+        """Lista comentários de uma questão (apenas principais, não respostas)."""
+        try:
+            stmt = (
+                select(Comment)
+                .where(
+                    Comment.question_id == question_id,
+                    Comment.parent_id.is_(None),
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+                .options(*_RELATIONS)
+                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
+                .limit(limit)
+            )
+
+            if cursor_id:
+                cursor = await self.get_by_id(cursor_id)
+                if cursor:
+                    stmt = stmt.where(Comment.created_at < cursor.created_at)
+
+            result = await self.session.execute(stmt)
+            comments = list(result.scalars().unique().all())
+
+            # 🔥 CORREÇÃO: Carregar replies separadamente, sem atribuir à relação ORM
+            if include_replies and comments:
+                for comment in comments:
+                    replies = await self.list_replies(comment.id)
+                    # Armazenar em atributo não-ORM
+                    setattr(comment, '_replies', replies)
+
+            return comments
+        except Exception as e:
+            logger.error("comments.list_by_question_error", question_id=str(question_id), error=str(e))
+            return []
+
+    async def list_by_question_with_batch(
+        self,
+        question_id: uuid.UUID,
+        limit: int = 50,
+        cursor_id: Optional[uuid.UUID] = None,
+        include_replies: bool = True,
+    ) -> tuple[List[Comment], int]:
+        """🔥 OTIMIZAÇÃO: Lista comentários com batch loading para replies."""
+        try:
+            # Buscar comentários principais
+            stmt = (
+                select(Comment)
+                .where(
+                    Comment.question_id == question_id,
+                    Comment.parent_id.is_(None),
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+                .options(*_RELATIONS)
+                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
+                .limit(limit)
+            )
+
+            if cursor_id:
+                cursor = await self.get_by_id(cursor_id)
+                if cursor:
+                    stmt = stmt.where(Comment.created_at < cursor.created_at)
+
+            result = await self.session.execute(stmt)
+            comments = list(result.scalars().unique().all())
+
+            # 🔥 OTIMIZAÇÃO: Batch loading de replies
+            if include_replies and comments:
+                parent_ids = [c.id for c in comments]
+                replies_stmt = (
+                    select(Comment)
+                    .where(
+                        Comment.parent_id.in_(parent_ids),
+                        Comment.status == CommentStatus.PUBLICADO,
+                        Comment.deleted_at.is_(None),
+                    )
+                    .options(*_RELATIONS)
+                    .order_by(Comment.created_at.asc())
+                )
+                replies_result = await self.session.execute(replies_stmt)
+                replies = list(replies_result.scalars().unique().all())
+
+                # Agrupar replies por parent_id
+                replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
+                for reply in replies:
+                    if reply.parent_id not in replies_by_parent:
+                        replies_by_parent[reply.parent_id] = []
+                    replies_by_parent[reply.parent_id].append(reply)
+
+                for comment in comments:
+                    setattr(comment, '_replies', replies_by_parent.get(comment.id, []))
+
+            total = await self.count_by_question(question_id)
+            return comments, total
+
+        except Exception as e:
+            logger.error("comments.list_by_question_batch_error", question_id=str(question_id), error=str(e))
+            return [], 0
+
+    async def list_replies(self, parent_id: uuid.UUID) -> List[Comment]:
+        """Lista respostas de um comentário."""
+        try:
+            stmt = (
+                select(Comment)
+                .where(
+                    Comment.parent_id == parent_id,
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+                .options(*_RELATIONS)
+                .order_by(Comment.created_at.asc())
+            )
+            result = await self.session.execute(stmt)
+            return list(result.scalars().unique().all())
+        except Exception as e:
+            logger.error("comments.list_replies_error", parent_id=str(parent_id), error=str(e))
+            return []
+
+    async def count_by_question(self, question_id: uuid.UUID) -> int:
+        """Conta comentários de uma questão."""
+        try:
+            stmt = (
+                select(func.count())
+                .select_from(Comment)
+                .where(
+                    Comment.question_id == question_id,
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+            )
+            result = await self.session.execute(stmt)
+            return result.scalar() or 0
+        except Exception as e:
+            logger.error("comments.count_by_question_error", question_id=str(question_id), error=str(e))
+            return 0
+
+    async def get_vote(self, user_id: uuid.UUID, comment_id: uuid.UUID) -> CommentVote | None:
+        """Busca o voto de um usuário em um comentário."""
+        stmt = select(CommentVote).where(
+            CommentVote.user_id == user_id,
+            CommentVote.comment_id == comment_id,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def upsert_vote(
+        self,
+        user_id: uuid.UUID,
+        comment_id: uuid.UUID,
+        vote_type: CommentVoteType,
+    ) -> CommentVote | None:
+        """Cria ou atualiza um voto."""
+        existing = await self.get_vote(user_id, comment_id)
+
+        if existing:
+            if existing.vote_type == vote_type:
+                # Remove o voto (toggle)
+                await self.session.delete(existing)
+                await self.session.flush()
+                await self._update_vote_counts(comment_id)
+                return None
+            else:
+                # Muda o voto
+                existing.vote_type = vote_type
+                await self.session.flush()
+                await self._update_vote_counts(comment_id)
+                return existing
+
+        # Novo voto
+        vote = CommentVote(
+            user_id=user_id,
+            comment_id=comment_id,
+            vote_type=vote_type,
+        )
+        self.session.add(vote)
+        await self.session.flush()
+        await self._update_vote_counts(comment_id)
+        return vote
+
+    async def _update_vote_counts(self, comment_id: uuid.UUID) -> None:
+        """Atualiza a contagem de votos de um comentário."""
+        # Contar upvotes
+        up_stmt = select(func.count()).select_from(CommentVote).where(
+            CommentVote.comment_id == comment_id,
+            CommentVote.vote_type == CommentVoteType.UP,
+        )
+        up_result = await self.session.execute(up_stmt)
+        upvotes = up_result.scalar() or 0
+
+        # Contar downvotes
+        down_stmt = select(func.count()).select_from(CommentVote).where(
+            CommentVote.comment_id == comment_id,
+            CommentVote.vote_type == CommentVoteType.DOWN,
+        )
+        down_result = await self.session.execute(down_stmt)
+        downvotes = down_result.scalar() or 0
+
+        # Atualizar comentário
+        stmt = (
+            update(Comment)
+            .where(Comment.id == comment_id)
+            .values(upvotes=upvotes, downvotes=downvotes)
+        )
+        await self.session.execute(stmt)
+        await self.session.flush()
+
+    async def create_report(
+        self,
+        user_id: uuid.UUID,
+        comment_id: uuid.UUID,
+        reason: str,
+    ) -> CommentReport:
+        """Cria uma denúncia para um comentário."""
+        report = CommentReport(
+            user_id=user_id,
+            comment_id=comment_id,
+            reason=reason,
+        )
+        self.session.add(report)
+        await self.session.flush()
+
+        # Incrementar contagem de denúncias
+        stmt = (
+            update(Comment)
+            .where(Comment.id == comment_id)
+            .values(report_count=Comment.report_count + 1)
+        )
+        await self.session.execute(stmt)
+        await self.session.flush()
+
+        return report
+
+    async def get_reports_paginated(
+        self,
+        limit: int = 50,
+        cursor_id: Optional[uuid.UUID] = None,
+    ) -> list[CommentReport]:
+        """Lista denúncias paginadas."""
+        stmt = (
+            select(CommentReport)
+            .where(CommentReport.resolved_at.is_(None))
+            .order_by(CommentReport.created_at.asc())
+            .limit(limit)
+        )
+        if cursor_id:
+            cursor = await self.get_by_id(cursor_id)
+            if cursor:
+                stmt = stmt.where(CommentReport.created_at > cursor.created_at)
+
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    # ==========================================================================
+    # 🔥 NOVOS MÉTODOS PARA P2 — PERFORMANCE
+    # ==========================================================================
+
+    async def get_comments_with_pagination(
+        self,
+        question_id: uuid.UUID,
+        limit: int = 20,
+        cursor: Optional[uuid.UUID] = None,
+    ) -> tuple[List[Comment], bool]:
+        """🔥 P2: Paginação cursor-based para virtualização."""
+        try:
+            stmt = (
+                select(Comment)
+                .where(
+                    Comment.question_id == question_id,
+                    Comment.parent_id.is_(None),
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+                .options(*_RELATIONS)
+                .order_by(Comment.upvotes.desc(), Comment.created_at.desc())
+                .limit(limit + 1)  # Buscar um a mais para saber se há mais
+            )
+
+            if cursor:
+                stmt = stmt.where(Comment.created_at < cursor)
+
+            result = await self.session.execute(stmt)
+            items = list(result.scalars().unique().all())
+
+            has_more = len(items) > limit
+            if has_more:
+                items = items[:limit]
+
+            # Carregar replies em batch
+            if items:
+                parent_ids = [c.id for c in items]
+                replies_stmt = (
+                    select(Comment)
+                    .where(
+                        Comment.parent_id.in_(parent_ids),
+                        Comment.status == CommentStatus.PUBLICADO,
+                        Comment.deleted_at.is_(None),
+                    )
+                    .options(*_RELATIONS)
+                    .order_by(Comment.created_at.asc())
+                )
+                replies_result = await self.session.execute(replies_stmt)
+                replies = list(replies_result.scalars().unique().all())
+
+                replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
+                for reply in replies:
+                    if reply.parent_id not in replies_by_parent:
+                        replies_by_parent[reply.parent_id] = []
+                    replies_by_parent[reply.parent_id].append(reply)
+
+                for comment in items:
+                    setattr(comment, '_replies', replies_by_parent.get(comment.id, []))
+
+            return items, has_more
+
+        except Exception as e:
+            logger.error("comments.get_comments_with_pagination_error", question_id=str(question_id), error=str(e))
+            return [], False
+
+    async def count_comments_by_question(self, question_id: uuid.UUID) -> int:
+        """🔥 P2: Contagem rápida de comentários."""
+        try:
+            stmt = (
+                select(func.count())
+                .select_from(Comment)
+                .where(
+                    Comment.question_id == question_id,
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+            )
+            result = await self.session.execute(stmt)
+            return result.scalar() or 0
+        except Exception as e:
+            logger.error("comments.count_comments_by_question_error", question_id=str(question_id), error=str(e))
+            return 0
+
+    async def get_replies_batch(self, parent_ids: List[uuid.UUID]) -> dict[uuid.UUID, List[Comment]]:
+        """🔥 P2: Busca replies em lote para múltiplos comentários."""
+        try:
+            if not parent_ids:
+                return {}
+
+            stmt = (
+                select(Comment)
+                .where(
+                    Comment.parent_id.in_(parent_ids),
+                    Comment.status == CommentStatus.PUBLICADO,
+                    Comment.deleted_at.is_(None),
+                )
+                .options(*_RELATIONS)
+                .order_by(Comment.created_at.asc())
+            )
+            result = await self.session.execute(stmt)
+            replies = list(result.scalars().unique().all())
+
+            replies_by_parent: dict[uuid.UUID, list[Comment]] = {}
+            for reply in replies:
+                if reply.parent_id not in replies_by_parent:
+                    replies_by_parent[reply.parent_id] = []
+                replies_by_parent[reply.parent_id].append(reply)
+
+            return replies_by_parent
+
+        except Exception as e:
+            logger.error("comments.get_replies_batch_error", error=str(e))
+            return {}
+</file>
+
 <file path="app/repositories/practice/review_repository.py">
 """Repositório de acesso a dados de `Review`."""
 
@@ -22570,85 +22234,6 @@ __all__ = [
 ]
 </file>
 
-<file path="app/schemas/identity/user.py">
-"""Schemas de request/response de usuário e perfil."""
-
-import uuid
-from datetime import date, datetime
-
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-
-
-class UserProfileResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    target_exam: str | None = None
-    avatar_url: str | None = None
-    bio: str | None = None
-    phone: str | None = None
-    birth_date: date | None = None
-
-
-
-class AvatarPresignRequest(BaseModel):
-    """Solicita uma URL presignada para foto de perfil."""
-    filename: str = Field(min_length=1, max_length=255)
-    content_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
-
-
-class MeResponse(BaseModel):
-    """Usuário autenticado com o perfil embutido (usado em GET /users/me)."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    is_admin: bool
-    is_active: bool
-    created_at: datetime
-    profile: UserProfileResponse
-
-
-class UpdateAccountRequest(BaseModel):
-    """Campos de conta (tabela `users`) que o próprio usuário pode alterar."""
-
-    full_name: str | None = Field(default=None, min_length=2, max_length=255)
-
-
-class UpdateProfileRequest(BaseModel):
-    """Campos de perfil (tabela `user_profiles`).
-
-    Todos opcionais: PATCH parcial. Enviar explicitamente `null` limpa o campo.
-    """
-
-    target_exam: str | None = Field(default=None, max_length=255)
-    avatar_url: str | None = Field(default=None, max_length=500)
-    bio: str | None = Field(default=None, max_length=1000)
-    phone: str | None = Field(default=None, max_length=30)
-    birth_date: date | None = None
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=8, max_length=128)
-
-
-class AdminUserListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    is_admin: bool
-    is_active: bool
-    created_at: datetime
-
-
-class UpdateUserStatusRequest(BaseModel):
-    is_active: bool
-</file>
-
 <file path="app/schemas/learning/__init__.py">
 # app/schemas/learning/__init__.py
 """Schemas do contexto 'learning'."""
@@ -22933,6 +22518,136 @@ class NotebookQuestionCopyRequest(BaseModel):
     question_ids: list[uuid.UUID] = Field(
         min_length=1, max_length=MAX_BULK_QUESTION_SELECTION
     )
+</file>
+
+<file path="app/schemas/platform/comment.py">
+# app/schemas/platform/comment.py
+"""Schemas de request/response de comentários."""
+
+import uuid
+from datetime import datetime
+from typing import Optional, List, Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.models.enums import CommentStatus
+
+
+class CommentVoteRequest(BaseModel):
+    """Request para votar em um comentário."""
+
+    vote_type: str = Field(description="'up' ou 'down'")
+
+
+class CommentReportRequest(BaseModel):
+    """Request para denunciar um comentário."""
+
+    reason: str = Field(min_length=1, max_length=500, description="Motivo da denúncia")
+
+
+class CommentModerateRequest(BaseModel):
+    """Request para ação de moderação em um comentário (admin).
+
+    🔥 CORREÇÃO P0 (2026-08-12): antes desse schema, `action`/`reason` eram
+    parâmetros soltos na assinatura do endpoint, o que o FastAPI interpreta
+    como query params. O frontend sempre enviou `{ action }` no corpo JSON,
+    causando 422 (campo obrigatório ausente na query). Ver ADR-020 em
+    docs/DECISIONS.md e docs/IMPLEMENTATION_LOG.md.
+    """
+
+    action: str = Field(description="'remove', 'block' ou 'restore'")
+    reason: str | None = Field(
+        default=None, max_length=500, description="Motivo da ação de moderação"
+    )
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        allowed = {"remove", "block", "restore"}
+        if v not in allowed:
+            raise ValueError(f"Ação inválida: {v}. Deve ser uma de {sorted(allowed)}")
+        return v
+
+
+class CommentCreateRequest(BaseModel):
+    """Request para criar um comentário."""
+
+    question_id: uuid.UUID
+    parent_id: uuid.UUID | None = None
+    content: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("O conteúdo não pode estar vazio")
+        return v.strip()
+
+
+class CommentUpdateRequest(BaseModel):
+    """Request para editar um comentário."""
+
+    content: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("O conteúdo não pode estar vazio")
+        return v.strip()
+
+
+class CommentResponse(BaseModel):
+    """Resposta de um comentário."""
+    
+    model_config = ConfigDict(
+        from_attributes=True,
+        # 🔥 CORREÇÃO CRÍTICA: Ignorar atributos não declarados
+        extra="ignore"
+    )
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    question_id: uuid.UUID
+    parent_id: uuid.UUID | None
+    content: str
+    status: CommentStatus
+    upvotes: int
+    downvotes: int
+    report_count: int
+    is_edited: bool
+    edited_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    # Campos extras que serão preenchidos pelo serviço
+    user_name: str | None = Field(default=None, description="Nome do usuário")
+    user_initials: str | None = Field(default=None, description="Iniciais do usuário")
+    user_avatar_url: str | None = Field(default=None, description="Avatar do usuário")
+    user_vote: str | None = Field(default=None, description="Voto do usuário atual")
+    can_edit: bool = Field(default=False, description="Se o usuário atual pode editar")
+    can_delete: bool = Field(default=False, description="Se o usuário atual pode deletar")
+    is_owner: bool = Field(default=False, description="Se o usuário atual é o dono")
+    
+    # 🔥 CORREÇÃO: replies não é um campo ORM
+    # Será populado manualmente, não via validação automática
+    replies: List["CommentResponse"] = Field(
+        default_factory=list,
+        description="Respostas (carregadas separadamente)"
+    )
+
+
+class CommentListResponse(BaseModel):
+    """Lista paginada de comentários."""
+
+    items: list[CommentResponse]
+    total: int
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+# Necessário para referências recursivas
+CommentResponse.model_rebuild()
 </file>
 
 <file path="app/security/dependencies.py">
@@ -24102,6 +23817,362 @@ def _utcnow():
     return datetime.now(UTC)
 </file>
 
+<file path="app/services/platform/comment_service.py">
+# app/services/platform/comment_service.py
+"""Regras de negócio de comentários."""
+
+import uuid
+from datetime import UTC, datetime
+from typing import Optional, List
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from app.database.uow import UnitOfWork
+from app.models.enums import CommentStatus, CommentVoteType
+from app.models.platform.comment import Comment, CommentReport
+from app.repositories.content.question_repository import QuestionRepository
+from app.repositories.platform.comment_repository import CommentRepository
+from app.schemas.platform.comment import CommentCreateRequest, CommentUpdateRequest
+from app.services.platform.notification_service import NotificationService
+
+logger = structlog.get_logger(__name__)
+
+
+class CommentService:
+    """Serviço de comentários."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._comments = CommentRepository(session)
+        self._questions = QuestionRepository(session)
+        self._notification_service = NotificationService(session)
+
+    # ==================================================================== #
+    # LEITURA
+    # ==================================================================== #
+
+    async def get_comment(self, comment_id: uuid.UUID, user_id: uuid.UUID) -> Comment:
+        """Busca um comentário específico."""
+        comment = await self._comments.get_with_relations(comment_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado.")
+        self._enrich_comment(comment, user_id)
+        return comment
+
+    async def list_by_question(
+        self,
+        question_id: uuid.UUID,
+        user_id: uuid.UUID,
+        limit: int = 50,
+        cursor_id: Optional[uuid.UUID] = None,
+    ) -> tuple[List[Comment], int]:
+        """Lista comentários de uma questão."""
+        # Verificar se a questão existe
+        question = await self._questions.get_by_id(question_id)
+        if not question:
+            raise NotFoundError("Questão não encontrada.")
+
+        # Buscar comentários principais
+        comments = await self._comments.list_by_question(
+            question_id=question_id,
+            limit=limit,
+            cursor_id=cursor_id,
+            include_replies=False,
+        )
+
+        # Contar total
+        total = await self._comments.count_by_question(question_id)
+
+        # Enriquecer cada comentário e carregar replies
+        for comment in comments:
+            self._enrich_comment(comment, user_id)
+
+            # Carregar replies manualmente
+            replies = await self._comments.list_replies(comment.id)
+            for reply in replies:
+                self._enrich_comment(reply, user_id)
+
+            # Armazenar replies em atributo não-ORM
+            setattr(comment, '_replies', replies)
+
+        return comments, total
+
+    def _enrich_comment(self, comment: Comment, user_id: uuid.UUID) -> None:
+        """Adiciona metadados ao comentário para o usuário atual."""
+        # Verificar se é dono
+        comment.is_owner = comment.user_id == user_id
+
+        # Adicionar nome do usuário
+        if comment.user:
+            comment.user_name = comment.user.full_name
+            # Gerar iniciais
+            name_parts = comment.user.full_name.split()
+            if len(name_parts) >= 2:
+                comment.user_initials = f"{name_parts[0][0]}{name_parts[-1][0]}".upper()
+            elif name_parts:
+                comment.user_initials = name_parts[0][:2].upper()
+            else:
+                comment.user_initials = "??"
+            profile = getattr(comment.user, "profile", None)
+            comment.user_avatar_url = getattr(profile, "avatar_url", None)
+        else:
+            comment.user_name = "Usuário"
+            comment.user_initials = "??"
+            comment.user_avatar_url = None
+
+        # Verificar se o usuário atual votou
+        comment.user_vote = None
+        if hasattr(comment, 'votes'):
+            for vote in comment.votes:
+                if vote.user_id == user_id:
+                    comment.user_vote = vote.vote_type.value
+                    break
+
+        # Permissões
+        comment.can_edit = comment.is_owner and comment.status == CommentStatus.PUBLICADO
+        comment.can_delete = comment.is_owner and comment.deleted_at is None
+
+    # ==================================================================== #
+    # ESCRITA
+    # ==================================================================== #
+
+    async def create_comment(
+        self,
+        user_id: uuid.UUID,
+        data: CommentCreateRequest,
+    ) -> Comment:
+        """Cria um novo comentário."""
+        # Verificar se a questão existe
+        question = await self._questions.get_by_id(data.question_id)
+        if not question:
+            raise NotFoundError("Questão não encontrada.")
+
+        # Verificar se o pai existe (se for resposta)
+        if data.parent_id:
+            parent = await self._comments.get_by_id(data.parent_id)
+            if not parent or parent.question_id != data.question_id:
+                raise NotFoundError("Comentário pai não encontrado.")
+
+        # Verificar se o usuário já comentou nesta questão
+        if not data.parent_id:
+            stmt = select(Comment).where(
+                Comment.user_id == user_id,
+                Comment.question_id == data.question_id,
+                Comment.parent_id.is_(None),
+                Comment.status == CommentStatus.PUBLICADO,
+                Comment.deleted_at.is_(None),
+            )
+            result = await self._session.execute(stmt)
+            if result.scalar_one_or_none():
+                raise ConflictError("Você já comentou nesta questão.")
+
+        comment = Comment(
+            user_id=user_id,
+            question_id=data.question_id,
+            parent_id=data.parent_id,
+            content=data.content,
+            status=CommentStatus.PUBLICADO,
+        )
+
+        async with UnitOfWork(self._session):
+            await self._comments.add(comment)
+            await self._session.flush()
+
+        # 🔥 NOTIFICAÇÃO: Notificar autor da questão sobre novo comentário
+        # Erros aqui NUNCA devem bloquear a criação do comentário, que já
+        # foi persistida e commitada acima. `logger.exception` grava o
+        # stacktrace completo (em vez de `print`, que não aparece de forma
+        # confiável em produção nem é estruturado para agregação de logs).
+        try:
+            if not data.parent_id and question.created_by and question.created_by != user_id:
+                await self._notification_service.notify_new_comment(
+                    question_id=data.question_id,
+                    comment_id=comment.id,
+                    comment_author_id=user_id,
+                    question_author_id=question.created_by,
+                    comment_content=comment.content,
+                )
+
+            # 🔥 NOTIFICAÇÃO: Notificar autor do comentário pai sobre nova resposta
+            if data.parent_id:
+                parent_comment = await self._comments.get_by_id(data.parent_id)
+                if parent_comment and parent_comment.user_id != user_id:
+                    await self._notification_service.notify_new_reply(
+                        parent_comment_id=data.parent_id,
+                        reply_id=comment.id,
+                        reply_author_id=user_id,
+                        parent_author_id=parent_comment.user_id,
+                        reply_content=comment.content,
+                    )
+        except Exception:
+            # Log completo do erro (com traceback), mas não bloqueia a
+            # criação do comentário — o comentário já foi persistido.
+            logger.exception(
+                "comment.notification_failed",
+                comment_id=str(comment.id),
+                question_id=str(data.question_id),
+            )
+
+        # Recarregar com relações
+        return await self._comments.get_with_relations(comment.id)
+
+    async def update_comment(
+        self,
+        comment_id: uuid.UUID,
+        user_id: uuid.UUID,
+        data: CommentUpdateRequest,
+    ) -> Comment:
+        """Edita um comentário existente."""
+        comment = await self._comments.get_owned(comment_id, user_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado ou não é seu.")
+
+        if comment.deleted_at:
+            raise ConflictError("Este comentário foi deletado.")
+
+        if comment.status != CommentStatus.PUBLICADO:
+            raise ConflictError("Este comentário não pode ser editado.")
+
+        # Atualizar o conteúdo
+        comment.content = data.content
+        comment.is_edited = True
+        comment.edited_at = datetime.now(UTC)
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+            await self._session.refresh(comment)
+
+        # Recarregar com todas as relações
+        return await self._comments.get_with_relations(comment.id)
+
+    async def delete_comment(
+        self,
+        comment_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> None:
+        """Deleta (soft delete) um comentário."""
+        comment = await self._comments.get_owned(comment_id, user_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado ou não é seu.")
+
+        comment.deleted_at = datetime.now(UTC)
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+
+    async def vote_comment(
+        self,
+        comment_id: uuid.UUID,
+        user_id: uuid.UUID,
+        vote_type: str,
+    ) -> dict:
+        """Vota em um comentário."""
+        comment = await self._comments.get_by_id(comment_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado.")
+
+        if comment.user_id == user_id:
+            raise ForbiddenError("Você não pode votar no seu próprio comentário.")
+
+        vote_enum = CommentVoteType.UP if vote_type == "up" else CommentVoteType.DOWN
+
+        async with UnitOfWork(self._session):
+            vote = await self._comments.upsert_vote(
+                user_id=user_id,
+                comment_id=comment_id,
+                vote_type=vote_enum,
+            )
+            await self._session.flush()
+
+        # 🔥 NOTIFICAÇÃO: Notificar autor do comentário sobre o voto
+        try:
+            if comment.user_id != user_id:
+                await self._notification_service.notify_comment_vote(
+                    comment_id=comment_id,
+                    voter_id=user_id,
+                    comment_author_id=comment.user_id,
+                    vote_type=vote_type,
+                )
+        except Exception:
+            logger.exception(
+                "comment.vote_notification_failed",
+                comment_id=str(comment.id),
+            )
+
+        # Buscar comentário atualizado
+        updated = await self._comments.get_by_id(comment_id)
+
+        return {
+            "upvotes": updated.upvotes,
+            "downvotes": updated.downvotes,
+            "user_vote": vote_type if vote else None,
+        }
+
+    # ==================================================================== #
+    # DENÚNCIA E MODERAÇÃO
+    # ==================================================================== #
+
+    async def report_comment(
+        self,
+        comment_id: uuid.UUID,
+        user_id: uuid.UUID,
+        reason: str,
+    ) -> None:
+        """Denuncia um comentário."""
+        comment = await self._comments.get_by_id(comment_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado.")
+
+        if comment.user_id == user_id:
+            raise ForbiddenError("Você não pode denunciar seu próprio comentário.")
+
+        # Verificar se já denunciou
+        stmt = select(CommentReport).where(
+            CommentReport.user_id == user_id,
+            CommentReport.comment_id == comment_id,
+        )
+        result = await self._session.execute(stmt)
+        if result.scalar_one_or_none():
+            raise ConflictError("Você já denunciou este comentário.")
+
+        async with UnitOfWork(self._session):
+            await self._comments.create_report(user_id, comment_id, reason)
+            await self._session.flush()
+
+    async def moderate_comment(
+        self,
+        comment_id: uuid.UUID,
+        admin_user_id: uuid.UUID,
+        action: str,
+        reason: str | None = None,
+    ) -> Comment:
+        """Ação de moderação em um comentário."""
+        comment = await self._comments.get_with_relations(comment_id)
+        if not comment:
+            raise NotFoundError("Comentário não encontrado.")
+
+        if action == "remove":
+            comment.status = CommentStatus.REMOVIDO
+            comment.deleted_at = datetime.now(UTC)
+        elif action == "block":
+            comment.status = CommentStatus.BLOQUEADO
+            comment.deleted_at = datetime.now(UTC)
+        elif action == "restore":
+            comment.status = CommentStatus.PUBLICADO
+            comment.deleted_at = None
+        else:
+            raise ValueError(f"Ação inválida: {action}")
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+            await self._session.refresh(comment)
+
+        return comment
+</file>
+
 <file path="app/services/practice/question_attempt_repository.py">
 """Regras de negócio de tentativas de resposta (`QuestionAttempt`).
 
@@ -24836,140 +24907,6 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     asyncio.run(run_migrations_online())
-</file>
-
-<file path="scripts/manual/deploy-ecs.sh">
-#!/usr/bin/env bash
-# Deploy do Alfa Caveira (backend) para ECS/Fargate.
-# Pré-requisitos: aws-cli v2 configurado (aws configure / SSO), docker, jq.
-#
-# Uso:
-#   chmod +x deploy-ecs.sh
-#   ./deploy-ecs.sh
-#
-# Preencha as variáveis abaixo com os nomes reais do seu ambiente.
-# (aws ecs list-clusters / list-services / describe-services ajudam a achar.)
-
-set -euo pipefail
-
-# ------------------------- CONFIGURE AQUI -------------------------
-AWS_REGION="sa-east-1"
-AWS_ACCOUNT_ID="240462142513"
-ECR_REPO="concurso-backend"
-ECS_CLUSTER="concurso-cluster"
-ECS_SERVICE="concurso-backend-svc"
-TASK_FAMILY="concurso-backend"          # família da task definition
-CONTAINER_NAME="concurso-backend"       # nome do container dentro da task def
-PLATFORM="linux/arm64"                  # task roda em ARM64 (Fargate) — build precisa bater
-
-# Variáveis de ambiente da task definition que este script sempre reafirma,
-# independente do que já estava registrado na revisão anterior. Evita que um
-# valor antigo/errado (ex: nome de marca desatualizado) continue se arrastando
-# de deploy em deploy. Adicione outras entradas aqui se precisar travar mais
-# alguma variável.
-declare -A ENFORCED_ENV_VARS=(
-  [SMTP_FROM_NAME]="Alfa Caveira"
-)
-# --------------------------------------------------------------------
-
-ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-IMAGE_TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
-
-echo "==> 1/5 Login no ECR"
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "$ECR_URI"
-
-echo "==> 2/5 Build da imagem (${PLATFORM})"
-# --platform é essencial: a task roda em ARM64. buildx cuida da compilação cruzada
-# mesmo se você estiver numa máquina Intel/AMD.
-docker buildx build --platform "$PLATFORM" -t "${ECR_URI}:${IMAGE_TAG}" -t "${ECR_URI}:latest" --push .
-
-echo "==> 3/5 Registrando nova revisão da task definition (imagem: ${IMAGE_TAG})"
-CURRENT_TASK_DEF=$(aws ecs describe-task-definition \
-  --task-definition "$TASK_FAMILY" \
-  --region "$AWS_REGION")
-
-# Monta os pares [{"name": ..., "value": ...}] a partir de ENFORCED_ENV_VARS
-ENFORCED_JSON="[]"
-for key in "${!ENFORCED_ENV_VARS[@]}"; do
-  ENFORCED_JSON=$(echo "$ENFORCED_JSON" | jq --arg N "$key" --arg V "${ENFORCED_ENV_VARS[$key]}" '. + [{"name": $N, "value": $V}]')
-done
-
-NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq \
-  --arg IMAGE "${ECR_URI}:${IMAGE_TAG}" \
-  --arg NAME "$CONTAINER_NAME" \
-  --argjson ENFORCED "$ENFORCED_JSON" '
-  .taskDefinition |
-  .containerDefinitions = (.containerDefinitions | map(
-    if .name == $NAME then
-      .image = $IMAGE |
-      # sobrescreve/insere cada variável de ENFORCED, preservando as demais
-      .environment = (
-        (.environment // []) as $current |
-        ($ENFORCED | map(.name)) as $enforcedNames |
-        ($current | map(select(.name as $n | ($enforcedNames | index($n)) | not))) + $ENFORCED
-      )
-    else . end
-  )) |
-  del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
-')
-
-NEW_TASK_ARN=$(aws ecs register-task-definition \
-  --region "$AWS_REGION" \
-  --cli-input-json "$NEW_TASK_DEF" \
-  | jq -r '.taskDefinition.taskDefinitionArn')
-
-echo "Nova task definition: $NEW_TASK_ARN"
-
-echo "==> 4/5 Rodando a migration (alembic upgrade head) como task avulsa"
-# Pega network config (subnets/SG) do próprio service, pra rodar a task avulsa na mesma rede.
-NETWORK_CONFIG=$(aws ecs describe-services \
-  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$AWS_REGION" \
-  | jq -c '.services[0].networkConfiguration')
-
-MIGRATION_TASK=$(aws ecs run-task \
-  --cluster "$ECS_CLUSTER" \
-  --task-definition "$NEW_TASK_ARN" \
-  --launch-type FARGATE \
-  --network-configuration "$NETWORK_CONFIG" \
-  --overrides "{\"containerOverrides\":[{\"name\":\"${CONTAINER_NAME}\",\"command\":[\"alembic\",\"upgrade\",\"head\"]}]}" \
-  --region "$AWS_REGION")
-
-MIGRATION_TASK_ARN=$(echo "$MIGRATION_TASK" | jq -r '.tasks[0].taskArn')
-echo "Task de migration: $MIGRATION_TASK_ARN"
-echo "Aguardando a migration terminar..."
-
-aws ecs wait tasks-stopped \
-  --cluster "$ECS_CLUSTER" \
-  --tasks "$MIGRATION_TASK_ARN" \
-  --region "$AWS_REGION"
-
-EXIT_CODE=$(aws ecs describe-tasks \
-  --cluster "$ECS_CLUSTER" --tasks "$MIGRATION_TASK_ARN" --region "$AWS_REGION" \
-  | jq -r '.tasks[0].containers[0].exitCode')
-
-if [ "$EXIT_CODE" != "0" ]; then
-  echo "❌ Migration falhou (exit code $EXIT_CODE). Abortando deploy do service."
-  echo "   Veja os logs no CloudWatch (log group da task definition) antes de prosseguir."
-  exit 1
-fi
-echo "✅ Migration concluída com sucesso."
-
-echo "==> 5/5 Atualizando o service para a nova task definition"
-aws ecs update-service \
-  --cluster "$ECS_CLUSTER" \
-  --service "$ECS_SERVICE" \
-  --task-definition "$NEW_TASK_ARN" \
-  --region "$AWS_REGION" \
-  > /dev/null
-
-echo "Aguardando o service estabilizar (rolling deployment)..."
-aws ecs wait services-stable \
-  --cluster "$ECS_CLUSTER" \
-  --services "$ECS_SERVICE" \
-  --region "$AWS_REGION"
-
-echo "🚀 Deploy concluído. Imagem em produção: ${ECR_URI}:${IMAGE_TAG}"
 </file>
 
 <file path="scripts/manual/test_comments.sh">
@@ -25729,6 +25666,272 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 </file>
 
+<file path="app/api/v1/identity/users.py">
+"""Endpoints HTTP de conta, perfil e administração de usuários."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import RedirectResponse
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.schemas.identity import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+    PublicUserProfileResponse,
+)
+from app.security.dependencies import CurrentAdminUser, CurrentUser
+from app.services.identity import UserService
+from app.core.config import settings
+from app.services.storage.s3_service import create_presigned_upload, create_presigned_download, upload_profile_avatar
+from app.models.identity.user import User
+from app.models.analytics.ranking import UserRanking
+from app.models.platform.comment import Comment
+
+router = APIRouter()
+
+
+def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
+    return UserService(session)
+
+
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]
+
+
+@router.get("/me", response_model=Envelope[MeResponse])
+async def get_me(
+    current_user: CurrentUser, user_service: UserServiceDep
+) -> Envelope[MeResponse]:
+    profile = await user_service.get_profile(current_user.id)
+    return Envelope(
+        data=MeResponse(
+            id=current_user.id,
+            email=current_user.email,
+            full_name=current_user.full_name,
+            is_admin=current_user.is_admin,
+            is_active=current_user.is_active,
+            created_at=current_user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+@router.patch("/me", response_model=Envelope[MeResponse])
+async def update_me(
+    body: UpdateAccountRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[MeResponse]:
+    user = await user_service.update_account(current_user, full_name=body.full_name)
+    profile = await user_service.get_profile(user.id)
+    return Envelope(
+        data=MeResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            is_admin=user.is_admin,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            profile=UserProfileResponse.model_validate(profile),
+        )
+    )
+
+
+
+@router.post("/me/avatar/presign", response_model=Envelope[dict])
+async def presign_my_avatar(
+    body: AvatarPresignRequest,
+    current_user: CurrentUser,
+) -> Envelope[dict]:
+    """Gera URL presignada para upload da foto de perfil no S3."""
+    upload = create_presigned_upload(
+        filename=body.filename,
+        content_type=body.content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    return Envelope(data=upload)
+
+
+@router.post("/me/avatar", response_model=Envelope[UserProfileResponse])
+async def upload_my_avatar(
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+    file: UploadFile = File(...),
+) -> Envelope[UserProfileResponse]:
+    """Recebe o avatar no backend e envia para o S3 sem CORS no navegador."""
+    content_type = file.content_type
+    if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=422, detail="Tipo de imagem não permitido.")
+
+    data = await file.read(settings.S3_MAX_UPLOAD_BYTES + 1)
+    if len(data) > settings.S3_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="A imagem deve ter no máximo 8 MB.")
+
+    from io import BytesIO
+
+    uploaded = upload_profile_avatar(
+        BytesIO(data),
+        content_type,
+        prefix=settings.S3_PROFILE_PREFIX,
+    )
+    profile = await user_service.update_profile(
+        current_user.id,
+        {"avatar_url": uploaded["public_url"]},
+    )
+    return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+@router.get("/{user_id}/avatar")
+async def get_user_avatar(
+    user_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Redireciona o avatar para uma URL S3 assinada de leitura."""
+    result = await session.execute(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+    if not user or not user.profile or not user.profile.avatar_url:
+        raise HTTPException(status_code=404, detail="Avatar não encontrado.")
+
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(user.profile.avatar_url)
+    key = unquote(parsed.path.lstrip("/"))
+    if not key:
+        raise HTTPException(status_code=404, detail="Avatar não encontrado.")
+
+    return RedirectResponse(
+        url=create_presigned_download(key),
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@router.patch("/me/profile", response_model=Envelope[UserProfileResponse])
+async def update_my_profile(
+    body: UpdateProfileRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> Envelope[UserProfileResponse]:
+    fields = body.model_dump(exclude_unset=True)
+    profile = await user_service.update_profile(current_user.id, fields)
+    return Envelope(data=UserProfileResponse.model_validate(profile))
+
+
+
+@router.get("/{user_id}/public-profile", response_model=Envelope[PublicUserProfileResponse])
+async def get_public_profile(
+    user_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Envelope[PublicUserProfileResponse]:
+    """Perfil público seguro, usado no ranking e na comunidade."""
+    result = await session.execute(
+        select(User)
+        .options(selectinload(User.profile))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    ranking_result = await session.execute(
+        select(UserRanking).where(UserRanking.user_id == user_id)
+    )
+    ranking = ranking_result.scalar_one_or_none()
+
+    comments_count = await session.scalar(
+        select(func.count()).select_from(Comment).where(
+            Comment.user_id == user_id,
+            Comment.deleted_at.is_(None),
+            Comment.status == "publicado",
+        )
+    ) or 0
+
+    return Envelope(
+        data=PublicUserProfileResponse(
+            id=user.id,
+            full_name=user.full_name,
+            created_at=user.created_at,
+            profile=UserProfileResponse.model_validate(user.profile),
+            ranking={
+                "rank": ranking.rank if ranking else None,
+                "total_points": ranking.total_points if ranking else 0,
+                "questions_answered": ranking.questions_answered if ranking else 0,
+                "accuracy": ranking.accuracy if ranking else 0,
+                "streak_days": ranking.streak_days if ranking else 0,
+            },
+            comments_count=comments_count,
+        )
+    )
+
+
+@router.post("/me/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    current_user: CurrentUser,
+    user_service: UserServiceDep,
+) -> None:
+    await user_service.change_password(
+        current_user, current_password=body.current_password, new_password=body.new_password
+    )
+
+
+@router.get("", response_model=Envelope[list[AdminUserListItem]])
+async def list_users(
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[list[AdminUserListItem]]:
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    users = await user_service.list_users(limit=limit, cursor_id=cursor_id)
+    next_cursor = CursorPage.encode_cursor(str(users[-1].id)) if len(users) == limit else None
+
+    return Envelope(
+        data=[AdminUserListItem.model_validate(u) for u in users],
+        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+    )
+
+
+@router.get("/{user_id}", response_model=Envelope[AdminUserListItem])
+async def get_user(
+    user_id: uuid.UUID,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.get_user(user_id)
+    return Envelope(data=AdminUserListItem.model_validate(user))
+
+
+@router.patch("/{user_id}/status", response_model=Envelope[AdminUserListItem])
+async def update_user_status(
+    user_id: uuid.UUID,
+    body: UpdateUserStatusRequest,
+    _admin: CurrentAdminUser,
+    user_service: UserServiceDep,
+) -> Envelope[AdminUserListItem]:
+    user = await user_service.set_active_status(user_id, body.is_active)
+    return Envelope(data=AdminUserListItem.model_validate(user))
+</file>
+
 <file path="app/core/exceptions.py">
 # app/core/exceptions.py
 """Exceções de domínio e seus handlers HTTP.
@@ -26441,6 +26644,97 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+</file>
+
+<file path="app/schemas/identity/user.py">
+"""Schemas de request/response de usuário e perfil."""
+
+import uuid
+from datetime import date, datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+class UserProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    target_exam: str | None = None
+    avatar_url: str | None = None
+    bio: str | None = None
+    phone: str | None = None
+    birth_date: date | None = None
+
+
+
+class AvatarPresignRequest(BaseModel):
+    """Solicita uma URL presignada para foto de perfil."""
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
+
+
+class MeResponse(BaseModel):
+    """Usuário autenticado com o perfil embutido (usado em GET /users/me)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+    profile: UserProfileResponse
+
+
+class UpdateAccountRequest(BaseModel):
+    """Campos de conta (tabela `users`) que o próprio usuário pode alterar."""
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=255)
+
+
+class UpdateProfileRequest(BaseModel):
+    """Campos de perfil (tabela `user_profiles`).
+
+    Todos opcionais: PATCH parcial. Enviar explicitamente `null` limpa o campo.
+    """
+
+    target_exam: str | None = Field(default=None, max_length=255)
+    avatar_url: str | None = Field(default=None, max_length=500)
+    bio: str | None = Field(default=None, max_length=1000)
+    phone: str | None = Field(default=None, max_length=30)
+    birth_date: date | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class AdminUserListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: EmailStr
+    full_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+
+
+class UpdateUserStatusRequest(BaseModel):
+    is_active: bool
+
+class PublicUserProfileResponse(BaseModel):
+    """Perfil público seguro para ranking e comunidade."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    full_name: str
+    created_at: datetime
+    profile: UserProfileResponse
+    ranking: dict[str, int | float | None]
+    comments_count: int
 </file>
 
 <file path="app/services/billing/feature_gate_service.py">
@@ -27538,6 +27832,141 @@ def downgrade() -> None:
         WHERE slug = 'standard';
         """
     )
+</file>
+
+<file path="scripts/manual/deploy-ecs.sh">
+#!/usr/bin/env bash
+# Deploy do Alfa Caveira (backend) para ECS/Fargate.
+# Pré-requisitos: aws-cli v2 configurado (aws configure / SSO), docker, jq.
+#
+# Uso:
+#   chmod +x deploy-ecs.sh
+#   ./deploy-ecs.sh
+#
+# Preencha as variáveis abaixo com os nomes reais do seu ambiente.
+# (aws ecs list-clusters / list-services / describe-services ajudam a achar.)
+
+set -euo pipefail
+
+# ------------------------- CONFIGURE AQUI -------------------------
+AWS_REGION="sa-east-1"
+AWS_ACCOUNT_ID="240462142513"
+ECR_REPO="concurso-backend"
+ECS_CLUSTER="concurso-cluster"
+ECS_SERVICE="concurso-backend-svc"
+TASK_FAMILY="concurso-backend"          # família da task definition
+CONTAINER_NAME="concurso-backend"       # nome do container dentro da task def
+PLATFORM="linux/arm64"                  # task roda em ARM64 (Fargate) — build precisa bater
+
+# Variáveis de ambiente da task definition que este script sempre reafirma,
+# independente do que já estava registrado na revisão anterior. Evita que um
+# valor antigo/errado (ex: nome de marca desatualizado) continue se arrastando
+# de deploy em deploy. Adicione outras entradas aqui se precisar travar mais
+# alguma variável.
+declare -A ENFORCED_ENV_VARS=(
+  [SMTP_FROM_NAME]="Alfa Caveira"
+  [GOOGLE_CLIENT_ID]="344958051466-1bphge6deod8cg1ugav422tlmvmaik3e.apps.googleusercontent.com"
+)
+# --------------------------------------------------------------------
+
+ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+IMAGE_TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
+
+echo "==> 1/5 Login no ECR"
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_URI"
+
+echo "==> 2/5 Build da imagem (${PLATFORM})"
+# --platform é essencial: a task roda em ARM64. buildx cuida da compilação cruzada
+# mesmo se você estiver numa máquina Intel/AMD.
+docker buildx build --platform "$PLATFORM" -t "${ECR_URI}:${IMAGE_TAG}" -t "${ECR_URI}:latest" --push .
+
+echo "==> 3/5 Registrando nova revisão da task definition (imagem: ${IMAGE_TAG})"
+CURRENT_TASK_DEF=$(aws ecs describe-task-definition \
+  --task-definition "$TASK_FAMILY" \
+  --region "$AWS_REGION")
+
+# Monta os pares [{"name": ..., "value": ...}] a partir de ENFORCED_ENV_VARS
+ENFORCED_JSON="[]"
+for key in "${!ENFORCED_ENV_VARS[@]}"; do
+  ENFORCED_JSON=$(echo "$ENFORCED_JSON" | jq --arg N "$key" --arg V "${ENFORCED_ENV_VARS[$key]}" '. + [{"name": $N, "value": $V}]')
+done
+
+NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq \
+  --arg IMAGE "${ECR_URI}:${IMAGE_TAG}" \
+  --arg NAME "$CONTAINER_NAME" \
+  --argjson ENFORCED "$ENFORCED_JSON" '
+  .taskDefinition |
+  .containerDefinitions = (.containerDefinitions | map(
+    if .name == $NAME then
+      .image = $IMAGE |
+      # sobrescreve/insere cada variável de ENFORCED, preservando as demais
+      .environment = (
+        (.environment // []) as $current |
+        ($ENFORCED | map(.name)) as $enforcedNames |
+        ($current | map(select(.name as $n | ($enforcedNames | index($n)) | not))) + $ENFORCED
+      )
+    else . end
+  )) |
+  del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+')
+
+NEW_TASK_ARN=$(aws ecs register-task-definition \
+  --region "$AWS_REGION" \
+  --cli-input-json "$NEW_TASK_DEF" \
+  | jq -r '.taskDefinition.taskDefinitionArn')
+
+echo "Nova task definition: $NEW_TASK_ARN"
+
+echo "==> 4/5 Rodando a migration (alembic upgrade head) como task avulsa"
+# Pega network config (subnets/SG) do próprio service, pra rodar a task avulsa na mesma rede.
+NETWORK_CONFIG=$(aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$AWS_REGION" \
+  | jq -c '.services[0].networkConfiguration')
+
+MIGRATION_TASK=$(aws ecs run-task \
+  --cluster "$ECS_CLUSTER" \
+  --task-definition "$NEW_TASK_ARN" \
+  --launch-type FARGATE \
+  --network-configuration "$NETWORK_CONFIG" \
+  --overrides "{\"containerOverrides\":[{\"name\":\"${CONTAINER_NAME}\",\"command\":[\"alembic\",\"upgrade\",\"head\"]}]}" \
+  --region "$AWS_REGION")
+
+MIGRATION_TASK_ARN=$(echo "$MIGRATION_TASK" | jq -r '.tasks[0].taskArn')
+echo "Task de migration: $MIGRATION_TASK_ARN"
+echo "Aguardando a migration terminar..."
+
+aws ecs wait tasks-stopped \
+  --cluster "$ECS_CLUSTER" \
+  --tasks "$MIGRATION_TASK_ARN" \
+  --region "$AWS_REGION"
+
+EXIT_CODE=$(aws ecs describe-tasks \
+  --cluster "$ECS_CLUSTER" --tasks "$MIGRATION_TASK_ARN" --region "$AWS_REGION" \
+  | jq -r '.tasks[0].containers[0].exitCode')
+
+if [ "$EXIT_CODE" != "0" ]; then
+  echo "❌ Migration falhou (exit code $EXIT_CODE). Abortando deploy do service."
+  echo "   Veja os logs no CloudWatch (log group da task definition) antes de prosseguir."
+  exit 1
+fi
+echo "✅ Migration concluída com sucesso."
+
+echo "==> 5/5 Atualizando o service para a nova task definition"
+aws ecs update-service \
+  --cluster "$ECS_CLUSTER" \
+  --service "$ECS_SERVICE" \
+  --task-definition "$NEW_TASK_ARN" \
+  --region "$AWS_REGION" \
+  > /dev/null
+
+echo "Aguardando o service estabilizar (rolling deployment)..."
+aws ecs wait services-stable \
+  --cluster "$ECS_CLUSTER" \
+  --services "$ECS_SERVICE" \
+  --region "$AWS_REGION"
+
+echo "🚀 Deploy concluído. Imagem em produção: ${ECR_URI}:${IMAGE_TAG}"
 </file>
 
 <file path="tests/unit/billing/factories.py">
@@ -31379,52 +31808,6 @@ class QuestionFacetsResponse(BaseModel):
     organization_id: list[FacetBucket]
     year: list[FacetBucket]
     difficulty: list[FacetBucket]
-</file>
-
-<file path="app/schemas/identity/__init__.py">
-"""Schemas do contexto 'identity'."""
-
-from app.schemas.identity.auth import (
-    ForgotPasswordRequest,
-    GoogleLoginRequest,
-    LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
-    RegisterRequest,
-    ResetPasswordRequest,
-    TokenResponse,
-    UserResponse,
-)
-from app.schemas.identity.user import (
-    AdminUserListItem,
-    AvatarPresignRequest,
-    ChangePasswordRequest,
-    MeResponse,
-    UpdateAccountRequest,
-    UpdateProfileRequest,
-    UpdateUserStatusRequest,
-    UserProfileResponse,
-)
-
-__all__ = [
-    "AdminUserListItem",
-    "AvatarPresignRequest",
-    "ChangePasswordRequest",
-    "ForgotPasswordRequest",
-    "GoogleLoginRequest",
-    "LoginRequest",
-    "LogoutRequest",
-    "MeResponse",
-    "RefreshRequest",
-    "RegisterRequest",
-    "ResetPasswordRequest",
-    "TokenResponse",
-    "UpdateAccountRequest",
-    "UpdateProfileRequest",
-    "UpdateUserStatusRequest",
-    "UserProfileResponse",
-    "UserResponse",
-]
 </file>
 
 <file path="app/schemas/learning/notebook.py">
@@ -35356,6 +35739,54 @@ class QuestionRepository(BaseRepository[Question]):
 
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+</file>
+
+<file path="app/schemas/identity/__init__.py">
+"""Schemas do contexto 'identity'."""
+
+from app.schemas.identity.auth import (
+    ForgotPasswordRequest,
+    GoogleLoginRequest,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    UserResponse,
+)
+from app.schemas.identity.user import (
+    AdminUserListItem,
+    AvatarPresignRequest,
+    ChangePasswordRequest,
+    MeResponse,
+    UpdateAccountRequest,
+    UpdateProfileRequest,
+    UpdateUserStatusRequest,
+    UserProfileResponse,
+    PublicUserProfileResponse,
+)
+
+__all__ = [
+    "AdminUserListItem",
+    "AvatarPresignRequest",
+    "ChangePasswordRequest",
+    "ForgotPasswordRequest",
+    "GoogleLoginRequest",
+    "LoginRequest",
+    "LogoutRequest",
+    "MeResponse",
+    "RefreshRequest",
+    "RegisterRequest",
+    "ResetPasswordRequest",
+    "TokenResponse",
+    "UpdateAccountRequest",
+    "UpdateProfileRequest",
+    "UpdateUserStatusRequest",
+    "UserProfileResponse",
+    "PublicUserProfileResponse",
+    "UserResponse",
+]
 </file>
 
 <file path="app/services/content/question_service.py">
