@@ -28,6 +28,9 @@ class AnswerResultResponse(BaseModel):
     correct_alternative_letter: str
     is_correct: bool
     explanation: str | None
+    # Nome do professor autor do gabarito comentado — exibido no cartão de
+    # comentário junto da explicação (ver `Question.teacher_name`).
+    teacher_name: str | None = None
 
 
 class QuestionAttemptListItem(BaseModel):

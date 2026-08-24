@@ -38,6 +38,7 @@ def _snapshot(question: Question) -> dict[str, object]:
         "status": question.status.value,
         "statement": question.statement,
         "explanation": question.explanation,
+        "teacher_name": question.teacher_name,
         "correct_alternative_letter": question.correct_alternative_letter,
         "alternatives": [
             {"letter": alt.letter, "text": alt.text, "is_correct": alt.is_correct}
@@ -223,6 +224,7 @@ class QuestionService:
             status=QuestionStatus.RASCUNHO,
             statement=data.statement,
             explanation=data.explanation,
+            teacher_name=data.teacher_name,
             correct_alternative_letter=correct.letter,
             created_by=admin_user_id,
         )

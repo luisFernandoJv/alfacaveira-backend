@@ -68,6 +68,10 @@ class Question(UUIDPKMixin, TimestampMixin, Base):
     statement: Mapped[str] = mapped_column(Text, nullable=False)
     correct_alternative_letter: Mapped[str] = mapped_column(String(1), nullable=False)
     explanation: Mapped[str | None] = mapped_column(Text)
+    # Nome do professor autor do gabarito comentado (exibido no cartão de
+    # comentário para o aluno). Livre — não é FK para `users`, pois nem todo
+    # professor tem conta na plataforma; é só um rótulo editável pelo admin.
+    teacher_name: Mapped[str | None] = mapped_column(String(120))
 
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
 

@@ -97,6 +97,7 @@ class QuestionCreateRequest(BaseModel):
     difficulty: QuestionDifficulty
     statement: str = Field(min_length=1)
     explanation: str | None = None
+    teacher_name: str | None = Field(default=None, max_length=120)
 
     alternatives: list[QuestionAlternativeInput] = Field(min_length=2, max_length=5)
     tag_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -129,6 +130,7 @@ class QuestionUpdateRequest(BaseModel):
     difficulty: QuestionDifficulty | None = None
     statement: str | None = Field(default=None, min_length=1)
     explanation: str | None = None
+    teacher_name: str | None = Field(default=None, max_length=120)
 
     # Se enviado, substitui integralmente o conjunto de alternativas.
     alternatives: list[QuestionAlternativeInput] | None = Field(
@@ -198,6 +200,7 @@ class QuestionDetailResponse(BaseModel):
     id: uuid.UUID
     statement: str
     explanation: str | None
+    teacher_name: str | None
     correct_alternative_letter: str
     discipline: DisciplineResponse
     subject: SubjectResponse | None
