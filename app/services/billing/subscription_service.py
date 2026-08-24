@@ -45,6 +45,7 @@ from app.database.uow import UnitOfWork
 from app.models.billing.plan import Plan
 from app.models.billing.subscription import Subscription
 from app.models.billing.subscription_history import SubscriptionHistory
+from app.models.platform.admin_audit_log import AdminAuditLog
 from app.models.enums import (
     BillingPeriod,
     PaymentStatus,
@@ -555,6 +556,152 @@ class SubscriptionService:
             await self._notification.notify_renewal_success(user, subscription)
 
         return subscription
+
+
+    async def admin_grant_subscription(
+        self,
+        *,
+        admin_id: uuid.UUID,
+        user_id: uuid.UUID,
+        plan_id: uuid.UUID,
+        duration_days: int | None = None,
+    ) -> Subscription:
+        """Concede uma assinatura ATIVA diretamente a um usuário, sem
+        pagamento — uso administrativo (cortesia, parceria, suporte).
+
+        Cancela imediatamente qualquer assinatura ATIVA/PENDENTE existente
+        antes de criar a nova, preservando a invariante "no máximo 1
+        assinatura ATIVA por usuário" (mesma regra de `create_subscription`,
+        ver ADR-003). Registra tanto `SubscriptionHistory` quanto
+        `AdminAuditLog`, para diferenciar de uma ativação por webhook.
+        """
+        plan = await self._plans.get_by_id(plan_id)
+        if plan is None or not plan.is_active:
+            raise NotFoundError("Plano não encontrado ou inativo.")
+        user = await self._users.get_by_id(user_id)
+        if user is None:
+            raise NotFoundError("Usuário não encontrado.")
+
+        now = _utcnow()
+        period_length = (
+            timedelta(days=duration_days)
+            if duration_days
+            else _PERIOD_LENGTH[plan.billing_period]
+        )
+
+        async with UnitOfWork(self._session):
+            existing_active = await self._subscriptions.get_active_by_user(user_id)
+            if existing_active is not None:
+                applied = await self._subscriptions.compare_and_swap(
+                    existing_active.id,
+                    expected={"status": SubscriptionStatus.ATIVA},
+                    values={"status": SubscriptionStatus.CANCELADA},
+                )
+                if applied:
+                    self._session.add(
+                        SubscriptionHistory(
+                            subscription_id=existing_active.id,
+                            from_plan_id=existing_active.plan_id,
+                            to_plan_id=existing_active.plan_id,
+                            from_status=SubscriptionStatus.ATIVA,
+                            to_status=SubscriptionStatus.CANCELADA,
+                            reason=SubscriptionHistoryReason.CANCELADA,
+                        )
+                    )
+
+            existing_pending = await self._subscriptions.get_pending_by_user(user_id)
+            if existing_pending is not None:
+                applied = await self._subscriptions.compare_and_swap(
+                    existing_pending.id,
+                    expected={"status": SubscriptionStatus.PENDENTE},
+                    values={"status": SubscriptionStatus.CANCELADA},
+                )
+                if applied:
+                    self._session.add(
+                        SubscriptionHistory(
+                            subscription_id=existing_pending.id,
+                            from_plan_id=existing_pending.plan_id,
+                            to_plan_id=existing_pending.plan_id,
+                            from_status=SubscriptionStatus.PENDENTE,
+                            to_status=SubscriptionStatus.CANCELADA,
+                            reason=SubscriptionHistoryReason.CANCELADA,
+                        )
+                    )
+
+            subscription = Subscription(
+                user_id=user_id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ATIVA,
+                current_period_start=now,
+                current_period_end=now + period_length,
+                cancel_at_period_end=False,
+            )
+            await self._subscriptions.add(subscription)
+            await self._session.flush()
+            self._session.add(
+                SubscriptionHistory(
+                    subscription_id=subscription.id,
+                    from_plan_id=None,
+                    to_plan_id=plan.id,
+                    from_status=None,
+                    to_status=SubscriptionStatus.ATIVA,
+                    reason=SubscriptionHistoryReason.ATIVADA,
+                )
+            )
+            self._session.add(
+                AdminAuditLog(
+                    admin_user_id=admin_id,
+                    action="grant_subscription",
+                    entity_type="subscription",
+                    entity_id=subscription.id,
+                    extra_metadata={
+                        "user_id": str(user_id),
+                        "plan_slug": plan.slug,
+                        "duration_days": duration_days,
+                    },
+                )
+            )
+            await self._session.flush()
+
+        return await self.get_subscription(subscription.id, user_id)
+
+    async def admin_revoke_subscription(
+        self, *, admin_id: uuid.UUID, user_id: uuid.UUID
+    ) -> None:
+        """Cancela imediatamente a assinatura ATIVA do usuário (reverter uma
+        concessão feita por engano, por exemplo). Sem-op se não houver
+        assinatura ATIVA — idempotente, mesmo raciocínio do resto do serviço.
+        """
+        async with UnitOfWork(self._session):
+            existing_active = await self._subscriptions.get_active_by_user(user_id)
+            if existing_active is None:
+                return
+            applied = await self._subscriptions.compare_and_swap(
+                existing_active.id,
+                expected={"status": SubscriptionStatus.ATIVA},
+                values={"status": SubscriptionStatus.CANCELADA},
+            )
+            if applied:
+                self._session.add(
+                    SubscriptionHistory(
+                        subscription_id=existing_active.id,
+                        from_plan_id=existing_active.plan_id,
+                        to_plan_id=existing_active.plan_id,
+                        from_status=SubscriptionStatus.ATIVA,
+                        to_status=SubscriptionStatus.CANCELADA,
+                        reason=SubscriptionHistoryReason.CANCELADA,
+                    )
+                )
+                self._session.add(
+                    AdminAuditLog(
+                        admin_user_id=admin_id,
+                        action="revoke_subscription",
+                        entity_type="subscription",
+                        entity_id=existing_active.id,
+                        extra_metadata={"user_id": str(user_id)},
+                    )
+                )
+                await self._session.flush()
 
     # ==================================================================== #
     # Upgrade / Downgrade / Pró-rata (PROMPT 12)                          #

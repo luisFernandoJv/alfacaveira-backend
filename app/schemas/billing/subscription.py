@@ -55,3 +55,12 @@ class CancelSubscriptionRequest(BaseModel):
     na hora."""
 
     immediately: bool = False
+
+
+class AdminGrantSubscriptionRequest(BaseModel):
+    """Concessão manual de acesso a um plano (cortesia, parceria, suporte),
+    usada pelo painel administrativo. Ver `SubscriptionService.admin_grant_subscription`.
+    """
+
+    plan_id: uuid.UUID
+    duration_days: int | None = Field(default=None, ge=1, le=3650)

@@ -70,6 +70,10 @@ class AdminUserListItem(BaseModel):
     is_admin: bool
     is_active: bool
     created_at: datetime
+    # Plano da assinatura ATIVA do usuário, se houver (ver
+    # `list_users_admin` em app/api/v1/admin/users.py). `None` = plano FREE.
+    plan_slug: str | None = None
+    plan_name: str | None = None
 
 
 class UpdateUserStatusRequest(BaseModel):
