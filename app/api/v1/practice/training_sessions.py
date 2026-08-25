@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
+from app.models.content.question import Question
 from app.models.practice.training_session import TrainingSession
 from app.schemas.practice.question_attempt import AnswerResultResponse, AnswerSubmitRequest
 from app.schemas.practice.training_session import (
@@ -57,12 +58,52 @@ async def _build_detail(
     training_session: TrainingSession,
 ) -> TrainingSessionDetailResponse:
     ordered_questions, _ = await training_session_service.get_session_questions(training_session)
-    answered_ids = await training_session_service.get_answered_question_ids(
+    attempts_by_question = await training_session_service.get_session_attempts_by_question(
         current_user_id, training_session.id
     )
     questions_by_position = {
         item.question_id: item.position for item in training_session.questions
     }
+
+    def _build_question_response(question: Question) -> TrainingSessionQuestionResponse:
+        attempt = attempts_by_question.get(question.id)
+        # 🔥 CORREÇÃO (estado perdido ao retomar sessão): antes só marcávamos
+        # `answered`, sem devolver a resposta em si. O frontend não tinha como
+        # remontar o resultado (alternativa marcada, acerto/erro, gabarito)
+        # de uma questão já respondida numa visita anterior — ao voltar para
+        # a sessão, a barra de progresso e o histórico da tela de resolução
+        # mostravam tudo como "não respondido", mesmo já persistido no banco.
+        # Só expõe o gabarito quando `attempt` existe — questão ainda não
+        # respondida continua sem vazar `correct_alternative_letter`.
+        return TrainingSessionQuestionResponse(
+            id=question.id,
+            statement=question.statement,
+            discipline=question.discipline,
+            subject=question.subject,
+            topic=question.topic,
+            exam_board=question.exam_board,
+            exam_edition=question.exam_edition,
+            organization=question.organization,
+            year=question.year,
+            difficulty=question.difficulty,
+            alternatives=question.alternatives,
+            tags=question.tags,
+            # 🔥 CORREÇÃO: faltava passar `attachments` aqui. O schema
+            # tem `default_factory=list`, então o Pydantic não acusava
+            # erro nenhum — só preenchia a lista vazia em silêncio, e a
+            # imagem sumia na tela de resolução mesmo com o anexo salvo
+            # certinho no banco e carregado por `get_session_questions`
+            # (`QuestionRepository.list_by_ids` já faz `selectinload`
+            # de `Question.attachments`; só faltava repassar adiante).
+            attachments=question.attachments,
+            position=questions_by_position[question.id],
+            answered=attempt is not None,
+            selected_alternative_id=attempt.selected_alternative_id if attempt else None,
+            is_correct=attempt.is_correct if attempt else None,
+            correct_alternative_letter=question.correct_alternative_letter if attempt else None,
+            explanation=question.explanation if attempt else None,
+        )
+
     return TrainingSessionDetailResponse(
         id=training_session.id,
         total_questions=training_session.total_questions,
@@ -70,33 +111,7 @@ async def _build_detail(
         started_at=training_session.started_at,
         finished_at=training_session.finished_at,
         current_question_index=training_session.current_question_index,
-        questions=[
-            TrainingSessionQuestionResponse(
-                id=question.id,
-                statement=question.statement,
-                discipline=question.discipline,
-                subject=question.subject,
-                topic=question.topic,
-                exam_board=question.exam_board,
-                exam_edition=question.exam_edition,
-                organization=question.organization,
-                year=question.year,
-                difficulty=question.difficulty,
-                alternatives=question.alternatives,
-                tags=question.tags,
-                # 🔥 CORREÇÃO: faltava passar `attachments` aqui. O schema
-                # tem `default_factory=list`, então o Pydantic não acusava
-                # erro nenhum — só preenchia a lista vazia em silêncio, e a
-                # imagem sumia na tela de resolução mesmo com o anexo salvo
-                # certinho no banco e carregado por `get_session_questions`
-                # (`QuestionRepository.list_by_ids` já faz `selectinload`
-                # de `Question.attachments`; só faltava repassar adiante).
-                attachments=question.attachments,
-                position=questions_by_position[question.id],
-                answered=question.id in answered_ids,
-            )
-            for question in ordered_questions
-        ],
+        questions=[_build_question_response(question) for question in ordered_questions],
     )
 
 

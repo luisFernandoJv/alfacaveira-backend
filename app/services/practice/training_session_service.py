@@ -10,6 +10,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainEr
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question
 from app.models.enums import FeatureKey, QuestionStatus, SessionType
+from app.models.practice.question_attempt import QuestionAttempt
 from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
@@ -237,6 +238,24 @@ class TrainingSessionService:
             user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
         )
         return {attempt.question_id for attempt in attempts}
+
+    async def get_session_attempts_by_question(
+        self, user_id: uuid.UUID, session_id: uuid.UUID
+    ) -> dict[uuid.UUID, QuestionAttempt]:
+        """Tentativa por questão nesta sessão — usado para reconstruir o
+        resultado (alternativa marcada, acerto/erro) de questões já
+        respondidas ao retomar a sessão (`GET .../training-sessions/{id}`).
+        Sem isso, o frontend perde a resposta ao sair e voltar: o `answered`
+        booleano sozinho não basta para remontar o `AnswerRecord`.
+        """
+        attempts = await self._attempts.list_by_session(
+            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
+        )
+        # Em teoria há no máximo 1 attempt por (user, questão, sessão) — o
+        # `ConflictError` em `submit_training_answer` impede um segundo. Usa
+        # dict simples (última tentativa vence) para não quebrar se algum
+        # dado legado tiver duplicata.
+        return {attempt.question_id: attempt for attempt in attempts}
 
     async def update_position(
         self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int

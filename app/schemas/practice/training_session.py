@@ -67,6 +67,17 @@ class TrainingSessionQuestionResponse(BaseModel):
     attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
     position: int
     answered: bool
+    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
+    # respondida em uma visita anterior a esta mesma sessão. É o que
+    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
+    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
+    # que a página é recarregada ou o aluno sai e volta.
+    # Para questões ainda não respondidas, ficam `None` — o gabarito
+    # nunca é exposto antes da resposta ser enviada.
+    selected_alternative_id: uuid.UUID | None = None
+    is_correct: bool | None = None
+    correct_alternative_letter: str | None = None
+    explanation: str | None = None
 
 
 class TrainingSessionListItem(BaseModel):
