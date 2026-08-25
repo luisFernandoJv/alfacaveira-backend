@@ -219,3 +219,21 @@ class QuestionReportReason(str, enum.Enum):
     DUPLICADA = "duplicada"
     CLASSIFICACAO = "classificacao"
     OUTRO = "outro"
+
+class NotificationCategory(str, enum.Enum):
+    """Categoria de alto nível usada por UI e preferências."""
+
+    COMMENT = "comment"
+    BILLING = "billing"
+    PLAN = "plan"
+    MARKETING = "marketing"
+    SYSTEM = "system"
+
+
+NOTIFICATION_MANDATORY_CATEGORIES: frozenset[NotificationCategory] = frozenset(
+    {
+        NotificationCategory.BILLING,
+        NotificationCategory.PLAN,
+        NotificationCategory.SYSTEM,
+    }
+)

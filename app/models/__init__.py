@@ -23,7 +23,7 @@ from app.models.learning.notebook import Notebook
 from app.models.learning.notebook_folder import NotebookFolder
 from app.models.learning.notebook_question import NotebookQuestion
 from app.models.learning.notebook_tag import NotebookTag
-from app.models.platform import AdminAuditLog, Notification
+from app.models.platform import AdminAuditLog, Notification, NotificationPreference
 from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
 
 __all__ = [
@@ -61,6 +61,7 @@ __all__ = [
     "SubscriptionHistory",
     "Payment",
     "Notification",
+    "NotificationPreference",
     "AdminAuditLog",
     "Notebook",
     "NotebookFolder",

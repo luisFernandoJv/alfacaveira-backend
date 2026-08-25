@@ -14,6 +14,7 @@ from app.api.v1.content.question_stats import router as question_stats_router
 from app.api.v1.content.taxonomy import router as taxonomy_router
 from app.api.v1.identity.auth import router as auth_router
 from app.api.v1.identity.users import router as users_router
+from app.api.v1.identity.notification_preferences import router as notification_preferences_router
 from app.api.v1.practice.attempts import router as attempts_router
 from app.api.v1.practice.training_sessions import router as training_sessions_router
 from app.api.v1.practice.reviews import router as reviews_router
@@ -32,6 +33,7 @@ api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 
 # Users
 api_router.include_router(users_router, prefix="/users", tags=["users"])
+api_router.include_router(notification_preferences_router, prefix="/users", tags=["users"])
 
 # ⚠️ IMPORTANTE: question_stats_router DEVE vir ANTES de questions_router
 # para que /questions/stats não seja capturado como um question_id

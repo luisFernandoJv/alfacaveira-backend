@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
+from app.models.enums import NotificationCategory
 from app.schemas.platform.notification import (
+    NotificationArchiveRequest,
     NotificationListResponse,
     NotificationMarkReadRequest,
     NotificationResponse,
@@ -37,6 +39,7 @@ async def list_notifications(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: Annotated[str | None, Query()] = None,
     status: Annotated[Optional[str], Query()] = None,
+    category: Annotated[NotificationCategory | None, Query()] = None,
 ) -> Envelope[NotificationListResponse]:
     """Lista notificações do usuário."""
     page = CursorPage(limit=limit, cursor=cursor)
@@ -48,6 +51,7 @@ async def list_notifications(
         limit=limit,
         cursor_id=cursor_id,
         status=status,
+        category=category,
     )
 
     next_cursor = (
@@ -104,3 +108,16 @@ async def archive_notification(
         user_id=current_user.id,
     )
     return Envelope(data=NotificationResponse.model_validate(notification))
+
+@router.post("/archive", response_model=Envelope[int])
+async def archive_notifications(
+    body: NotificationArchiveRequest,
+    current_user: CurrentUser,
+    notification_service: NotificationServiceDep,
+) -> Envelope[int]:
+    """Arquiva várias notificações do próprio usuário em uma única operação."""
+    count = await notification_service.archive_notifications(
+        notification_ids=body.notification_ids,
+        user_id=current_user.id,
+    )
+    return Envelope(data=count)

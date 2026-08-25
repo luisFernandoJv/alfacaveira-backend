@@ -20,6 +20,7 @@ from app.repositories.identity.user_repository import UserRepository
 from app.services.billing.payment_service import PaymentService
 from app.services.billing.subscription_service import SubscriptionService
 from app.services.billing.notification_service import SubscriptionNotificationService
+from app.services.platform.notification_service import NotificationService
 
 logger = structlog.get_logger(__name__)
 
@@ -65,7 +66,9 @@ async def run_once(session: AsyncSession, *, now: datetime | None = None) -> dic
     subscriptions = SubscriptionRepository(session)
     payment_service = PaymentService(session)
     subscription_service = SubscriptionService(session)
-    notification_service = SubscriptionNotificationService()
+    notification_service = SubscriptionNotificationService(
+        notification_service=NotificationService(session)
+    )
     user_repo = UserRepository(session)
 
     reminders_sent = 0

@@ -27,6 +27,7 @@ from typing import Optional, List
 from sqlalchemy import select, update, func
 
 from app.models.platform.notification import Notification
+from app.models.enums import NotificationCategory
 from app.repositories.base import BaseRepository
 
 
@@ -41,12 +42,15 @@ class NotificationRepository(BaseRepository[Notification]):
         limit: int = 20,
         cursor_id: Optional[uuid.UUID] = None,
         status: Optional[str] = None,
+        category: NotificationCategory | None = None,
     ) -> List[Notification]:
         """Lista notificações de um usuário."""
         stmt = select(Notification).where(Notification.user_id == user_id)
 
         if status:
             stmt = stmt.where(Notification.status == status)
+        if category:
+            stmt = stmt.where(Notification.category == category)
 
         stmt = stmt.order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit)
 
@@ -62,11 +66,21 @@ class NotificationRepository(BaseRepository[Notification]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
-    async def count_by_user(self, user_id: uuid.UUID) -> int:
-        """Conta total de notificações de um usuário."""
+    async def count_by_user(
+        self,
+        user_id: uuid.UUID,
+        *,
+        status: Optional[str] = None,
+        category: NotificationCategory | None = None,
+    ) -> int:
+        """Conta notificações do usuário respeitando os filtros."""
         stmt = select(func.count()).select_from(Notification).where(
             Notification.user_id == user_id
         )
+        if status:
+            stmt = stmt.where(Notification.status == status)
+        if category:
+            stmt = stmt.where(Notification.category == category)
         result = await self.session.execute(stmt)
         return result.scalar() or 0
 
@@ -126,3 +140,21 @@ class NotificationRepository(BaseRepository[Notification]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def archive_many(
+        self,
+        user_id: uuid.UUID,
+        notification_ids: List[uuid.UUID],
+    ) -> int:
+        """Arquiva em lote apenas notificações pertencentes ao usuário."""
+        stmt = (
+            update(Notification)
+            .where(
+                Notification.user_id == user_id,
+                Notification.id.in_(notification_ids),
+                Notification.status != "archived",
+            )
+            .values(status="archived")
+        )
+        result = await self.session.execute(stmt)
+        return result.rowcount

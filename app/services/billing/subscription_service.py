@@ -57,6 +57,7 @@ from app.repositories.billing.subscription_history_repository import Subscriptio
 from app.repositories.billing.subscription_repository import SubscriptionRepository
 from app.repositories.identity.user_repository import UserRepository
 from app.services.billing.notification_service import SubscriptionNotificationService
+from app.services.platform.notification_service import NotificationService
 
 _PERIOD_LENGTH: dict[BillingPeriod, timedelta] = {
     BillingPeriod.MENSAL: timedelta(days=30),
@@ -70,13 +71,20 @@ _MIN_PRORATED_AMOUNT_CENTS = 1
 
 
 class SubscriptionService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        notification_service: NotificationService | None = None,
+    ) -> None:
         self._session = session
         self._subscriptions = SubscriptionRepository(session)
         self._plans = PlanRepository(session)
         self._history = SubscriptionHistoryRepository(session)
         self._users = UserRepository(session)
-        self._notification = SubscriptionNotificationService()
+        self._in_app_notifications = notification_service or NotificationService(session)
+        self._notification = SubscriptionNotificationService(
+            notification_service=self._in_app_notifications
+        )
 
     # ------------------------------------------------------------------ #
     # Leitura
@@ -663,7 +671,19 @@ class SubscriptionService:
             )
             await self._session.flush()
 
-        return await self.get_subscription(subscription.id, user_id)
+        result = await self.get_subscription(subscription.id, user_id)
+        await self._notification_service_plan_granted(user_id, plan.name, result.id)
+        return result
+
+    async def _notification_service_plan_granted(
+        self, user_id: uuid.UUID, plan_name: str, subscription_id: uuid.UUID
+    ) -> None:
+        """Emite o evento de plano concedido pelo mesmo serviço in-app."""
+        await self._in_app_notifications.notify_plan_granted(
+            user_id=user_id,
+            plan_name=plan_name,
+            subscription_id=subscription_id,
+        )
 
     async def admin_revoke_subscription(
         self, *, admin_id: uuid.UUID, user_id: uuid.UUID
@@ -672,10 +692,13 @@ class SubscriptionService:
         concessão feita por engano, por exemplo). Sem-op se não houver
         assinatura ATIVA — idempotente, mesmo raciocínio do resto do serviço.
         """
+        revoked_plan_name: str | None = None
+        applied = False
         async with UnitOfWork(self._session):
             existing_active = await self._subscriptions.get_active_by_user(user_id)
             if existing_active is None:
                 return
+            revoked_plan_name = existing_active.plan.name
             applied = await self._subscriptions.compare_and_swap(
                 existing_active.id,
                 expected={"status": SubscriptionStatus.ATIVA},
@@ -702,6 +725,12 @@ class SubscriptionService:
                     )
                 )
                 await self._session.flush()
+
+        if applied:
+            await self._in_app_notifications.notify_plan_revoked(
+                user_id=user_id,
+                plan_name=revoked_plan_name,
+            )
 
     # ==================================================================== #
     # Upgrade / Downgrade / Pró-rata (PROMPT 12)                          #
