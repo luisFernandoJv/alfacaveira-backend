@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question
-from app.models.enums import FeatureKey, QuestionStatus, SessionType
+from app.models.enums import FeatureKey, QuestionAnswerStatus, QuestionStatus, SessionType
 from app.models.practice.question_attempt import QuestionAttempt
 from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
@@ -38,6 +38,7 @@ def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
         "quantity": data.quantity,
         "question_ids": [str(qid) for qid in (data.question_ids or [])],
         "notebook_id": str(data.notebook_id) if data.notebook_id else None,
+        "exclude_answered": data.exclude_answered,
     }
 
 
@@ -95,8 +96,21 @@ class TrainingSessionService:
             difficulty=data.difficulty,
             status=QuestionStatus.PUBLICADA,
             tag_id=data.tag_id,
+            # Sem `user_id`, `_apply_filters` ignora `answer_status` (ver
+            # `QuestionRepository._apply_filters`) — precisa dos dois juntos
+            # pra "só questões que eu ainda não respondi" funcionar.
+            answer_status=QuestionAnswerStatus.NAO_RESPONDIDA if data.exclude_answered else None,
+            user_id=user_id if data.exclude_answered else None,
         )
         questions = await self._questions.list_random(filters, limit=data.quantity)
+        if not questions and data.exclude_answered:
+            # Sem isso, "acabaram as questões novas" vira o mesmo erro genérico
+            # de "nenhuma questão encontrada para os filtros", que leva o
+            # aluno a mexer nos filtros errados achando que é isso.
+            raise NotFoundError(
+                "Você já respondeu todas as questões que batem com esses filtros. "
+                "Desmarque \"somente questões novas\" para revisar as que já respondeu."
+            )
         if not questions:
             raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
 
@@ -216,10 +230,16 @@ class TrainingSessionService:
 
     async def list_sessions(
         self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[TrainingSession]:
-        return await self._sessions.list_paginated(
-            user_id=user_id, limit=limit, cursor_id=cursor_id
+    ) -> tuple[list[TrainingSession], bool]:
+        """Mesma correção de `QuestionAttemptService.list_history`: busca
+        `limit + 1` e descarta o extra para saber com certeza se há próxima
+        página, em vez de inferir errado quando o total é múltiplo exato de
+        `limit`."""
+        sessions = await self._sessions.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
         )
+        has_more = len(sessions) > limit
+        return sessions[:limit], has_more
 
     async def get_session_questions(
         self, training_session: TrainingSession

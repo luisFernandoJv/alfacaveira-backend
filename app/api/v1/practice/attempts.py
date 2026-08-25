@@ -42,14 +42,12 @@ async def list_attempts(
     decoded_cursor = page.decode_cursor()
     cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
 
-    attempts = await question_attempt_service.list_history(
+    attempts, has_more = await question_attempt_service.list_history(
         current_user.id, limit=limit, cursor_id=cursor_id
     )
-    next_cursor = (
-        CursorPage.encode_cursor(str(attempts[-1].id)) if len(attempts) == limit else None
-    )
+    next_cursor = CursorPage.encode_cursor(str(attempts[-1].id)) if has_more else None
 
     return Envelope(
         data=[QuestionAttemptListItem.model_validate(a) for a in attempts],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+        meta=Meta(next_cursor=next_cursor, has_more=has_more),
     )

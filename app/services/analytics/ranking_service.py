@@ -41,35 +41,59 @@ class RankingService:
         user_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking global com a posição do usuário."""
-        rankings = await self._ranking.get_global_ranking(limit=limit, offset=offset)
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking global com a posição do usuário.
+
+        Mesma correção de `QuestionAttemptService.list_history`: busca
+        `limit + 1` e descarta o extra para saber com certeza se há próxima
+        página, em vez de inferir errado (`len(rankings) == limit`) quando o
+        total de usuários é múltiplo exato de `limit`. `total` vem de
+        `get_global_count` (contagem real), não do tamanho da página atual.
+        """
+        rankings = await self._ranking.get_global_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_global_count()
         user_position = await self._ranking.get_user_position(user_id)
-        return rankings, user_position
+        return rankings, user_position, total, has_more
 
     async def get_weekly_ranking(
         self,
         user_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking semanal com a posição do usuário."""
-        rankings = await self._ranking.get_weekly_ranking(limit=limit, offset=offset)
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking semanal com a posição do usuário.
+
+        Mesma correção de paginação de `get_global_ranking` (ver docstring
+        acima), com a contagem filtrada por `weekly_points > 0`.
+        """
+        rankings = await self._ranking.get_weekly_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_weekly_count()
         user_ranking = await self._ranking.get_by_user(user_id)
         user_position = user_ranking.rank_weekly if user_ranking else None
-        return rankings, user_position
+        return rankings, user_position, total, has_more
 
     async def get_monthly_ranking(
         self,
         user_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking mensal com a posição do usuário."""
-        rankings = await self._ranking.get_monthly_ranking(limit=limit, offset=offset)
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking mensal com a posição do usuário.
+
+        Mesma correção de paginação de `get_global_ranking` (ver docstring
+        acima), com a contagem filtrada por `monthly_points > 0`.
+        """
+        rankings = await self._ranking.get_monthly_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_monthly_count()
         user_ranking = await self._ranking.get_by_user(user_id)
         user_position = user_ranking.rank_monthly if user_ranking else None
-        return rankings, user_position
+        return rankings, user_position, total, has_more
 
     async def get_user_ranking(self, user_id: uuid.UUID) -> UserRanking | None:
         """Retorna o ranking de um usuário específico."""

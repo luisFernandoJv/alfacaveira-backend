@@ -147,16 +147,14 @@ async def list_training_sessions(
     decoded_cursor = page.decode_cursor()
     cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
 
-    sessions = await training_session_service.list_sessions(
+    sessions, has_more = await training_session_service.list_sessions(
         current_user.id, limit=limit, cursor_id=cursor_id
     )
-    next_cursor = (
-        CursorPage.encode_cursor(str(sessions[-1].id)) if len(sessions) == limit else None
-    )
+    next_cursor = CursorPage.encode_cursor(str(sessions[-1].id)) if has_more else None
 
     return Envelope(
         data=[TrainingSessionListItem.model_validate(s) for s in sessions],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+        meta=Meta(next_cursor=next_cursor, has_more=has_more),
     )
 
 

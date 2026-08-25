@@ -40,7 +40,13 @@ class RankingResponse(BaseModel):
     """Resposta de listagem de ranking."""
 
     items: list[RankingPositionResponse]
-    total: int = Field(description="Total de itens na página")
+    total: int = Field(
+        description=(
+            "Total de usuários elegíveis nesta aba do ranking (não o tamanho "
+            "da página atual — ver `RankingRepository.get_global_count` / "
+            "`get_weekly_count` / `get_monthly_count`)"
+        )
+    )
     user_position: int | None = Field(description="Posição do usuário atual")
     has_more: bool = Field(description="Se há mais itens para carregar")
 

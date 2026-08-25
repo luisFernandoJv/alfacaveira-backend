@@ -2211,16 +2211,14 @@ async def list_attempts(
     decoded_cursor = page.decode_cursor()
     cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
 
-    attempts = await question_attempt_service.list_history(
+    attempts, has_more = await question_attempt_service.list_history(
         current_user.id, limit=limit, cursor_id=cursor_id
     )
-    next_cursor = (
-        CursorPage.encode_cursor(str(attempts[-1].id)) if len(attempts) == limit else None
-    )
+    next_cursor = CursorPage.encode_cursor(str(attempts[-1].id)) if has_more else None
 
     return Envelope(
         data=[QuestionAttemptListItem.model_validate(a) for a in attempts],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
+        meta=Meta(next_cursor=next_cursor, has_more=has_more),
     )
 </file>
 
@@ -24800,10 +24798,21 @@ class QuestionAttemptService:
 
     async def list_history(
         self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[QuestionAttempt]:
-        return await self._attempts.list_paginated(
-            user_id=user_id, limit=limit, cursor_id=cursor_id
+    ) -> tuple[list[QuestionAttempt], bool]:
+        """Uma página do histórico + se existe página seguinte.
+
+        Busca `limit + 1` registros e descarta o extra: com `limit` exatos,
+        `len(attempts) == limit` não diz se acabou a lista ou se ela termina
+        bem ali — as duas situações ficam indistinguíveis, e o cliente acaba
+        disparando um `loadMore` a mais que sempre volta vazio quando o
+        total é múltiplo exato de `limit`. O item extra resolve a ambiguidade
+        sem precisar de `COUNT(*)` (caro em tabela de alto volume).
+        """
+        attempts = await self._attempts.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
         )
+        has_more = len(attempts) > limit
+        return attempts[:limit], has_more
 </file>
 
 <file path="migrations/versions/0018_add_notifications.py">
@@ -33333,8 +33342,12 @@ from app.repositories.learning.notebook_folder_repository import NotebookFolderR
 from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
 from app.repositories.learning.notebook_repository import NotebookRepository
 from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.user_question_state_repository import (
+    UserQuestionStateRepository,
+)
 from app.services.billing.feature_gate_service import FeatureGateService
-from app.models.enums import FeatureKey
+from app.models.enums import FeatureKey, QuestionAnswerStatus
 
 
 class NotebookService:
@@ -33348,6 +33361,13 @@ class NotebookService:
         self._tags = NotebookTagRepository(session)
         self._question_repo = QuestionRepository(session)
         self._feature_gate = FeatureGateService(session)
+        # 🔥 CORREÇÃO (caderno não mostra questão como resolvida): faltavam
+        # aqui — sem eles, `question.answer_status`/`question.is_favorite`
+        # nunca eram calculados para as questões de um caderno, e o schema
+        # (`QuestionListItem`) caía sempre no default `NAO_RESPONDIDA`/
+        # `False`, mesmo para questões já respondidas pelo aluno.
+        self._states = UserQuestionStateRepository(session)
+        self._attempts = QuestionAttemptRepository(session)
 
     # ==================================================================== #
     # FOLDERS
@@ -33631,18 +33651,67 @@ class NotebookService:
         cursor_id: Optional[uuid.UUID] = None,
         search: Optional[str] = None,
     ) -> tuple[list[NotebookQuestion], int]:
-        """Lista questões de um caderno."""
+        """Lista questões de um caderno.
+
+        🔥 CORREÇÃO (caderno "esquece" questão respondida): esta listagem
+        devolve `NotebookQuestion.question` (um `Question` do banco), que o
+        schema `QuestionListItem` serializa incluindo `is_favorite` e
+        `answer_status` — mas esses dois são atributos TRANSIENTES (não
+        colunas), que precisam ser calculados e atribuídos explicitamente em
+        cada request, exatamente como `QuestionService.list_questions` já
+        fazia para o Banco de Questões. Sem isso, todo item de caderno caía
+        no default do schema (`NAO_RESPONDIDA` / `False`), então uma questão
+        recém-respondida no treino continuava aparecendo como "não feita" ao
+        montar/abrir um caderno — mesmo com o `QuestionAttempt` já salvo.
+        """
         notebook = await self._notebooks.get_owned(notebook_id, user_id)
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
 
-        return await self._questions.list_by_notebook(
+        items, total = await self._questions.list_by_notebook(
             notebook_id=notebook_id,
             user_id=user_id,
             limit=limit,
             cursor_id=cursor_id,
             search=search,
         )
+        await self._attach_answer_state(items, user_id)
+        return items, total
+
+    async def _attach_answer_state(
+        self, items: list[NotebookQuestion], user_id: uuid.UUID
+    ) -> None:
+        """Preenche `item.question.is_favorite`/`answer_status` em lote —
+        mesma lógica de `QuestionService.list_questions` (duas queries
+        agregadas, independente da quantidade de itens do caderno).
+        """
+        if not items:
+            return
+        question_ids = [item.question_id for item in items]
+        favorited_ids, correct_map = await self._session_gather(
+            self._states.get_favorited_ids(user_id, question_ids),
+            self._attempts.get_correct_status_map(user_id, question_ids),
+        )
+        for item in items:
+            item.question.is_favorite = item.question_id in favorited_ids
+            if item.question_id not in correct_map:
+                item.question.answer_status = QuestionAnswerStatus.NAO_RESPONDIDA
+            elif correct_map[item.question_id]:
+                item.question.answer_status = QuestionAnswerStatus.ACERTOU
+            else:
+                item.question.answer_status = QuestionAnswerStatus.ERROU
+
+    @staticmethod
+    async def _session_gather(*coros):
+        """Executa as queries de estado em sequência (mesma razão de
+        `QuestionService._session_gather`): as coroutines compartilham a
+        MESMA `AsyncSession`, que não é concorrente — `asyncio.gather` aqui
+        corromperia o estado da sessão.
+        """
+        results = []
+        for coro in coros:
+            results.append(await coro)
+        return results
 
 
     async def list_export_questions(
@@ -35368,276 +35437,6 @@ __all__ = [
 ]
 </file>
 
-<file path="app/services/practice/training_session_service.py">
-# app/services/practice/training_session_service.py
-import uuid
-from datetime import UTC, datetime
-from typing import Optional
-
-import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
-from app.database.uow import UnitOfWork
-from app.models.content.question import Question
-from app.models.enums import FeatureKey, QuestionStatus, SessionType
-from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
-from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
-from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
-from app.repositories.practice.training_session_repository import TrainingSessionRepository
-from app.repositories.learning.notebook_repository import NotebookRepository
-from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
-from app.schemas.practice.training_session import TrainingSessionCreateRequest
-from app.services.billing.feature_gate_service import FeatureGateService
-
-logger = structlog.get_logger(__name__)
-
-
-def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
-    """Snapshot (JSONB) dos filtros usados para montar a sessão."""
-    return {
-        "discipline_id": str(data.discipline_id) if data.discipline_id else None,
-        "subject_id": str(data.subject_id) if data.subject_id else None,
-        "topic_id": str(data.topic_id) if data.topic_id else None,
-        "exam_board_id": str(data.exam_board_id) if data.exam_board_id else None,
-        "exam_edition_id": str(data.exam_edition_id) if data.exam_edition_id else None,
-        "organization_id": str(data.organization_id) if data.organization_id else None,
-        "year": data.year,
-        "difficulty": data.difficulty.value if data.difficulty else None,
-        "tag_id": str(data.tag_id) if data.tag_id else None,
-        "quantity": data.quantity,
-        "question_ids": [str(qid) for qid in (data.question_ids or [])],
-        "notebook_id": str(data.notebook_id) if data.notebook_id else None,
-    }
-
-
-class TrainingSessionService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._sessions = TrainingSessionRepository(session)
-        self._questions = QuestionRepository(session)
-        self._attempts = QuestionAttemptRepository(session)
-        self._notebooks = NotebookRepository(session)
-        self._notebook_questions = NotebookQuestionRepository(session)
-        self._feature_gate = FeatureGateService(session)
-
-    async def create_session(
-        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria uma sessão de treino a partir de filtros, lista explícita ou caderno."""
-        logger.info(
-            "training_session.create.start",
-            user_id=str(user_id),
-            has_notebook_id=bool(data.notebook_id),
-            has_question_ids=bool(data.question_ids),
-        )
-
-        # Se for criar a partir de um caderno, usa as questões do caderno
-        if data.notebook_id:
-            return await self._create_session_from_notebook(user_id, data.notebook_id, data)
-
-        # Se for criar a partir de uma lista explícita de IDs
-        if data.question_ids:
-            return await self._create_session_from_question_ids(user_id, data.question_ids, data)
-
-        # Caso contrário, usa os filtros tradicionais
-        return await self._create_session_from_filters(user_id, data)
-
-    async def _create_session_from_filters(
-        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de filtros (comportamento original)."""
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        filters = QuestionFilters(
-            discipline_id=data.discipline_id,
-            subject_id=data.subject_id,
-            topic_id=data.topic_id,
-            exam_board_id=data.exam_board_id,
-            exam_edition_id=data.exam_edition_id,
-            organization_id=data.organization_id,
-            year=data.year,
-            difficulty=data.difficulty,
-            status=QuestionStatus.PUBLICADA,
-            tag_id=data.tag_id,
-        )
-        questions = await self._questions.list_random(filters, limit=data.quantity)
-        if not questions:
-            raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
-
-        return await self._persist_session(user_id, questions, data)
-
-    async def _create_session_from_question_ids(
-        self, user_id: uuid.UUID, question_ids: list[uuid.UUID], data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de uma lista explícita de IDs de questões."""
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        # Buscar as questões pelos IDs
-        questions = await self._questions.list_by_ids(question_ids)
-
-        # Verificar se todas as questões foram encontradas
-        found_ids = {q.id for q in questions}
-        missing = [str(qid) for qid in question_ids if qid not in found_ids]
-        if missing:
-            raise NotFoundError(f"Questões não encontradas: {', '.join(missing[:5])}")
-
-        return await self._persist_session(user_id, questions, data)
-
-    async def _create_session_from_notebook(
-        self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de um caderno específico."""
-        logger.info("notebook_session.start", notebook_id=str(notebook_id), user_id=str(user_id))
-
-        # Verificar ownership do caderno
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        # Buscar questões do caderno
-        notebook_questions, _ = await self._notebook_questions.list_by_notebook(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            limit=1000,  # Limite alto para não truncar
-        )
-
-        logger.info(
-            "notebook_session.questions_found",
-            notebook_id=str(notebook_id),
-            count=len(notebook_questions),
-        )
-
-        if not notebook_questions:
-            raise NotFoundError("Este caderno não possui questões para estudar.")
-
-        # Extrair os IDs das questões
-        question_ids = [nq.question_id for nq in notebook_questions]
-
-        # Buscar as questões completas
-        questions = await self._questions.list_by_ids(question_ids)
-
-        # Verificar quota
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        # Criar uma cópia do data para não modificar o original
-        session_data = data.model_copy()
-        session_data.quantity = len(questions)
-
-        return await self._persist_session(user_id, questions, session_data)
-
-    async def _persist_session(
-        self,
-        user_id: uuid.UUID,
-        questions: list[Question],
-        data: TrainingSessionCreateRequest,
-    ) -> TrainingSession:
-        """Persiste a sessão no banco de dados."""
-        logger.info(
-            "session.persist.start",
-            user_id=str(user_id),
-            question_count=len(questions),
-        )
-
-        now = datetime.now(UTC)
-
-        # Limitar quantidade
-        quantity = min(data.quantity, len(questions))
-        selected_questions = questions[:quantity]
-
-        training_session = TrainingSession(
-            user_id=user_id,
-            filters_snapshot=_filters_snapshot(data),
-            total_questions=len(selected_questions),
-            correct_count=0,
-            started_at=now,
-        )
-        training_session.questions = [
-            TrainingSessionQuestion(question_id=question.id, position=position)
-            for position, question in enumerate(selected_questions)
-        ]
-
-        async with UnitOfWork(self._session):
-            await self._sessions.add(training_session)
-            logger.info("session.persist.committed", session_id=str(training_session.id))
-
-        return await self.get_session(training_session.id, user_id)
-
-    async def get_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> TrainingSession:
-        training_session = await self._sessions.get_with_questions(session_id)
-        if training_session is None or training_session.user_id != user_id:
-            raise NotFoundError("Sessão de treino não encontrada.")
-        return training_session
-
-    async def list_sessions(
-        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[TrainingSession]:
-        return await self._sessions.list_paginated(
-            user_id=user_id, limit=limit, cursor_id=cursor_id
-        )
-
-    async def get_session_questions(
-        self, training_session: TrainingSession
-    ) -> tuple[list[Question], dict[uuid.UUID, Question]]:
-        """Questões da sessão, na ordem, com as relações carregadas."""
-        question_ids = [item.question_id for item in training_session.questions]
-        questions = await self._questions.list_by_ids(question_ids)
-        by_id = {question.id: question for question in questions}
-        ordered = [by_id[qid] for qid in question_ids if qid in by_id]
-        return ordered, by_id
-
-    async def get_answered_question_ids(
-        self, user_id: uuid.UUID, session_id: uuid.UUID
-    ) -> set[uuid.UUID]:
-        attempts = await self._attempts.list_by_session(
-            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
-        )
-        return {attempt.question_id for attempt in attempts}
-
-    async def update_position(
-        self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
-    ) -> TrainingSession:
-        training_session = await self.get_session(session_id, user_id)
-        if current_question_index >= training_session.total_questions:
-            raise ValidationDomainError(
-                "Posição fora do intervalo de questões da sessão."
-            )
-
-        async with UnitOfWork(self._session):
-            training_session.current_question_index = current_question_index
-            await self._session.flush()
-
-        return training_session
-
-    async def finish_session(
-        self, session_id: uuid.UUID, user_id: uuid.UUID
-    ) -> TrainingSession:
-        training_session = await self.get_session(session_id, user_id)
-        if training_session.finished_at is not None:
-            raise ConflictError("Sessão já finalizada.")
-
-        async with UnitOfWork(self._session):
-            training_session.finished_at = datetime.now(UTC)
-            await self._session.flush()
-
-        return await self.get_session(session_id, user_id)
-</file>
-
 <file path="app/api/v1/learning/notebooks.py">
 # app/api/v1/learning/notebooks.py
 """Endpoints HTTP de cadernos."""
@@ -36166,331 +35965,6 @@ async def copy_questions(
         question_ids=body.question_ids,
     )
     return Envelope(data=[NotebookQuestionResponse.model_validate(q) for q in result])
-</file>
-
-<file path="app/api/v1/practice/training_sessions.py">
-"""Endpoints HTTP de sessões de treino.
-
-Todos os endpoints são pessoais (o próprio usuário autenticado) — treino não
-tem conceito de administração; qualquer usuário ativo pode criar e responder
-suas próprias sessões.
-"""
-
-import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.models.practice.training_session import TrainingSession
-from app.schemas.practice.question_attempt import AnswerResultResponse, AnswerSubmitRequest
-from app.schemas.practice.training_session import (
-    TrainingSessionCreateRequest,
-    TrainingSessionDetailResponse,
-    TrainingSessionListItem,
-    TrainingSessionPositionResponse,
-    TrainingSessionPositionUpdateRequest,
-    TrainingSessionQuestionResponse,
-)
-from app.security.dependencies import CurrentUser
-from app.services.practice.question_attempt_service import QuestionAttemptService
-from app.services.practice.training_session_service import TrainingSessionService
-
-router = APIRouter()
-
-
-def get_training_session_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> TrainingSessionService:
-    return TrainingSessionService(session)
-
-
-def get_question_attempt_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> QuestionAttemptService:
-    return QuestionAttemptService(session)
-
-
-TrainingSessionServiceDep = Annotated[
-    TrainingSessionService, Depends(get_training_session_service)
-]
-QuestionAttemptServiceDep = Annotated[
-    QuestionAttemptService, Depends(get_question_attempt_service)
-]
-
-
-async def _build_detail(
-    training_session_service: TrainingSessionService,
-    current_user_id: uuid.UUID,
-    training_session: TrainingSession,
-) -> TrainingSessionDetailResponse:
-    ordered_questions, _ = await training_session_service.get_session_questions(training_session)
-    answered_ids = await training_session_service.get_answered_question_ids(
-        current_user_id, training_session.id
-    )
-    questions_by_position = {
-        item.question_id: item.position for item in training_session.questions
-    }
-    return TrainingSessionDetailResponse(
-        id=training_session.id,
-        total_questions=training_session.total_questions,
-        correct_count=training_session.correct_count,
-        started_at=training_session.started_at,
-        finished_at=training_session.finished_at,
-        current_question_index=training_session.current_question_index,
-        questions=[
-            TrainingSessionQuestionResponse(
-                id=question.id,
-                statement=question.statement,
-                discipline=question.discipline,
-                subject=question.subject,
-                topic=question.topic,
-                exam_board=question.exam_board,
-                exam_edition=question.exam_edition,
-                organization=question.organization,
-                year=question.year,
-                difficulty=question.difficulty,
-                alternatives=question.alternatives,
-                tags=question.tags,
-                # 🔥 CORREÇÃO: faltava passar `attachments` aqui. O schema
-                # tem `default_factory=list`, então o Pydantic não acusava
-                # erro nenhum — só preenchia a lista vazia em silêncio, e a
-                # imagem sumia na tela de resolução mesmo com o anexo salvo
-                # certinho no banco e carregado por `get_session_questions`
-                # (`QuestionRepository.list_by_ids` já faz `selectinload`
-                # de `Question.attachments`; só faltava repassar adiante).
-                attachments=question.attachments,
-                position=questions_by_position[question.id],
-                answered=question.id in answered_ids,
-            )
-            for question in ordered_questions
-        ],
-    )
-
-
-@router.post(
-    "", response_model=Envelope[TrainingSessionDetailResponse], status_code=status.HTTP_201_CREATED
-)
-async def create_training_session(
-    body: TrainingSessionCreateRequest,
-    current_user: CurrentUser,
-    training_session_service: TrainingSessionServiceDep,
-) -> Envelope[TrainingSessionDetailResponse]:
-    """
-    Cria uma sessão de treino.
-
-    Pode ser criada de três formas:
-    1. Por filtros (discipline_id, subject_id, etc.) - comportamento original
-    2. Por lista explícita de IDs (question_ids)
-    3. Por caderno (notebook_id) - cria sessão com todas as questões do caderno
-    """
-    training_session = await training_session_service.create_session(current_user.id, body)
-    detail = await _build_detail(training_session_service, current_user.id, training_session)
-    return Envelope(data=detail)
-
-
-@router.get("", response_model=Envelope[list[TrainingSessionListItem]])
-async def list_training_sessions(
-    current_user: CurrentUser,
-    training_session_service: TrainingSessionServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-) -> Envelope[list[TrainingSessionListItem]]:
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    sessions = await training_session_service.list_sessions(
-        current_user.id, limit=limit, cursor_id=cursor_id
-    )
-    next_cursor = (
-        CursorPage.encode_cursor(str(sessions[-1].id)) if len(sessions) == limit else None
-    )
-
-    return Envelope(
-        data=[TrainingSessionListItem.model_validate(s) for s in sessions],
-        meta=Meta(next_cursor=next_cursor, has_more=next_cursor is not None),
-    )
-
-
-@router.get("/{session_id}", response_model=Envelope[TrainingSessionDetailResponse])
-async def get_training_session(
-    session_id: uuid.UUID,
-    current_user: CurrentUser,
-    training_session_service: TrainingSessionServiceDep,
-) -> Envelope[TrainingSessionDetailResponse]:
-    training_session = await training_session_service.get_session(session_id, current_user.id)
-    detail = await _build_detail(training_session_service, current_user.id, training_session)
-    return Envelope(data=detail)
-
-
-@router.post(
-    "/{session_id}/questions/{question_id}/answer",
-    response_model=Envelope[AnswerResultResponse],
-)
-async def answer_training_question(
-    session_id: uuid.UUID,
-    question_id: uuid.UUID,
-    body: AnswerSubmitRequest,
-    current_user: CurrentUser,
-    question_attempt_service: QuestionAttemptServiceDep,
-) -> Envelope[AnswerResultResponse]:
-    attempt = await question_attempt_service.submit_training_answer(
-        user_id=current_user.id,
-        session_id=session_id,
-        question_id=question_id,
-        data=body,
-    )
-    question = attempt.question
-    return Envelope(
-        data=AnswerResultResponse(
-            question_id=attempt.question_id,
-            selected_alternative_id=attempt.selected_alternative_id,
-            correct_alternative_letter=question.correct_alternative_letter,
-            is_correct=bool(attempt.is_correct),
-            explanation=question.explanation,
-            # 🔥 CORREÇÃO: faltava repassar `teacher_name` na resposta de
-            # `answer_training_question` — o schema `AnswerResultResponse`
-            # já suporta o campo (usado em `_build_detail`/outras rotas),
-            # só faltava passá-lo aqui também.
-            teacher_name=question.teacher_name,
-        )
-    )
-
-
-@router.patch(
-    "/{session_id}/position",
-    response_model=Envelope[TrainingSessionPositionResponse],
-    summary="Atualiza a posição (questão atual) da sessão",
-)
-async def update_training_session_position(
-    session_id: uuid.UUID,
-    body: TrainingSessionPositionUpdateRequest,
-    current_user: CurrentUser,
-    training_session_service: TrainingSessionServiceDep,
-) -> Envelope[TrainingSessionPositionResponse]:
-    training_session = await training_session_service.update_position(
-        session_id, current_user.id, body.current_question_index
-    )
-    return Envelope(
-        data=TrainingSessionPositionResponse.model_validate(training_session)
-    )
-
-
-@router.post("/{session_id}/finish", response_model=Envelope[TrainingSessionDetailResponse])
-async def finish_training_session(
-    session_id: uuid.UUID,
-    current_user: CurrentUser,
-    training_session_service: TrainingSessionServiceDep,
-) -> Envelope[TrainingSessionDetailResponse]:
-    training_session = await training_session_service.finish_session(session_id, current_user.id)
-    detail = await _build_detail(training_session_service, current_user.id, training_session)
-    return Envelope(data=detail)
-</file>
-
-<file path="app/schemas/practice/training_session.py">
-# app/schemas/practice/training_session.py
-"""Schemas de request/response de sessões de treino."""
-
-import uuid
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.core.constants import MAX_BULK_QUESTION_SELECTION
-from app.models.enums import QuestionDifficulty
-from app.schemas.content.exam_source import (
-    ExamBoardResponse,
-    ExamEditionResponse,
-    OrganizationResponse,
-)
-from app.schemas.content.question import (
-    QuestionAlternativePublicResponse,
-    QuestionAttachmentResponse,
-    QuestionTagResponse,
-)
-from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
-
-
-class TrainingSessionCreateRequest(BaseModel):
-    """Filtros usados para montar a sessão + quantidade de questões desejada."""
-
-    discipline_id: uuid.UUID | None = None
-    subject_id: uuid.UUID | None = None
-    topic_id: uuid.UUID | None = None
-    exam_board_id: uuid.UUID | None = None
-    exam_edition_id: uuid.UUID | None = None
-    organization_id: uuid.UUID | None = None
-    year: int | None = Field(default=None, ge=1900, le=2100)
-    difficulty: QuestionDifficulty | None = None
-    tag_id: uuid.UUID | None = None
-    quantity: int = Field(default=10, ge=1, le=100)
-    
-    question_ids: list[uuid.UUID] | None = Field(
-        default=None,
-        max_length=MAX_BULK_QUESTION_SELECTION,
-        description="Lista explícita de IDs de questões para montar a sessão"
-    )
-    # 🔥 CORREÇÃO: Adicionar notebook_id
-    notebook_id: uuid.UUID | None = Field(
-        default=None,
-        description="ID do caderno para criar sessão a partir das questões do caderno"
-    )
-
-
-class TrainingSessionQuestionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    statement: str
-    discipline: DisciplineResponse
-    subject: SubjectResponse | None
-    topic: TopicResponse | None
-    exam_board: ExamBoardResponse
-    exam_edition: ExamEditionResponse | None
-    organization: OrganizationResponse | None
-    year: int | None
-    difficulty: QuestionDifficulty
-    alternatives: list[QuestionAlternativePublicResponse]
-    tags: list[QuestionTagResponse]
-    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
-    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
-    # resolução real acontece na sessão de treino, não no detalhe avulso.
-    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
-    position: int
-    answered: bool
-
-
-class TrainingSessionListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    created_at: datetime
-
-
-class TrainingSessionDetailResponse(BaseModel):
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    current_question_index: int
-    questions: list[TrainingSessionQuestionResponse]
-
-
-class TrainingSessionPositionUpdateRequest(BaseModel):
-    current_question_index: int = Field(ge=0)
-
-
-class TrainingSessionPositionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    current_question_index: int
 </file>
 
 <file path="app/services/billing/subscription_service.py">
@@ -38338,6 +37812,315 @@ class QuestionService:
             )
 </file>
 
+<file path="app/services/practice/training_session_service.py">
+# app/services/practice/training_session_service.py
+import uuid
+from datetime import UTC, datetime
+from typing import Optional
+
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
+from app.database.uow import UnitOfWork
+from app.models.content.question import Question
+from app.models.enums import FeatureKey, QuestionAnswerStatus, QuestionStatus, SessionType
+from app.models.practice.question_attempt import QuestionAttempt
+from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
+from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.repositories.learning.notebook_repository import NotebookRepository
+from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
+from app.schemas.practice.training_session import TrainingSessionCreateRequest
+from app.services.billing.feature_gate_service import FeatureGateService
+
+logger = structlog.get_logger(__name__)
+
+
+def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
+    """Snapshot (JSONB) dos filtros usados para montar a sessão."""
+    return {
+        "discipline_id": str(data.discipline_id) if data.discipline_id else None,
+        "subject_id": str(data.subject_id) if data.subject_id else None,
+        "topic_id": str(data.topic_id) if data.topic_id else None,
+        "exam_board_id": str(data.exam_board_id) if data.exam_board_id else None,
+        "exam_edition_id": str(data.exam_edition_id) if data.exam_edition_id else None,
+        "organization_id": str(data.organization_id) if data.organization_id else None,
+        "year": data.year,
+        "difficulty": data.difficulty.value if data.difficulty else None,
+        "tag_id": str(data.tag_id) if data.tag_id else None,
+        "quantity": data.quantity,
+        "question_ids": [str(qid) for qid in (data.question_ids or [])],
+        "notebook_id": str(data.notebook_id) if data.notebook_id else None,
+        "exclude_answered": data.exclude_answered,
+    }
+
+
+class TrainingSessionService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._sessions = TrainingSessionRepository(session)
+        self._questions = QuestionRepository(session)
+        self._attempts = QuestionAttemptRepository(session)
+        self._notebooks = NotebookRepository(session)
+        self._notebook_questions = NotebookQuestionRepository(session)
+        self._feature_gate = FeatureGateService(session)
+
+    async def create_session(
+        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria uma sessão de treino a partir de filtros, lista explícita ou caderno."""
+        logger.info(
+            "training_session.create.start",
+            user_id=str(user_id),
+            has_notebook_id=bool(data.notebook_id),
+            has_question_ids=bool(data.question_ids),
+        )
+
+        # Se for criar a partir de um caderno, usa as questões do caderno
+        if data.notebook_id:
+            return await self._create_session_from_notebook(user_id, data.notebook_id, data)
+
+        # Se for criar a partir de uma lista explícita de IDs
+        if data.question_ids:
+            return await self._create_session_from_question_ids(user_id, data.question_ids, data)
+
+        # Caso contrário, usa os filtros tradicionais
+        return await self._create_session_from_filters(user_id, data)
+
+    async def _create_session_from_filters(
+        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de filtros (comportamento original)."""
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        filters = QuestionFilters(
+            discipline_id=data.discipline_id,
+            subject_id=data.subject_id,
+            topic_id=data.topic_id,
+            exam_board_id=data.exam_board_id,
+            exam_edition_id=data.exam_edition_id,
+            organization_id=data.organization_id,
+            year=data.year,
+            difficulty=data.difficulty,
+            status=QuestionStatus.PUBLICADA,
+            tag_id=data.tag_id,
+            # Sem `user_id`, `_apply_filters` ignora `answer_status` (ver
+            # `QuestionRepository._apply_filters`) — precisa dos dois juntos
+            # pra "só questões que eu ainda não respondi" funcionar.
+            answer_status=QuestionAnswerStatus.NAO_RESPONDIDA if data.exclude_answered else None,
+            user_id=user_id if data.exclude_answered else None,
+        )
+        questions = await self._questions.list_random(filters, limit=data.quantity)
+        if not questions and data.exclude_answered:
+            # Sem isso, "acabaram as questões novas" vira o mesmo erro genérico
+            # de "nenhuma questão encontrada para os filtros", que leva o
+            # aluno a mexer nos filtros errados achando que é isso.
+            raise NotFoundError(
+                "Você já respondeu todas as questões que batem com esses filtros. "
+                "Desmarque \"somente questões novas\" para revisar as que já respondeu."
+            )
+        if not questions:
+            raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
+
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_question_ids(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID], data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de uma lista explícita de IDs de questões."""
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Buscar as questões pelos IDs
+        questions = await self._questions.list_by_ids(question_ids)
+
+        # Verificar se todas as questões foram encontradas
+        found_ids = {q.id for q in questions}
+        missing = [str(qid) for qid in question_ids if qid not in found_ids]
+        if missing:
+            raise NotFoundError(f"Questões não encontradas: {', '.join(missing[:5])}")
+
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_notebook(
+        self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de um caderno específico."""
+        logger.info("notebook_session.start", notebook_id=str(notebook_id), user_id=str(user_id))
+
+        # Verificar ownership do caderno
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        # Buscar questões do caderno
+        notebook_questions, _ = await self._notebook_questions.list_by_notebook(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            limit=1000,  # Limite alto para não truncar
+        )
+
+        logger.info(
+            "notebook_session.questions_found",
+            notebook_id=str(notebook_id),
+            count=len(notebook_questions),
+        )
+
+        if not notebook_questions:
+            raise NotFoundError("Este caderno não possui questões para estudar.")
+
+        # Extrair os IDs das questões
+        question_ids = [nq.question_id for nq in notebook_questions]
+
+        # Buscar as questões completas
+        questions = await self._questions.list_by_ids(question_ids)
+
+        # Verificar quota
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Criar uma cópia do data para não modificar o original
+        session_data = data.model_copy()
+        session_data.quantity = len(questions)
+
+        return await self._persist_session(user_id, questions, session_data)
+
+    async def _persist_session(
+        self,
+        user_id: uuid.UUID,
+        questions: list[Question],
+        data: TrainingSessionCreateRequest,
+    ) -> TrainingSession:
+        """Persiste a sessão no banco de dados."""
+        logger.info(
+            "session.persist.start",
+            user_id=str(user_id),
+            question_count=len(questions),
+        )
+
+        now = datetime.now(UTC)
+
+        # Limitar quantidade
+        quantity = min(data.quantity, len(questions))
+        selected_questions = questions[:quantity]
+
+        training_session = TrainingSession(
+            user_id=user_id,
+            filters_snapshot=_filters_snapshot(data),
+            total_questions=len(selected_questions),
+            correct_count=0,
+            started_at=now,
+        )
+        training_session.questions = [
+            TrainingSessionQuestion(question_id=question.id, position=position)
+            for position, question in enumerate(selected_questions)
+        ]
+
+        async with UnitOfWork(self._session):
+            await self._sessions.add(training_session)
+            logger.info("session.persist.committed", session_id=str(training_session.id))
+
+        return await self.get_session(training_session.id, user_id)
+
+    async def get_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> TrainingSession:
+        training_session = await self._sessions.get_with_questions(session_id)
+        if training_session is None or training_session.user_id != user_id:
+            raise NotFoundError("Sessão de treino não encontrada.")
+        return training_session
+
+    async def list_sessions(
+        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
+    ) -> tuple[list[TrainingSession], bool]:
+        """Mesma correção de `QuestionAttemptService.list_history`: busca
+        `limit + 1` e descarta o extra para saber com certeza se há próxima
+        página, em vez de inferir errado quando o total é múltiplo exato de
+        `limit`."""
+        sessions = await self._sessions.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
+        )
+        has_more = len(sessions) > limit
+        return sessions[:limit], has_more
+
+    async def get_session_questions(
+        self, training_session: TrainingSession
+    ) -> tuple[list[Question], dict[uuid.UUID, Question]]:
+        """Questões da sessão, na ordem, com as relações carregadas."""
+        question_ids = [item.question_id for item in training_session.questions]
+        questions = await self._questions.list_by_ids(question_ids)
+        by_id = {question.id: question for question in questions}
+        ordered = [by_id[qid] for qid in question_ids if qid in by_id]
+        return ordered, by_id
+
+    async def get_answered_question_ids(
+        self, user_id: uuid.UUID, session_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        attempts = await self._attempts.list_by_session(
+            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
+        )
+        return {attempt.question_id for attempt in attempts}
+
+    async def get_session_attempts_by_question(
+        self, user_id: uuid.UUID, session_id: uuid.UUID
+    ) -> dict[uuid.UUID, QuestionAttempt]:
+        """Tentativa por questão nesta sessão — usado para reconstruir o
+        resultado (alternativa marcada, acerto/erro) de questões já
+        respondidas ao retomar a sessão (`GET .../training-sessions/{id}`).
+        Sem isso, o frontend perde a resposta ao sair e voltar: o `answered`
+        booleano sozinho não basta para remontar o `AnswerRecord`.
+        """
+        attempts = await self._attempts.list_by_session(
+            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
+        )
+        # Em teoria há no máximo 1 attempt por (user, questão, sessão) — o
+        # `ConflictError` em `submit_training_answer` impede um segundo. Usa
+        # dict simples (última tentativa vence) para não quebrar se algum
+        # dado legado tiver duplicata.
+        return {attempt.question_id: attempt for attempt in attempts}
+
+    async def update_position(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
+    ) -> TrainingSession:
+        training_session = await self.get_session(session_id, user_id)
+        if current_question_index >= training_session.total_questions:
+            raise ValidationDomainError(
+                "Posição fora do intervalo de questões da sessão."
+            )
+
+        async with UnitOfWork(self._session):
+            training_session.current_question_index = current_question_index
+            await self._session.flush()
+
+        return training_session
+
+    async def finish_session(
+        self, session_id: uuid.UUID, user_id: uuid.UUID
+    ) -> TrainingSession:
+        training_session = await self.get_session(session_id, user_id)
+        if training_session.finished_at is not None:
+            raise ConflictError("Sessão já finalizada.")
+
+        async with UnitOfWork(self._session):
+            training_session.finished_at = datetime.now(UTC)
+            await self._session.flush()
+
+        return await self.get_session(session_id, user_id)
+</file>
+
 <file path="scripts/seed_test_data.py">
 """Seed de dados de teste para desenvolvimento local.
 
@@ -38785,6 +38568,242 @@ if __name__ == "__main__":
     asyncio.run(main())
 </file>
 
+<file path="app/api/v1/practice/training_sessions.py">
+"""Endpoints HTTP de sessões de treino.
+
+Todos os endpoints são pessoais (o próprio usuário autenticado) — treino não
+tem conceito de administração; qualquer usuário ativo pode criar e responder
+suas próprias sessões.
+"""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.models.content.question import Question
+from app.models.practice.training_session import TrainingSession
+from app.schemas.practice.question_attempt import AnswerResultResponse, AnswerSubmitRequest
+from app.schemas.practice.training_session import (
+    TrainingSessionCreateRequest,
+    TrainingSessionDetailResponse,
+    TrainingSessionListItem,
+    TrainingSessionPositionResponse,
+    TrainingSessionPositionUpdateRequest,
+    TrainingSessionQuestionResponse,
+)
+from app.security.dependencies import CurrentUser
+from app.services.practice.question_attempt_service import QuestionAttemptService
+from app.services.practice.training_session_service import TrainingSessionService
+
+router = APIRouter()
+
+
+def get_training_session_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> TrainingSessionService:
+    return TrainingSessionService(session)
+
+
+def get_question_attempt_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> QuestionAttemptService:
+    return QuestionAttemptService(session)
+
+
+TrainingSessionServiceDep = Annotated[
+    TrainingSessionService, Depends(get_training_session_service)
+]
+QuestionAttemptServiceDep = Annotated[
+    QuestionAttemptService, Depends(get_question_attempt_service)
+]
+
+
+async def _build_detail(
+    training_session_service: TrainingSessionService,
+    current_user_id: uuid.UUID,
+    training_session: TrainingSession,
+) -> TrainingSessionDetailResponse:
+    ordered_questions, _ = await training_session_service.get_session_questions(training_session)
+    attempts_by_question = await training_session_service.get_session_attempts_by_question(
+        current_user_id, training_session.id
+    )
+    questions_by_position = {
+        item.question_id: item.position for item in training_session.questions
+    }
+
+    def _build_question_response(question: Question) -> TrainingSessionQuestionResponse:
+        attempt = attempts_by_question.get(question.id)
+        # 🔥 CORREÇÃO (estado perdido ao retomar sessão): antes só marcávamos
+        # `answered`, sem devolver a resposta em si. O frontend não tinha como
+        # remontar o resultado (alternativa marcada, acerto/erro, gabarito)
+        # de uma questão já respondida numa visita anterior — ao voltar para
+        # a sessão, a barra de progresso e o histórico da tela de resolução
+        # mostravam tudo como "não respondido", mesmo já persistido no banco.
+        # Só expõe o gabarito quando `attempt` existe — questão ainda não
+        # respondida continua sem vazar `correct_alternative_letter`.
+        return TrainingSessionQuestionResponse(
+            id=question.id,
+            statement=question.statement,
+            discipline=question.discipline,
+            subject=question.subject,
+            topic=question.topic,
+            exam_board=question.exam_board,
+            exam_edition=question.exam_edition,
+            organization=question.organization,
+            year=question.year,
+            difficulty=question.difficulty,
+            alternatives=question.alternatives,
+            tags=question.tags,
+            # 🔥 CORREÇÃO: faltava passar `attachments` aqui. O schema
+            # tem `default_factory=list`, então o Pydantic não acusava
+            # erro nenhum — só preenchia a lista vazia em silêncio, e a
+            # imagem sumia na tela de resolução mesmo com o anexo salvo
+            # certinho no banco e carregado por `get_session_questions`
+            # (`QuestionRepository.list_by_ids` já faz `selectinload`
+            # de `Question.attachments`; só faltava repassar adiante).
+            attachments=question.attachments,
+            position=questions_by_position[question.id],
+            answered=attempt is not None,
+            selected_alternative_id=attempt.selected_alternative_id if attempt else None,
+            is_correct=attempt.is_correct if attempt else None,
+            correct_alternative_letter=question.correct_alternative_letter if attempt else None,
+            explanation=question.explanation if attempt else None,
+        )
+
+    return TrainingSessionDetailResponse(
+        id=training_session.id,
+        total_questions=training_session.total_questions,
+        correct_count=training_session.correct_count,
+        started_at=training_session.started_at,
+        finished_at=training_session.finished_at,
+        current_question_index=training_session.current_question_index,
+        questions=[_build_question_response(question) for question in ordered_questions],
+    )
+
+
+@router.post(
+    "", response_model=Envelope[TrainingSessionDetailResponse], status_code=status.HTTP_201_CREATED
+)
+async def create_training_session(
+    body: TrainingSessionCreateRequest,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionDetailResponse]:
+    """
+    Cria uma sessão de treino.
+
+    Pode ser criada de três formas:
+    1. Por filtros (discipline_id, subject_id, etc.) - comportamento original
+    2. Por lista explícita de IDs (question_ids)
+    3. Por caderno (notebook_id) - cria sessão com todas as questões do caderno
+    """
+    training_session = await training_session_service.create_session(current_user.id, body)
+    detail = await _build_detail(training_session_service, current_user.id, training_session)
+    return Envelope(data=detail)
+
+
+@router.get("", response_model=Envelope[list[TrainingSessionListItem]])
+async def list_training_sessions(
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[list[TrainingSessionListItem]]:
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    sessions, has_more = await training_session_service.list_sessions(
+        current_user.id, limit=limit, cursor_id=cursor_id
+    )
+    next_cursor = CursorPage.encode_cursor(str(sessions[-1].id)) if has_more else None
+
+    return Envelope(
+        data=[TrainingSessionListItem.model_validate(s) for s in sessions],
+        meta=Meta(next_cursor=next_cursor, has_more=has_more),
+    )
+
+
+@router.get("/{session_id}", response_model=Envelope[TrainingSessionDetailResponse])
+async def get_training_session(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionDetailResponse]:
+    training_session = await training_session_service.get_session(session_id, current_user.id)
+    detail = await _build_detail(training_session_service, current_user.id, training_session)
+    return Envelope(data=detail)
+
+
+@router.post(
+    "/{session_id}/questions/{question_id}/answer",
+    response_model=Envelope[AnswerResultResponse],
+)
+async def answer_training_question(
+    session_id: uuid.UUID,
+    question_id: uuid.UUID,
+    body: AnswerSubmitRequest,
+    current_user: CurrentUser,
+    question_attempt_service: QuestionAttemptServiceDep,
+) -> Envelope[AnswerResultResponse]:
+    attempt = await question_attempt_service.submit_training_answer(
+        user_id=current_user.id,
+        session_id=session_id,
+        question_id=question_id,
+        data=body,
+    )
+    question = attempt.question
+    return Envelope(
+        data=AnswerResultResponse(
+            question_id=attempt.question_id,
+            selected_alternative_id=attempt.selected_alternative_id,
+            correct_alternative_letter=question.correct_alternative_letter,
+            is_correct=bool(attempt.is_correct),
+            explanation=question.explanation,
+            # 🔥 CORREÇÃO: faltava repassar `teacher_name` na resposta de
+            # `answer_training_question` — o schema `AnswerResultResponse`
+            # já suporta o campo (usado em `_build_detail`/outras rotas),
+            # só faltava passá-lo aqui também.
+            teacher_name=question.teacher_name,
+        )
+    )
+
+
+@router.patch(
+    "/{session_id}/position",
+    response_model=Envelope[TrainingSessionPositionResponse],
+    summary="Atualiza a posição (questão atual) da sessão",
+)
+async def update_training_session_position(
+    session_id: uuid.UUID,
+    body: TrainingSessionPositionUpdateRequest,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionPositionResponse]:
+    training_session = await training_session_service.update_position(
+        session_id, current_user.id, body.current_question_index
+    )
+    return Envelope(
+        data=TrainingSessionPositionResponse.model_validate(training_session)
+    )
+
+
+@router.post("/{session_id}/finish", response_model=Envelope[TrainingSessionDetailResponse])
+async def finish_training_session(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionDetailResponse]:
+    training_session = await training_session_service.finish_session(session_id, current_user.id)
+    detail = await _build_detail(training_session_service, current_user.id, training_session)
+    return Envelope(data=detail)
+</file>
+
 <file path="app/models/__init__.py">
 # app/models/__init__.py
 """Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
@@ -38856,6 +38875,129 @@ __all__ = [
     "NotebookQuestion",
     "NotebookTag",
 ]
+</file>
+
+<file path="app/schemas/practice/training_session.py">
+# app/schemas/practice/training_session.py
+"""Schemas de request/response de sessões de treino."""
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
+from app.models.enums import QuestionDifficulty
+from app.schemas.content.exam_source import (
+    ExamBoardResponse,
+    ExamEditionResponse,
+    OrganizationResponse,
+)
+from app.schemas.content.question import (
+    QuestionAlternativePublicResponse,
+    QuestionAttachmentResponse,
+    QuestionTagResponse,
+)
+from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
+
+
+class TrainingSessionCreateRequest(BaseModel):
+    """Filtros usados para montar a sessão + quantidade de questões desejada."""
+
+    discipline_id: uuid.UUID | None = None
+    subject_id: uuid.UUID | None = None
+    topic_id: uuid.UUID | None = None
+    exam_board_id: uuid.UUID | None = None
+    exam_edition_id: uuid.UUID | None = None
+    organization_id: uuid.UUID | None = None
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    difficulty: QuestionDifficulty | None = None
+    tag_id: uuid.UUID | None = None
+    quantity: int = Field(default=10, ge=1, le=100)
+    
+    question_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_BULK_QUESTION_SELECTION,
+        description="Lista explícita de IDs de questões para montar a sessão"
+    )
+    # 🔥 CORREÇÃO: Adicionar notebook_id
+    notebook_id: uuid.UUID | None = Field(
+        default=None,
+        description="ID do caderno para criar sessão a partir das questões do caderno"
+    )
+    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
+    # não são usados) — nesses dois outros modos a lista de questões já é
+    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
+    exclude_answered: bool = Field(
+        default=False,
+        description=(
+            "Se True, sorteia apenas questões que o usuário ainda não "
+            "respondeu (nenhum QuestionAttempt seu para a questão)."
+        ),
+    )
+
+
+class TrainingSessionQuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    statement: str
+    discipline: DisciplineResponse
+    subject: SubjectResponse | None
+    topic: TopicResponse | None
+    exam_board: ExamBoardResponse
+    exam_edition: ExamEditionResponse | None
+    organization: OrganizationResponse | None
+    year: int | None
+    difficulty: QuestionDifficulty
+    alternatives: list[QuestionAlternativePublicResponse]
+    tags: list[QuestionTagResponse]
+    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
+    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
+    # resolução real acontece na sessão de treino, não no detalhe avulso.
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
+    position: int
+    answered: bool
+    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
+    # respondida em uma visita anterior a esta mesma sessão. É o que
+    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
+    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
+    # que a página é recarregada ou o aluno sai e volta.
+    # Para questões ainda não respondidas, ficam `None` — o gabarito
+    # nunca é exposto antes da resposta ser enviada.
+    selected_alternative_id: uuid.UUID | None = None
+    is_correct: bool | None = None
+    correct_alternative_letter: str | None = None
+    explanation: str | None = None
+
+
+class TrainingSessionListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class TrainingSessionDetailResponse(BaseModel):
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    current_question_index: int
+    questions: list[TrainingSessionQuestionResponse]
+
+
+class TrainingSessionPositionUpdateRequest(BaseModel):
+    current_question_index: int = Field(ge=0)
+
+
+class TrainingSessionPositionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    current_question_index: int
 </file>
 
 <file path=".env.example">

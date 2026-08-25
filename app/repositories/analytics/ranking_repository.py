@@ -161,8 +161,20 @@ class RankingRepository(BaseRepository[UserRanking]):
 
         await self.session.flush()
 
-    async def get_count(self) -> int:
-        """Retorna o número total de usuários no ranking."""
+    async def get_global_count(self) -> int:
+        """Total de usuários elegíveis no ranking global (mesmo filtro de `get_global_ranking`)."""
         stmt = select(func.count()).select_from(UserRanking).where(UserRanking.total_points > 0)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_weekly_count(self) -> int:
+        """Total de usuários elegíveis no ranking semanal (mesmo filtro de `get_weekly_ranking`)."""
+        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.weekly_points > 0)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_monthly_count(self) -> int:
+        """Total de usuários elegíveis no ranking mensal (mesmo filtro de `get_monthly_ranking`)."""
+        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.monthly_points > 0)
         result = await self.session.execute(stmt)
         return result.scalar() or 0

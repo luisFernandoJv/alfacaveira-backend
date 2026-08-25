@@ -88,7 +88,18 @@ class QuestionAttemptService:
 
     async def list_history(
         self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[QuestionAttempt]:
-        return await self._attempts.list_paginated(
-            user_id=user_id, limit=limit, cursor_id=cursor_id
+    ) -> tuple[list[QuestionAttempt], bool]:
+        """Uma página do histórico + se existe página seguinte.
+
+        Busca `limit + 1` registros e descarta o extra: com `limit` exatos,
+        `len(attempts) == limit` não diz se acabou a lista ou se ela termina
+        bem ali — as duas situações ficam indistinguíveis, e o cliente acaba
+        disparando um `loadMore` a mais que sempre volta vazio quando o
+        total é múltiplo exato de `limit`. O item extra resolve a ambiguidade
+        sem precisar de `COUNT(*)` (caro em tabela de alto volume).
+        """
+        attempts = await self._attempts.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
         )
+        has_more = len(attempts) > limit
+        return attempts[:limit], has_more

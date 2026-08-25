@@ -40,7 +40,7 @@ async def get_global_ranking(
     Retorna os usuários com mais pontos, ordenados por posição.
     Inclui a posição do usuário atual.
     """
-    rankings, user_position = await ranking_service.get_global_ranking(
+    rankings, user_position, total, has_more = await ranking_service.get_global_ranking(
         user_id=current_user.id,
         limit=limit,
         offset=offset,
@@ -49,9 +49,9 @@ async def get_global_ranking(
     return Envelope(
         data=RankingResponse(
             items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
+            total=total,
             user_position=user_position,
-            has_more=len(rankings) == limit,
+            has_more=has_more,
         )
     )
 
@@ -64,7 +64,7 @@ async def get_weekly_ranking(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[RankingResponse]:
     """Ranking semanal."""
-    rankings, user_position = await ranking_service.get_weekly_ranking(
+    rankings, user_position, total, has_more = await ranking_service.get_weekly_ranking(
         user_id=current_user.id,
         limit=limit,
         offset=offset,
@@ -73,9 +73,9 @@ async def get_weekly_ranking(
     return Envelope(
         data=RankingResponse(
             items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
+            total=total,
             user_position=user_position,
-            has_more=len(rankings) == limit,
+            has_more=has_more,
         )
     )
 
@@ -88,7 +88,7 @@ async def get_monthly_ranking(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[RankingResponse]:
     """Ranking mensal."""
-    rankings, user_position = await ranking_service.get_monthly_ranking(
+    rankings, user_position, total, has_more = await ranking_service.get_monthly_ranking(
         user_id=current_user.id,
         limit=limit,
         offset=offset,
@@ -97,9 +97,9 @@ async def get_monthly_ranking(
     return Envelope(
         data=RankingResponse(
             items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
+            total=total,
             user_position=user_position,
-            has_more=len(rankings) == limit,
+            has_more=has_more,
         )
     )
 

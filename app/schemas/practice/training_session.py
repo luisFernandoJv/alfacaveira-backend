@@ -45,6 +45,16 @@ class TrainingSessionCreateRequest(BaseModel):
         default=None,
         description="ID do caderno para criar sessão a partir das questões do caderno"
     )
+    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
+    # não são usados) — nesses dois outros modos a lista de questões já é
+    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
+    exclude_answered: bool = Field(
+        default=False,
+        description=(
+            "Se True, sorteia apenas questões que o usuário ainda não "
+            "respondeu (nenhum QuestionAttempt seu para a questão)."
+        ),
+    )
 
 
 class TrainingSessionQuestionResponse(BaseModel):

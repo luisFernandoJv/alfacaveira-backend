@@ -17,8 +17,12 @@ from app.repositories.learning.notebook_folder_repository import NotebookFolderR
 from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
 from app.repositories.learning.notebook_repository import NotebookRepository
 from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.user_question_state_repository import (
+    UserQuestionStateRepository,
+)
 from app.services.billing.feature_gate_service import FeatureGateService
-from app.models.enums import FeatureKey
+from app.models.enums import FeatureKey, QuestionAnswerStatus
 
 
 class NotebookService:
@@ -32,6 +36,13 @@ class NotebookService:
         self._tags = NotebookTagRepository(session)
         self._question_repo = QuestionRepository(session)
         self._feature_gate = FeatureGateService(session)
+        # 🔥 CORREÇÃO (caderno não mostra questão como resolvida): faltavam
+        # aqui — sem eles, `question.answer_status`/`question.is_favorite`
+        # nunca eram calculados para as questões de um caderno, e o schema
+        # (`QuestionListItem`) caía sempre no default `NAO_RESPONDIDA`/
+        # `False`, mesmo para questões já respondidas pelo aluno.
+        self._states = UserQuestionStateRepository(session)
+        self._attempts = QuestionAttemptRepository(session)
 
     # ==================================================================== #
     # FOLDERS
@@ -315,18 +326,67 @@ class NotebookService:
         cursor_id: Optional[uuid.UUID] = None,
         search: Optional[str] = None,
     ) -> tuple[list[NotebookQuestion], int]:
-        """Lista questões de um caderno."""
+        """Lista questões de um caderno.
+
+        🔥 CORREÇÃO (caderno "esquece" questão respondida): esta listagem
+        devolve `NotebookQuestion.question` (um `Question` do banco), que o
+        schema `QuestionListItem` serializa incluindo `is_favorite` e
+        `answer_status` — mas esses dois são atributos TRANSIENTES (não
+        colunas), que precisam ser calculados e atribuídos explicitamente em
+        cada request, exatamente como `QuestionService.list_questions` já
+        fazia para o Banco de Questões. Sem isso, todo item de caderno caía
+        no default do schema (`NAO_RESPONDIDA` / `False`), então uma questão
+        recém-respondida no treino continuava aparecendo como "não feita" ao
+        montar/abrir um caderno — mesmo com o `QuestionAttempt` já salvo.
+        """
         notebook = await self._notebooks.get_owned(notebook_id, user_id)
         if not notebook:
             raise NotFoundError("Caderno não encontrado.")
 
-        return await self._questions.list_by_notebook(
+        items, total = await self._questions.list_by_notebook(
             notebook_id=notebook_id,
             user_id=user_id,
             limit=limit,
             cursor_id=cursor_id,
             search=search,
         )
+        await self._attach_answer_state(items, user_id)
+        return items, total
+
+    async def _attach_answer_state(
+        self, items: list[NotebookQuestion], user_id: uuid.UUID
+    ) -> None:
+        """Preenche `item.question.is_favorite`/`answer_status` em lote —
+        mesma lógica de `QuestionService.list_questions` (duas queries
+        agregadas, independente da quantidade de itens do caderno).
+        """
+        if not items:
+            return
+        question_ids = [item.question_id for item in items]
+        favorited_ids, correct_map = await self._session_gather(
+            self._states.get_favorited_ids(user_id, question_ids),
+            self._attempts.get_correct_status_map(user_id, question_ids),
+        )
+        for item in items:
+            item.question.is_favorite = item.question_id in favorited_ids
+            if item.question_id not in correct_map:
+                item.question.answer_status = QuestionAnswerStatus.NAO_RESPONDIDA
+            elif correct_map[item.question_id]:
+                item.question.answer_status = QuestionAnswerStatus.ACERTOU
+            else:
+                item.question.answer_status = QuestionAnswerStatus.ERROU
+
+    @staticmethod
+    async def _session_gather(*coros):
+        """Executa as queries de estado em sequência (mesma razão de
+        `QuestionService._session_gather`): as coroutines compartilham a
+        MESMA `AsyncSession`, que não é concorrente — `asyncio.gather` aqui
+        corromperia o estado da sessão.
+        """
+        results = []
+        for coro in coros:
+            results.append(await coro)
+        return results
 
 
     async def list_export_questions(
