@@ -1,7 +1,16 @@
 """Adiciona categorias e preferências ao sistema de notificações.
 
-Revision ID: 0027_add_notification_category_and_preferences
+Revision ID: 0027_notification_category
 Revises: 0026_add_question_teacher_name
+
+Nota: o revision id original desta migration
+("0027_add_notification_category_and_preferences", 46 caracteres)
+excedia o limite de `alembic_version.version_num`, que é VARCHAR(32)
+por padrão no Alembic. Isso fazia `alembic upgrade head` falhar com
+`StringDataRightTruncationError` no passo final (gravar o novo
+version_num), depois de todo o DDL/DML da migration já ter rodado —
+sempre revertido pela transação. O revision id foi encurtado para
+caber no limite. Nenhuma mudança de comportamento da migration em si.
 """
 
 from collections.abc import Sequence
@@ -10,7 +19,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0027_add_notification_category_and_preferences"
+revision: str = "0027_notification_category"
 down_revision: str | None = "0026_add_question_teacher_name"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
