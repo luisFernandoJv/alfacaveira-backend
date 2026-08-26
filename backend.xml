@@ -302,6 +302,7 @@ app/
       __init__.py
       assets.py
       notebook_pdf_service.py
+      session_print_service.py
     identity/
       __init__.py
       auth_service.py
@@ -7479,6 +7480,520 @@ BRAND_LOGO_PNG_B64 = (
     "p5eLFy+Opk2bol+/fujatesdkNKLuxFeQvFCCEIIjh8/jgMHDuDUqVOIi4sDIQQlSpRA9erV0aRJE9StW9d71IUXLvASihdeeJFv"
     "8A4vXgjBz+aI7nnhBY//B+0lygUfKHryAAAAAElFTkSuQmCC"
 )
+</file>
+
+<file path="app/services/export/session_print_service.py">
+# app/services/export/session_print_service.py
+"""Geração do PDF de impressão configurável da sessão de resolução.
+
+Contraparte de `notebook_pdf_service.py` (que exporta um `Notebook`
+inteiro, sem opções), mas para a sessão de treino ativa
+(`TrainingSession`/`TrainingSessionQuestion` — não é a mesma tabela que
+`Notebook`), e com as opções pedidas na tela "Imprimir" (item 3 do
+prompt de continuidade): quantidade máxima, o que entra no cabeçalho,
+onde o gabarito aparece, tamanho da fonte, espaço para rascunho.
+
+A filtragem (quais questões entram: excluir respondidas/acertadas/
+favoritadas, corte por quantidade máxima) é feita ANTES de chegar aqui,
+em `TrainingSessionService.select_questions_for_print` — este módulo só
+desenha o PDF a partir da lista já decidida, mesma separação de
+responsabilidade que `notebook_pdf_service.build_notebook_pdf` já usa
+(monta PDF a partir de `items` prontos).
+
+Decisão de escopo (avisada ao aluno): sem QR code por questão — não há
+hoje uma rota pública de questão individual que sustente isso com
+segurança, e sem cota diária de impressão — o catálogo de features
+(`FeatureKey`) só tem cota para responder questões (`DAILY_QUESTIONS`),
+não para exportar/imprimir; não inventamos uma regra de negócio nova
+aqui.
+"""
+
+from __future__ import annotations
+
+import base64
+from dataclasses import dataclass
+from datetime import datetime
+from io import BytesIO
+from re import sub
+from typing import Literal
+from xml.sax.saxutils import escape
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas as pdfcanvas
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    HRFlowable,
+    KeepTogether,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+from app.models.content.question import Question
+from app.services.export.assets import BRAND_LOGO_PNG_B64
+
+AnswerKeyMode = Literal["end", "inline", "none"]
+PrintFontSize = Literal["sm", "md", "lg"]
+
+_BRAND = {
+    "ink": colors.HexColor("#0F172A"),
+    "muted": colors.HexColor("#64748B"),
+    "line": colors.HexColor("#E2E8F0"),
+    "surface": colors.HexColor("#F8FAFC"),
+    "accent": colors.HexColor("#F59E0B"),
+    "accent_ink": colors.HexColor("#7C2D12"),
+}
+
+_DIFFICULTY_LABEL = {
+    "FACIL": "Fácil",
+    "MEDIO": "Médio",
+    "DIFICIL": "Difícil",
+}
+
+# Multiplicador aplicado sobre os tamanhos-base de fonte/leading definidos
+# abaixo — evita duplicar todo o bloco de ParagraphStyle para cada tamanho.
+_FONT_SCALE: dict[PrintFontSize, float] = {
+    "sm": 0.88,
+    "md": 1.0,
+    "lg": 1.16,
+}
+
+_LOGO_READER = ImageReader(BytesIO(base64.b64decode(BRAND_LOGO_PNG_B64)))
+_LOGO_ASPECT = 276 / 300
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPrintOptions:
+    """Opções configuráveis da tela "Imprimir" — já validadas/normalizadas
+    pelo schema Pydantic antes de chegar aqui (ver `PrintSessionQuery`)."""
+
+    answer_key_mode: AnswerKeyMode = "none"
+    font_size: PrintFontSize = "md"
+    include_draft_space: bool = False
+    header_student_name: bool = True
+    header_date: bool = True
+    header_summary: bool = True
+
+
+def _safe_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return escape(value).replace("\n", "<br/>")
+
+
+def _filename(value: str) -> str:
+    value = sub(r"[^A-Za-z0-9À-ÿ _-]+", "", value).strip()
+    value = sub(r"\s+", "-", value)
+    return value[:80] or "sessao-de-treino"
+
+
+class _NumberedCanvas(pdfcanvas.Canvas):
+    """Mesma técnica de `notebook_pdf_service._NumberedCanvas`: guarda cada
+    página desenhada e só escreve "Página X de Y" em `save()`, quando o
+    total de páginas já é conhecido."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states: list[dict] = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self._draw_page_number(total_pages)
+            super().showPage()
+        super().save()
+
+    def _draw_page_number(self, total_pages: int) -> None:
+        self.setFont("Helvetica", 8)
+        self.setFillColor(_BRAND["muted"])
+        self.drawRightString(
+            192 * mm, 9 * mm, f"Página {self._pageNumber} de {total_pages}"
+        )
+
+
+def build_session_print_pdf(
+    *,
+    title: str,
+    questions: list[Question],
+    options: SessionPrintOptions,
+    student_name: str | None = None,
+) -> tuple[bytes, str]:
+    """Monta o PDF de impressão a partir das questões já filtradas
+    (ordem preservada) e das opções escolhidas na tela de impressão.
+
+    Retorna (bytes do PDF, nome de arquivo seguro).
+    """
+    buffer = BytesIO()
+    scale = _FONT_SCALE[options.font_size]
+
+    styles = getSampleStyleSheet()
+
+    eyebrow = ParagraphStyle(
+        "Eyebrow",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8.5 * scale,
+        leading=11 * scale,
+        alignment=TA_CENTER,
+        textColor=_BRAND["accent_ink"],
+        spaceAfter=2 * mm,
+    )
+    title_style = ParagraphStyle(
+        "SessionTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=22 * scale,
+        leading=26 * scale,
+        alignment=TA_CENTER,
+        textColor=_BRAND["ink"],
+        spaceAfter=3 * mm,
+    )
+    subtitle = ParagraphStyle(
+        "SessionSubtitle",
+        parent=styles["Normal"],
+        fontSize=9.5 * scale,
+        leading=13 * scale,
+        alignment=TA_CENTER,
+        textColor=_BRAND["muted"],
+        spaceAfter=2 * mm,
+    )
+    question_number = ParagraphStyle(
+        "QuestionNumber",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=11 * scale,
+        leading=13 * scale,
+        textColor=colors.white,
+        alignment=TA_CENTER,
+    )
+    chip_text = ParagraphStyle(
+        "ChipText",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=7.5 * scale,
+        leading=9 * scale,
+        textColor=_BRAND["muted"],
+    )
+    question_statement = ParagraphStyle(
+        "QuestionStatement",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.5 * scale,
+        leading=15.5 * scale,
+        textColor=_BRAND["ink"],
+        spaceBefore=2.5 * mm,
+        spaceAfter=3.5 * mm,
+    )
+    alternative = ParagraphStyle(
+        "Alternative",
+        parent=styles["BodyText"],
+        fontSize=10 * scale,
+        leading=14.5 * scale,
+        leftIndent=6 * mm,
+        firstLineIndent=-6 * mm,
+        spaceAfter=2 * mm,
+        textColor=_BRAND["ink"],
+    )
+    inline_answer = ParagraphStyle(
+        "InlineAnswer",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=9.5 * scale,
+        leading=13 * scale,
+        textColor=_BRAND["accent_ink"],
+        spaceBefore=1.5 * mm,
+    )
+    section = ParagraphStyle(
+        "Section",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=colors.white,
+    )
+    answer_cell = ParagraphStyle(
+        "AnswerCell",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=13,
+        alignment=TA_CENTER,
+        textColor=_BRAND["ink"],
+    )
+
+    # ---------------------------------------------------------------- #
+    # Cabeçalho / rodapé de marca — desenhados em TODAS as páginas.     #
+    # ---------------------------------------------------------------- #
+    def _brand_header(canvas_obj: pdfcanvas.Canvas) -> None:
+        logo_h = 8 * mm
+        logo_w = logo_h * _LOGO_ASPECT
+        x = 18 * mm
+        y = 279 * mm
+        canvas_obj.drawImage(
+            _LOGO_READER,
+            x,
+            y,
+            width=logo_w,
+            height=logo_h,
+            mask="auto",
+            preserveAspectRatio=True,
+        )
+        canvas_obj.setFont("Helvetica-Bold", 12)
+        canvas_obj.setFillColor(_BRAND["ink"])
+        canvas_obj.drawString(x + logo_w + 3 * mm, y + 2.6 * mm, "ALFA CAVEIRA")
+        canvas_obj.setFont("Helvetica", 7)
+        canvas_obj.setFillColor(_BRAND["muted"])
+        canvas_obj.drawString(
+            x + logo_w + 3 * mm, y - 1.6 * mm, "Plataforma de estudos para concursos"
+        )
+
+        canvas_obj.setFont("Helvetica", 7.5)
+        canvas_obj.setFillColor(_BRAND["muted"])
+        canvas_obj.drawRightString(192 * mm, y + 1 * mm, escape(title)[:70])
+
+        canvas_obj.setStrokeColor(_BRAND["line"])
+        canvas_obj.setLineWidth(0.6)
+        canvas_obj.line(18 * mm, 276 * mm, 192 * mm, 276 * mm)
+
+    def _brand_footer(canvas_obj: pdfcanvas.Canvas) -> None:
+        canvas_obj.setStrokeColor(_BRAND["line"])
+        canvas_obj.setLineWidth(0.6)
+        canvas_obj.line(18 * mm, 13 * mm, 192 * mm, 13 * mm)
+        canvas_obj.setFont("Helvetica", 7.5)
+        canvas_obj.setFillColor(_BRAND["muted"])
+        canvas_obj.drawString(
+            18 * mm,
+            9 * mm,
+            f"Gerado em {datetime.now().strftime('%d/%m/%Y')} · alfacaveira.com.br",
+        )
+
+    def _on_page(canvas_obj: pdfcanvas.Canvas, doc_obj) -> None:
+        canvas_obj.saveState()
+        _brand_header(canvas_obj)
+        _brand_footer(canvas_obj)
+        canvas_obj.restoreState()
+
+    doc = BaseDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=26 * mm,
+        bottomMargin=18 * mm,
+        title=title,
+        author="Alfa Caveira",
+    )
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="normal")
+    doc.addPageTemplates([PageTemplate(id="main", frames=frame, onPage=_on_page)])
+
+    total = len(questions)
+    generated_at = datetime.now().strftime("%d/%m/%Y às %H:%M")
+
+    story: list = [
+        Paragraph("SESSÃO DE RESOLUÇÃO", eyebrow),
+        Paragraph(_safe_text(title), title_style),
+    ]
+
+    if options.header_summary:
+        subtitle_bits = [f"{total} questão{'ões' if total != 1 else ''}"]
+        if options.header_student_name and student_name:
+            subtitle_bits.append(f"Aluno(a): {student_name}")
+        if options.header_date:
+            subtitle_bits.append(f"Gerado em {generated_at}")
+        story.append(Paragraph(" · ".join(subtitle_bits), subtitle))
+    elif options.header_date:
+        story.append(Paragraph(f"Gerado em {generated_at}", subtitle))
+
+    story.append(Spacer(1, 5 * mm))
+
+    # ---------------------------------------------------------------- #
+    # Questões                                                          #
+    # ---------------------------------------------------------------- #
+    for position, question in enumerate(questions, start=1):
+        board = getattr(question.exam_board, "acronym", None) or getattr(
+            question.exam_board, "name", ""
+        )
+        org = getattr(question.organization, "acronym", None) or getattr(
+            question.organization, "name", ""
+        )
+        discipline = getattr(question.discipline, "name", "")
+        subject = getattr(question.subject, "name", "") if question.subject else ""
+        year = getattr(question, "year", None)
+        difficulty = _DIFFICULTY_LABEL.get(
+            getattr(getattr(question, "difficulty", None), "value", None)
+            or str(getattr(question, "difficulty", "")),
+            None,
+        )
+
+        chip_bits = [b for b in [board, org, discipline, subject, year] if b]
+        if difficulty:
+            chip_bits.append(difficulty)
+        chips_line = "  •  ".join(str(b) for b in chip_bits)
+
+        header_row = Table(
+            [
+                [
+                    Table(
+                        [[Paragraph(f"{position:02d}", question_number)]],
+                        colWidths=[9 * mm],
+                        rowHeights=[9 * mm],
+                        style=TableStyle(
+                            [
+                                ("BACKGROUND", (0, 0), (-1, -1), _BRAND["ink"]),
+                                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ]
+                        ),
+                    ),
+                    Paragraph(_safe_text(chips_line) or "Questão", chip_text),
+                ]
+            ],
+            colWidths=[11 * mm, doc.width - 11 * mm],
+            style=TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]
+            ),
+        )
+
+        # Cabeçalho + enunciado ficam juntos (evita "questão órfã" no topo
+        # da página seguinte); as alternativas, não — questão muito longa
+        # pode ultrapassar uma página A4, e forçar tudo junto causa
+        # LayoutError (mesma decisão de `notebook_pdf_service`).
+        story.append(
+            KeepTogether(
+                [
+                    header_row,
+                    Paragraph(_safe_text(question.statement), question_statement),
+                ]
+            )
+        )
+
+        for alt in question.alternatives:
+            story.append(
+                Paragraph(
+                    f"<b>{escape(alt.letter)})</b> {_safe_text(alt.text)}",
+                    alternative,
+                )
+            )
+
+        # Gabarito logo abaixo da própria questão — só quando o modo
+        # escolhido é "inline" (a alternativa do resto do menu é "end",
+        # que reaproveita o bloco de gabarito em grade no fim do PDF).
+        if options.answer_key_mode == "inline":
+            story.append(
+                Paragraph(
+                    f"Gabarito: <font color='#7C2D12'>{escape(question.correct_alternative_letter)}</font>",
+                    inline_answer,
+                )
+            )
+
+        # Espaço para rascunho — algumas linhas em branco com régua sutil,
+        # útil pra quem quer fazer conta/anotação ao lado da questão sem
+        # rabiscar em cima do enunciado.
+        if options.include_draft_space:
+            story.append(Spacer(1, 3 * mm))
+            story.append(
+                Paragraph(
+                    "RASCUNHO",
+                    ParagraphStyle(
+                        "DraftLabel",
+                        parent=chip_text,
+                        textColor=_BRAND["muted"],
+                    ),
+                )
+            )
+            for _ in range(3):
+                story.append(Spacer(1, 6 * mm))
+                story.append(
+                    HRFlowable(
+                        width=doc.width, color=_BRAND["line"], thickness=0.4, dash=(1, 2)
+                    )
+                )
+
+        story.append(Spacer(1, 2 * mm))
+        story.append(HRFlowable(width=doc.width, color=_BRAND["line"], thickness=0.6))
+        story.append(Spacer(1, 5 * mm))
+
+    # ---------------------------------------------------------------- #
+    # Gabarito em grade, no fim do PDF                                  #
+    # ---------------------------------------------------------------- #
+    if options.answer_key_mode == "end":
+        story.append(
+            Table(
+                [[Paragraph("GABARITO", section)]],
+                colWidths=[doc.width],
+                style=TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), _BRAND["ink"]),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5 * mm),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+                    ]
+                ),
+            )
+        )
+        story.append(Spacer(1, 4 * mm))
+
+        cols = 5
+        rows: list[list] = []
+        row: list = []
+        for position, question in enumerate(questions, start=1):
+            row.append(
+                Paragraph(
+                    f"{position:02d} — <font color='#7C2D12'>"
+                    f"{escape(question.correct_alternative_letter)}</font>",
+                    answer_cell,
+                )
+            )
+            if len(row) == cols:
+                rows.append(row)
+                row = []
+        if row:
+            while len(row) < cols:
+                row.append(Paragraph("", answer_cell))
+            rows.append(row)
+
+        zebra = [
+            ("BACKGROUND", (0, r), (-1, r), _BRAND["surface"] if r % 2 else colors.white)
+            for r in range(len(rows))
+        ]
+        story.append(
+            Table(
+                rows,
+                colWidths=[doc.width / cols] * cols,
+                style=TableStyle(
+                    [
+                        ("GRID", (0, 0), (-1, -1), 0.5, _BRAND["line"]),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+                        *zebra,
+                    ]
+                ),
+            )
+        )
+
+    doc.build(story, canvasmaker=_NumberedCanvas)
+    return buffer.getvalue(), f"{_filename(title)}.pdf"
 </file>
 
 <file path="app/services/identity/user_service.py">
@@ -38735,6 +39250,240 @@ NOTIFICATION_MANDATORY_CATEGORIES: frozenset[NotificationCategory] = frozenset(
 )
 </file>
 
+<file path="pyproject.toml">
+[tool.poetry]
+name = "foco-policial-backend"
+version = "0.1.0"
+description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
+authors = ["Foco Policial <dev@focopolicial.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.13"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = "^0.30.0"
+alembic = "^1.13.3"
+pydantic = "^2.9.2"
+pydantic-settings = "^2.6.0"
+email-validator = "^2.2.0"
+pyjwt = "^2.9.0"
+argon2-cffi = "^23.1.0"
+redis = { extras = ["hiredis"], version = "^5.1.1" }
+python-multipart = "^0.0.12"
+structlog = "^24.4.0"
+apscheduler = "^3.10.4"
+prometheus-client = "^0.26.0"
+httpx = "^0.27.0"
+boto3 = "^1.43.76"
+reportlab = "^4.2.5"
+google-auth = ">=2.0.0,<3.0.0"
+pandas = "^3.0.5"
+openpyxl = "^3.1.5"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.7.1"
+mypy = "^1.13.0"
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+httpx = "^0.27.2"
+factory-boy = "^3.3.1"
+testcontainers = {extras = ["postgres"], version = "^4.15.0"}
+psycopg2-binary = "^2.9.12"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = "reportlab.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "app.models.*"
+# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
+# revisitar conforme o plugin oficial evolui.
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+</file>
+
+<file path="app/schemas/practice/training_session.py">
+# app/schemas/practice/training_session.py
+"""Schemas de request/response de sessões de treino."""
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
+from app.models.enums import QuestionDifficulty
+from app.schemas.content.exam_source import (
+    ExamBoardResponse,
+    ExamEditionResponse,
+    OrganizationResponse,
+)
+from app.schemas.content.question import (
+    QuestionAlternativePublicResponse,
+    QuestionAttachmentResponse,
+    QuestionTagResponse,
+)
+from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
+
+
+class TrainingSessionCreateRequest(BaseModel):
+    """Filtros usados para montar a sessão + quantidade de questões desejada."""
+
+    discipline_id: uuid.UUID | None = None
+    subject_id: uuid.UUID | None = None
+    topic_id: uuid.UUID | None = None
+    exam_board_id: uuid.UUID | None = None
+    exam_edition_id: uuid.UUID | None = None
+    organization_id: uuid.UUID | None = None
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    difficulty: QuestionDifficulty | None = None
+    tag_id: uuid.UUID | None = None
+    quantity: int = Field(default=10, ge=1, le=100)
+    
+    question_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_BULK_QUESTION_SELECTION,
+        description="Lista explícita de IDs de questões para montar a sessão"
+    )
+    # 🔥 CORREÇÃO: Adicionar notebook_id
+    notebook_id: uuid.UUID | None = Field(
+        default=None,
+        description="ID do caderno para criar sessão a partir das questões do caderno"
+    )
+    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
+    # não são usados) — nesses dois outros modos a lista de questões já é
+    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
+    exclude_answered: bool = Field(
+        default=False,
+        description=(
+            "Se True, sorteia apenas questões que o usuário ainda não "
+            "respondeu (nenhum QuestionAttempt seu para a questão)."
+        ),
+    )
+
+
+class TrainingSessionQuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    statement: str
+    discipline: DisciplineResponse
+    subject: SubjectResponse | None
+    topic: TopicResponse | None
+    exam_board: ExamBoardResponse
+    exam_edition: ExamEditionResponse | None
+    organization: OrganizationResponse | None
+    year: int | None
+    difficulty: QuestionDifficulty
+    alternatives: list[QuestionAlternativePublicResponse]
+    tags: list[QuestionTagResponse]
+    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
+    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
+    # resolução real acontece na sessão de treino, não no detalhe avulso.
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
+    position: int
+    answered: bool
+    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
+    # respondida em uma visita anterior a esta mesma sessão. É o que
+    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
+    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
+    # que a página é recarregada ou o aluno sai e volta.
+    # Para questões ainda não respondidas, ficam `None` — o gabarito
+    # nunca é exposto antes da resposta ser enviada.
+    selected_alternative_id: uuid.UUID | None = None
+    is_correct: bool | None = None
+    correct_alternative_letter: str | None = None
+    explanation: str | None = None
+
+
+class TrainingSessionListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class TrainingSessionDetailResponse(BaseModel):
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    current_question_index: int
+    questions: list[TrainingSessionQuestionResponse]
+
+
+class TrainingSessionPositionUpdateRequest(BaseModel):
+    current_question_index: int = Field(ge=0)
+
+
+class TrainingSessionPositionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    current_question_index: int
+
+
+class TrainingSessionPeerStatsResponse(BaseModel):
+    """Comparativo agregado e ANÔNIMO com os demais usuários que já
+    responderam as questões desta sessão/caderno (item 2 do prompt da
+    sessão anterior — painel "Demais usuários" nos moldes do Tec Concursos).
+
+    Deliberadamente não existe nenhum campo que identifique um usuário
+    específico ou a resposta que ele deu — só contagens e uma média.
+    """
+
+    has_data: bool = Field(
+        description=(
+            "False quando nenhum outro usuário ainda respondeu nenhuma "
+            "questão desta sessão — nesse caso `user_count`/`average_accuracy` "
+            "vêm zerados e o frontend deve esconder o comparativo em vez de "
+            "mostrar um 0% enganoso."
+        )
+    )
+    user_count: int = Field(
+        description="Quantidade de outros usuários distintos que responderam ao menos uma dessas questões."
+    )
+    sample_size: int = Field(
+        description="Total de tentativas (QuestionAttempt) somadas de todos os outros usuários."
+    )
+    average_accuracy: float = Field(
+        description="Percentual médio de acerto (0–100) dos outros usuários nessas questões."
+    )
+</file>
+
 <file path="app/services/practice/training_session_service.py">
 # app/services/practice/training_session_service.py
 import uuid
@@ -38753,6 +39502,9 @@ from app.models.practice.training_session import TrainingSession, TrainingSessio
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.repositories.practice.user_question_state_repository import (
+    UserQuestionStateRepository,
+)
 from app.repositories.learning.notebook_repository import NotebookRepository
 from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
 from app.schemas.practice.training_session import TrainingSessionCreateRequest
@@ -38788,6 +39540,7 @@ class TrainingSessionService:
         self._attempts = QuestionAttemptRepository(session)
         self._notebooks = NotebookRepository(session)
         self._notebook_questions = NotebookQuestionRepository(session)
+        self._question_states = UserQuestionStateRepository(session)
         self._feature_gate = FeatureGateService(session)
 
     async def create_session(
@@ -39015,6 +39768,55 @@ class TrainingSessionService:
         # dado legado tiver duplicata.
         return {attempt.question_id: attempt for attempt in attempts}
 
+    async def select_questions_for_print(
+        self,
+        session_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        max_questions: int | None,
+        exclude_answered: bool,
+        exclude_correct: bool,
+        exclude_favorited: bool,
+    ) -> list[Question]:
+        """Questões da sessão já filtradas pra tela de impressão (item 3 do
+        prompt de continuidade), na mesma ordem em que aparecem na sessão.
+
+        A filtragem acontece aqui (não no PDF) pra manter
+        `session_print_service.build_session_print_pdf` burro — ele só
+        desenha o que já chegou pronto, igual `notebook_pdf_service` faz
+        com os `items` de um caderno.
+        """
+        training_session = await self.get_session(session_id, user_id)
+        ordered_questions, _ = await self.get_session_questions(training_session)
+
+        attempts_by_question = await self.get_session_attempts_by_question(
+            user_id, session_id
+        )
+        # Só busca favoritos se algum filtro realmente depende disso — evita
+        # uma query extra à toa quando o aluno não marcou "remover
+        # favoritadas".
+        favorited_ids: set[uuid.UUID] = set()
+        if exclude_favorited:
+            favorited_ids = await self._question_states.get_favorited_ids(
+                user_id, [q.id for q in ordered_questions]
+            )
+
+        selected: list[Question] = []
+        for question in ordered_questions:
+            attempt = attempts_by_question.get(question.id)
+            if exclude_answered and attempt is not None:
+                continue
+            if exclude_correct and attempt is not None and attempt.is_correct:
+                continue
+            if exclude_favorited and question.id in favorited_ids:
+                continue
+            selected.append(question)
+
+        if max_questions is not None:
+            selected = selected[:max_questions]
+
+        return selected
+
     async def update_position(
         self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
     ) -> TrainingSession:
@@ -39074,89 +39876,6 @@ class TrainingSessionService:
         return await self.get_session(session_id, user_id)
 </file>
 
-<file path="pyproject.toml">
-[tool.poetry]
-name = "foco-policial-backend"
-version = "0.1.0"
-description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
-authors = ["Foco Policial <dev@focopolicial.com>"]
-readme = "README.md"
-package-mode = false
-
-[tool.poetry.dependencies]
-python = "^3.13"
-fastapi = "^0.115.0"
-uvicorn = { extras = ["standard"], version = "^0.32.0" }
-sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
-asyncpg = "^0.30.0"
-alembic = "^1.13.3"
-pydantic = "^2.9.2"
-pydantic-settings = "^2.6.0"
-email-validator = "^2.2.0"
-pyjwt = "^2.9.0"
-argon2-cffi = "^23.1.0"
-redis = { extras = ["hiredis"], version = "^5.1.1" }
-python-multipart = "^0.0.12"
-structlog = "^24.4.0"
-apscheduler = "^3.10.4"
-prometheus-client = "^0.26.0"
-httpx = "^0.27.0"
-boto3 = "^1.43.76"
-reportlab = "^4.2.5"
-google-auth = ">=2.0.0,<3.0.0"
-pandas = "^3.0.5"
-openpyxl = "^3.1.5"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.7.1"
-mypy = "^1.13.0"
-pytest = "^8.3.3"
-pytest-asyncio = "^0.24.0"
-pytest-cov = "^5.0.0"
-httpx = "^0.27.2"
-factory-boy = "^3.3.1"
-testcontainers = {extras = ["postgres"], version = "^4.15.0"}
-psycopg2-binary = "^2.9.12"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-src = ["app", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
-ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
-
-[tool.ruff.lint.isort]
-known-first-party = ["app"]
-
-[tool.mypy]
-python_version = "3.13"
-plugins = ["pydantic.mypy"]
-strict = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-exclude = ["migrations/"]
-
-[[tool.mypy.overrides]]
-module = "reportlab.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "app.models.*"
-# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
-# revisitar conforme o plugin oficial evolui.
-disallow_untyped_defs = false
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-</file>
-
 <file path="app/api/v1/practice/training_sessions.py">
 """Endpoints HTTP de sessões de treino.
 
@@ -39166,11 +39885,14 @@ suas próprias sessões.
 """
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import NotFoundError
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
@@ -39187,6 +39909,10 @@ from app.schemas.practice.training_session import (
     TrainingSessionQuestionResponse,
 )
 from app.security.dependencies import CurrentUser
+from app.services.export.session_print_service import (
+    SessionPrintOptions,
+    build_session_print_pdf,
+)
 from app.services.practice.question_attempt_service import QuestionAttemptService
 from app.services.practice.training_session_service import TrainingSessionService
 
@@ -39413,156 +40139,83 @@ async def finish_training_session(
     training_session = await training_session_service.finish_session(session_id, current_user.id)
     detail = await _build_detail(training_session_service, current_user.id, training_session)
     return Envelope(data=detail)
-</file>
 
-<file path="app/schemas/practice/training_session.py">
-# app/schemas/practice/training_session.py
-"""Schemas de request/response de sessões de treino."""
 
-import uuid
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.core.constants import MAX_BULK_QUESTION_SELECTION
-from app.models.enums import QuestionDifficulty
-from app.schemas.content.exam_source import (
-    ExamBoardResponse,
-    ExamEditionResponse,
-    OrganizationResponse,
+@router.get(
+    "/{session_id}/print",
+    response_class=Response,
+    summary="Gera o PDF de impressão configurável da sessão de resolução",
 )
-from app.schemas.content.question import (
-    QuestionAlternativePublicResponse,
-    QuestionAttachmentResponse,
-    QuestionTagResponse,
-)
-from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
+async def print_training_session(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+    max_questions: Annotated[int | None, Query(ge=1, le=500)] = None,
+    exclude_answered: Annotated[bool, Query()] = False,
+    exclude_correct: Annotated[bool, Query()] = False,
+    exclude_favorited: Annotated[bool, Query()] = False,
+    answer_key_mode: Annotated[Literal["end", "inline", "none"], Query()] = "none",
+    font_size: Annotated[Literal["sm", "md", "lg"], Query()] = "md",
+    include_draft_space: Annotated[bool, Query()] = False,
+    header_student_name: Annotated[bool, Query()] = True,
+    header_date: Annotated[bool, Query()] = True,
+    header_summary: Annotated[bool, Query()] = True,
+) -> Response:
+    """Tela "Imprimir" (item 3 do prompt de continuidade — equivalente à
+    aba "Imprimir" do Tec Concursos).
 
-
-class TrainingSessionCreateRequest(BaseModel):
-    """Filtros usados para montar a sessão + quantidade de questões desejada."""
-
-    discipline_id: uuid.UUID | None = None
-    subject_id: uuid.UUID | None = None
-    topic_id: uuid.UUID | None = None
-    exam_board_id: uuid.UUID | None = None
-    exam_edition_id: uuid.UUID | None = None
-    organization_id: uuid.UUID | None = None
-    year: int | None = Field(default=None, ge=1900, le=2100)
-    difficulty: QuestionDifficulty | None = None
-    tag_id: uuid.UUID | None = None
-    quantity: int = Field(default=10, ge=1, le=100)
-    
-    question_ids: list[uuid.UUID] | None = Field(
-        default=None,
-        max_length=MAX_BULK_QUESTION_SELECTION,
-        description="Lista explícita de IDs de questões para montar a sessão"
-    )
-    # 🔥 CORREÇÃO: Adicionar notebook_id
-    notebook_id: uuid.UUID | None = Field(
-        default=None,
-        description="ID do caderno para criar sessão a partir das questões do caderno"
-    )
-    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
-    # não são usados) — nesses dois outros modos a lista de questões já é
-    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
-    exclude_answered: bool = Field(
-        default=False,
-        description=(
-            "Se True, sorteia apenas questões que o usuário ainda não "
-            "respondeu (nenhum QuestionAttempt seu para a questão)."
-        ),
-    )
-
-
-class TrainingSessionQuestionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    statement: str
-    discipline: DisciplineResponse
-    subject: SubjectResponse | None
-    topic: TopicResponse | None
-    exam_board: ExamBoardResponse
-    exam_edition: ExamEditionResponse | None
-    organization: OrganizationResponse | None
-    year: int | None
-    difficulty: QuestionDifficulty
-    alternatives: list[QuestionAlternativePublicResponse]
-    tags: list[QuestionTagResponse]
-    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
-    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
-    # resolução real acontece na sessão de treino, não no detalhe avulso.
-    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
-    position: int
-    answered: bool
-    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
-    # respondida em uma visita anterior a esta mesma sessão. É o que
-    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
-    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
-    # que a página é recarregada ou o aluno sai e volta.
-    # Para questões ainda não respondidas, ficam `None` — o gabarito
-    # nunca é exposto antes da resposta ser enviada.
-    selected_alternative_id: uuid.UUID | None = None
-    is_correct: bool | None = None
-    correct_alternative_letter: str | None = None
-    explanation: str | None = None
-
-
-class TrainingSessionListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    created_at: datetime
-
-
-class TrainingSessionDetailResponse(BaseModel):
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    current_question_index: int
-    questions: list[TrainingSessionQuestionResponse]
-
-
-class TrainingSessionPositionUpdateRequest(BaseModel):
-    current_question_index: int = Field(ge=0)
-
-
-class TrainingSessionPositionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    current_question_index: int
-
-
-class TrainingSessionPeerStatsResponse(BaseModel):
-    """Comparativo agregado e ANÔNIMO com os demais usuários que já
-    responderam as questões desta sessão/caderno (item 2 do prompt da
-    sessão anterior — painel "Demais usuários" nos moldes do Tec Concursos).
-
-    Deliberadamente não existe nenhum campo que identifique um usuário
-    específico ou a resposta que ele deu — só contagens e uma média.
+    Sem cota diária aqui de propósito: o catálogo de features
+    (`FeatureKey`) só tem cota pra responder questões (`DAILY_QUESTIONS`),
+    não pra exportar/imprimir — não inventamos uma regra de negócio nova
+    nesta rota. Sem QR code por questão também: não existe hoje uma rota
+    pública de questão individual que sustente isso com segurança.
     """
+    questions = await training_session_service.select_questions_for_print(
+        session_id,
+        current_user.id,
+        max_questions=max_questions,
+        exclude_answered=exclude_answered,
+        exclude_correct=exclude_correct,
+        exclude_favorited=exclude_favorited,
+    )
 
-    has_data: bool = Field(
-        description=(
-            "False quando nenhum outro usuário ainda respondeu nenhuma "
-            "questão desta sessão — nesse caso `user_count`/`average_accuracy` "
-            "vêm zerados e o frontend deve esconder o comparativo em vez de "
-            "mostrar um 0% enganoso."
+    if not questions:
+        raise NotFoundError(
+            "Nenhuma questão restante para impressão com os filtros escolhidos."
         )
+
+    pdf_bytes, filename = build_session_print_pdf(
+        title="Sessão de resolução",
+        questions=questions,
+        options=SessionPrintOptions(
+            answer_key_mode=answer_key_mode,
+            font_size=font_size,
+            include_draft_space=include_draft_space,
+            header_student_name=header_student_name,
+            header_date=header_date,
+            header_summary=header_summary,
+        ),
+        student_name=current_user.full_name,
     )
-    user_count: int = Field(
-        description="Quantidade de outros usuários distintos que responderam ao menos uma dessas questões."
-    )
-    sample_size: int = Field(
-        description="Total de tentativas (QuestionAttempt) somadas de todos os outros usuários."
-    )
-    average_accuracy: float = Field(
-        description="Percentual médio de acerto (0–100) dos outros usuários nessas questões."
+
+    encoded_filename = quote(filename)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            # 🔥 CORREÇÃO: o padrão usado em `notebooks.py` (duas strings
+            # adjacentes `f'...UTF-8'` + `'{encoded_filename}'`) fecha o
+            # f-string antes da interpolação — o nome do arquivo vira o
+            # texto literal "{encoded_filename}" no header, em vez do
+            # nome de verdade. Aqui usamos aspas escapadas pra manter o
+            # f-string aberto até o fim.
+            "Content-Disposition": (
+                f"attachment; filename=\"sessao.pdf\"; filename*=UTF-8''{encoded_filename}"
+            ),
+            "Content-Length": str(len(pdf_bytes)),
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 </file>
 

@@ -49,7 +49,7 @@ def _accuracy(correct: int, total: int) -> float:
 async def list_daily_stats(
     current_user: CurrentUser,
     analytics_service: AnalyticsServiceDep,
-    days: Annotated[int, Query(ge=1, le=90)] = 7,
+    days: Annotated[int, Query(ge=1, le=180)] = 7,
 ) -> Envelope[list[DailyStatResponse]]:
     """Série diária dos últimos `days` dias — alimenta a Evolução Semanal."""
     stats = await analytics_service.get_daily_stats(current_user.id, days=days)
