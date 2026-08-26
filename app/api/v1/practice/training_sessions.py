@@ -6,11 +6,14 @@ suas próprias sessões.
 """
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import NotFoundError
 from app.core.pagination import CursorPage
 from app.core.responses import Envelope, Meta
 from app.database.session import get_db
@@ -27,6 +30,10 @@ from app.schemas.practice.training_session import (
     TrainingSessionQuestionResponse,
 )
 from app.security.dependencies import CurrentUser
+from app.services.export.session_print_service import (
+    SessionPrintOptions,
+    build_session_print_pdf,
+)
 from app.services.practice.question_attempt_service import QuestionAttemptService
 from app.services.practice.training_session_service import TrainingSessionService
 
@@ -253,3 +260,81 @@ async def finish_training_session(
     training_session = await training_session_service.finish_session(session_id, current_user.id)
     detail = await _build_detail(training_session_service, current_user.id, training_session)
     return Envelope(data=detail)
+
+
+@router.get(
+    "/{session_id}/print",
+    response_class=Response,
+    summary="Gera o PDF de impressão configurável da sessão de resolução",
+)
+async def print_training_session(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+    max_questions: Annotated[int | None, Query(ge=1, le=500)] = None,
+    exclude_answered: Annotated[bool, Query()] = False,
+    exclude_correct: Annotated[bool, Query()] = False,
+    exclude_favorited: Annotated[bool, Query()] = False,
+    answer_key_mode: Annotated[Literal["end", "inline", "none"], Query()] = "none",
+    font_size: Annotated[Literal["sm", "md", "lg"], Query()] = "md",
+    include_draft_space: Annotated[bool, Query()] = False,
+    header_student_name: Annotated[bool, Query()] = True,
+    header_date: Annotated[bool, Query()] = True,
+    header_summary: Annotated[bool, Query()] = True,
+) -> Response:
+    """Tela "Imprimir" (item 3 do prompt de continuidade — equivalente à
+    aba "Imprimir" do Tec Concursos).
+
+    Sem cota diária aqui de propósito: o catálogo de features
+    (`FeatureKey`) só tem cota pra responder questões (`DAILY_QUESTIONS`),
+    não pra exportar/imprimir — não inventamos uma regra de negócio nova
+    nesta rota. Sem QR code por questão também: não existe hoje uma rota
+    pública de questão individual que sustente isso com segurança.
+    """
+    questions = await training_session_service.select_questions_for_print(
+        session_id,
+        current_user.id,
+        max_questions=max_questions,
+        exclude_answered=exclude_answered,
+        exclude_correct=exclude_correct,
+        exclude_favorited=exclude_favorited,
+    )
+
+    if not questions:
+        raise NotFoundError(
+            "Nenhuma questão restante para impressão com os filtros escolhidos."
+        )
+
+    pdf_bytes, filename = build_session_print_pdf(
+        title="Sessão de resolução",
+        questions=questions,
+        options=SessionPrintOptions(
+            answer_key_mode=answer_key_mode,
+            font_size=font_size,
+            include_draft_space=include_draft_space,
+            header_student_name=header_student_name,
+            header_date=header_date,
+            header_summary=header_summary,
+        ),
+        student_name=current_user.full_name,
+    )
+
+    encoded_filename = quote(filename)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            # 🔥 CORREÇÃO: o padrão usado em `notebooks.py` (duas strings
+            # adjacentes `f'...UTF-8'` + `'{encoded_filename}'`) fecha o
+            # f-string antes da interpolação — o nome do arquivo vira o
+            # texto literal "{encoded_filename}" no header, em vez do
+            # nome de verdade. Aqui usamos aspas escapadas pra manter o
+            # f-string aberto até o fim.
+            "Content-Disposition": (
+                f"attachment; filename=\"sessao.pdf\"; filename*=UTF-8''{encoded_filename}"
+            ),
+            "Content-Length": str(len(pdf_bytes)),
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

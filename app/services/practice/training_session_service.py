@@ -15,6 +15,9 @@ from app.models.practice.training_session import TrainingSession, TrainingSessio
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.repositories.practice.user_question_state_repository import (
+    UserQuestionStateRepository,
+)
 from app.repositories.learning.notebook_repository import NotebookRepository
 from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
 from app.schemas.practice.training_session import TrainingSessionCreateRequest
@@ -50,6 +53,7 @@ class TrainingSessionService:
         self._attempts = QuestionAttemptRepository(session)
         self._notebooks = NotebookRepository(session)
         self._notebook_questions = NotebookQuestionRepository(session)
+        self._question_states = UserQuestionStateRepository(session)
         self._feature_gate = FeatureGateService(session)
 
     async def create_session(
@@ -276,6 +280,55 @@ class TrainingSessionService:
         # dict simples (última tentativa vence) para não quebrar se algum
         # dado legado tiver duplicata.
         return {attempt.question_id: attempt for attempt in attempts}
+
+    async def select_questions_for_print(
+        self,
+        session_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        max_questions: int | None,
+        exclude_answered: bool,
+        exclude_correct: bool,
+        exclude_favorited: bool,
+    ) -> list[Question]:
+        """Questões da sessão já filtradas pra tela de impressão (item 3 do
+        prompt de continuidade), na mesma ordem em que aparecem na sessão.
+
+        A filtragem acontece aqui (não no PDF) pra manter
+        `session_print_service.build_session_print_pdf` burro — ele só
+        desenha o que já chegou pronto, igual `notebook_pdf_service` faz
+        com os `items` de um caderno.
+        """
+        training_session = await self.get_session(session_id, user_id)
+        ordered_questions, _ = await self.get_session_questions(training_session)
+
+        attempts_by_question = await self.get_session_attempts_by_question(
+            user_id, session_id
+        )
+        # Só busca favoritos se algum filtro realmente depende disso — evita
+        # uma query extra à toa quando o aluno não marcou "remover
+        # favoritadas".
+        favorited_ids: set[uuid.UUID] = set()
+        if exclude_favorited:
+            favorited_ids = await self._question_states.get_favorited_ids(
+                user_id, [q.id for q in ordered_questions]
+            )
+
+        selected: list[Question] = []
+        for question in ordered_questions:
+            attempt = attempts_by_question.get(question.id)
+            if exclude_answered and attempt is not None:
+                continue
+            if exclude_correct and attempt is not None and attempt.is_correct:
+                continue
+            if exclude_favorited and question.id in favorited_ids:
+                continue
+            selected.append(question)
+
+        if max_questions is not None:
+            selected = selected[:max_questions]
+
+        return selected
 
     async def update_position(
         self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int

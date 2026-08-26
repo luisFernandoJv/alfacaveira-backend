@@ -26612,126 +26612,6 @@ class NotebookRepository(BaseRepository[Notebook]):
         return result.rowcount > 0
 </file>
 
-<file path="app/repositories/practice/question_attempt_repository.py">
-"""Repositório de acesso a dados de `QuestionAttempt` (histórico de respostas)."""
-
-import uuid
-from datetime import datetime, time, timezone
-
-from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
-
-from app.models.enums import SessionType
-from app.models.practice.question_attempt import QuestionAttempt
-from app.repositories.base import BaseRepository
-
-_RELATIONS = (selectinload(QuestionAttempt.question),)
-
-
-class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
-    model = QuestionAttempt
-
-    async def get_for_question_in_session(
-        self,
-        user_id: uuid.UUID,
-        question_id: uuid.UUID,
-        session_type: SessionType,
-        session_id: uuid.UUID,
-    ) -> QuestionAttempt | None:
-        """Tentativa já registrada para esta questão dentro desta sessão, se houver."""
-        stmt = select(QuestionAttempt).where(
-            QuestionAttempt.user_id == user_id,
-            QuestionAttempt.question_id == question_id,
-            QuestionAttempt.session_type == session_type,
-            QuestionAttempt.session_id == session_id,
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_correct_status_map(
-        self, user_id: uuid.UUID, question_ids: list[uuid.UUID]
-    ) -> dict[uuid.UUID, bool]:
-        """Para cada `question_id` de `question_ids` já respondido pelo
-        usuário, indica se ele acertou em ALGUMA tentativa (`True`) ou só
-        errou em todas (`False`). Questões ausentes do dict não foram
-        respondidas.
-
-        ETAPA 3 (sessão 6): usado por `QuestionService.list_questions` para
-        preencher `answer_status` na listagem, numa única query agregada em
-        lote (evita N+1).
-        """
-        if not question_ids:
-            return {}
-        stmt = (
-            select(
-                QuestionAttempt.question_id,
-                func.bool_or(QuestionAttempt.is_correct),
-            )
-            .where(
-                QuestionAttempt.user_id == user_id,
-                QuestionAttempt.question_id.in_(question_ids),
-            )
-            .group_by(QuestionAttempt.question_id)
-        )
-        result = await self.session.execute(stmt)
-        return {row[0]: bool(row[1]) for row in result.all()}
-
-    async def count_answered_today(
-        self, user_id: uuid.UUID, session_type: SessionType
-    ) -> int:
-        """Quantidade de respostas do usuário hoje (UTC) para uma origem
-        (`session_type`). Usado pelo Feature Gate de quota `daily_questions`
-        — não conta respostas de outras origens (ex.: simulado tem seu
-        próprio gate, `simulados`, e não compartilha a cota diária)."""
-        today_start = datetime.combine(
-            datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
-        )
-        stmt = select(func.count()).select_from(QuestionAttempt).where(
-            QuestionAttempt.user_id == user_id,
-            QuestionAttempt.session_type == session_type,
-            QuestionAttempt.answered_at >= today_start,
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one()
-
-    async def list_by_session(
-        self, user_id: uuid.UUID, session_type: SessionType, session_id: uuid.UUID
-    ) -> list[QuestionAttempt]:
-        stmt = select(QuestionAttempt).where(
-            QuestionAttempt.user_id == user_id,
-            QuestionAttempt.session_type == session_type,
-            QuestionAttempt.session_id == session_id,
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def list_paginated(
-        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> list[QuestionAttempt]:
-        """Histórico de respostas do usuário (qualquer origem), mais recentes primeiro."""
-        stmt = (
-            select(QuestionAttempt)
-            .where(QuestionAttempt.user_id == user_id)
-            .options(*_RELATIONS)
-            .order_by(QuestionAttempt.answered_at.desc(), QuestionAttempt.id.desc())
-            .limit(limit)
-        )
-
-        if cursor_id is not None:
-            cursor_attempt = await self.get_by_id(cursor_id)
-            if cursor_attempt is not None:
-                stmt = stmt.where(
-                    (QuestionAttempt.answered_at < cursor_attempt.answered_at)
-                    | (
-                        (QuestionAttempt.answered_at == cursor_attempt.answered_at)
-                        & (QuestionAttempt.id < cursor_attempt.id)
-                    )
-                )
-
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-</file>
-
 <file path="app/schemas/identity/auth.py">
 """Schemas de request/response do fluxo de autenticação."""
 
@@ -32403,6 +32283,160 @@ class NotebookQuestionRepository(BaseRepository[NotebookQuestion]):
         )
         result = await self.session.execute(stmt)
         return result.rowcount
+</file>
+
+<file path="app/repositories/practice/question_attempt_repository.py">
+"""Repositório de acesso a dados de `QuestionAttempt` (histórico de respostas)."""
+
+import uuid
+from datetime import datetime, time, timezone
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
+
+from app.models.enums import SessionType
+from app.models.practice.question_attempt import QuestionAttempt
+from app.repositories.base import BaseRepository
+
+_RELATIONS = (selectinload(QuestionAttempt.question),)
+
+
+class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
+    model = QuestionAttempt
+
+    async def get_for_question_in_session(
+        self,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+        session_type: SessionType,
+        session_id: uuid.UUID,
+    ) -> QuestionAttempt | None:
+        """Tentativa já registrada para esta questão dentro desta sessão, se houver."""
+        stmt = select(QuestionAttempt).where(
+            QuestionAttempt.user_id == user_id,
+            QuestionAttempt.question_id == question_id,
+            QuestionAttempt.session_type == session_type,
+            QuestionAttempt.session_id == session_id,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_correct_status_map(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, bool]:
+        """Para cada `question_id` de `question_ids` já respondido pelo
+        usuário, indica se ele acertou em ALGUMA tentativa (`True`) ou só
+        errou em todas (`False`). Questões ausentes do dict não foram
+        respondidas.
+
+        ETAPA 3 (sessão 6): usado por `QuestionService.list_questions` para
+        preencher `answer_status` na listagem, numa única query agregada em
+        lote (evita N+1).
+        """
+        if not question_ids:
+            return {}
+        stmt = (
+            select(
+                QuestionAttempt.question_id,
+                func.bool_or(QuestionAttempt.is_correct),
+            )
+            .where(
+                QuestionAttempt.user_id == user_id,
+                QuestionAttempt.question_id.in_(question_ids),
+            )
+            .group_by(QuestionAttempt.question_id)
+        )
+        result = await self.session.execute(stmt)
+        return {row[0]: bool(row[1]) for row in result.all()}
+
+    async def count_answered_today(
+        self, user_id: uuid.UUID, session_type: SessionType
+    ) -> int:
+        """Quantidade de respostas do usuário hoje (UTC) para uma origem
+        (`session_type`). Usado pelo Feature Gate de quota `daily_questions`
+        — não conta respostas de outras origens (ex.: simulado tem seu
+        próprio gate, `simulados`, e não compartilha a cota diária)."""
+        today_start = datetime.combine(
+            datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
+        )
+        stmt = select(func.count()).select_from(QuestionAttempt).where(
+            QuestionAttempt.user_id == user_id,
+            QuestionAttempt.session_type == session_type,
+            QuestionAttempt.answered_at >= today_start,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def list_by_session(
+        self, user_id: uuid.UUID, session_type: SessionType, session_id: uuid.UUID
+    ) -> list[QuestionAttempt]:
+        stmt = select(QuestionAttempt).where(
+            QuestionAttempt.user_id == user_id,
+            QuestionAttempt.session_type == session_type,
+            QuestionAttempt.session_id == session_id,
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_peer_aggregate(
+        self, question_ids: list[uuid.UUID], exclude_user_id: uuid.UUID
+    ) -> tuple[int, int, int]:
+        """Agregado ANÔNIMO de todas as tentativas de outros usuários nas
+        questões de `question_ids` — base da comparação "Demais usuários" na
+        tela de resultado da sessão/caderno (item 2 do prompt).
+
+        Retorna `(distinct_user_count, total_attempts, correct_attempts)`.
+        Deliberadamente NÃO existe um `user_id` no retorno: a query só soma
+        e conta linhas (`func.count`, `func.count(distinct ...)`), nunca
+        seleciona `QuestionAttempt.user_id`, `selected_alternative_id` ou
+        qualquer coluna que amarre um dado a uma pessoa específica — dá pra
+        expor esse número no frontend sem vazar resposta nem identidade de
+        ninguém, só o percentual médio da turma.
+
+        `exclude_user_id` tira o próprio usuário da conta: o objetivo é
+        comparar "eu" vs "os outros", não diluir a média dos outros com a
+        tentativa de quem está vendo a tela.
+        """
+        if not question_ids:
+            return (0, 0, 0)
+
+        stmt = select(
+            func.count(func.distinct(QuestionAttempt.user_id)),
+            func.count(QuestionAttempt.id),
+            func.count(QuestionAttempt.id).filter(QuestionAttempt.is_correct.is_(True)),
+        ).where(
+            QuestionAttempt.question_id.in_(question_ids),
+            QuestionAttempt.user_id != exclude_user_id,
+        )
+        result = await self.session.execute(stmt)
+        user_count, total_attempts, correct_attempts = result.one()
+        return (user_count or 0, total_attempts or 0, correct_attempts or 0)
+
+    async def list_paginated(
+        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
+    ) -> list[QuestionAttempt]:
+        """Histórico de respostas do usuário (qualquer origem), mais recentes primeiro."""
+        stmt = (
+            select(QuestionAttempt)
+            .where(QuestionAttempt.user_id == user_id)
+            .options(*_RELATIONS)
+            .order_by(QuestionAttempt.answered_at.desc(), QuestionAttempt.id.desc())
+            .limit(limit)
+        )
+
+        if cursor_id is not None:
+            cursor_attempt = await self.get_by_id(cursor_id)
+            if cursor_attempt is not None:
+                stmt = stmt.where(
+                    (QuestionAttempt.answered_at < cursor_attempt.answered_at)
+                    | (
+                        (QuestionAttempt.answered_at == cursor_attempt.answered_at)
+                        & (QuestionAttempt.id < cursor_attempt.id)
+                    )
+                )
+
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
 </file>
 
 <file path="app/schemas/identity/user.py">
@@ -38374,6 +38408,333 @@ __all__ = [
 ]
 </file>
 
+<file path=".env.example">
+# Aplicação
+APP_NAME="Alfa Caveira API"
+APP_ENV=development
+DEBUG=true
+API_V1_PREFIX=/api/v1
+
+# Banco de dados — Supabase usado apenas como Postgres gerenciado (sem Auth/RLS).
+# Localmente aponta para o serviço `db` do docker-compose.
+# 🔧 CORREÇÃO (auditoria — achado de segurança P0): esta linha continha uma
+# connection string com host e senha reais de um projeto Supabase, commitada
+# num arquivo que deveria ser só exemplo. Se esse valor já foi versionado em
+# algum momento, a senha precisa ser rotacionada no painel do Supabase
+# imediatamente (Project Settings → Database → Reset database password),
+# e qualquer `.env` real que ainda a use precisa ser atualizado. O valor
+# abaixo é só placeholder — nunca commitar aqui a string de produção.
+DATABASE_URL=postgresql+asyncpg://postgres:CHANGE_ME@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
+DATABASE_POOL_SIZE=10
+DATABASE_MAX_OVERFLOW=20
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# Segurança / JWT — gerar um valor forte em produção (nunca commitar o real).
+JWT_SECRET_KEY=changeme-generate-a-strong-random-secret
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=30
+
+# Recuperação de senha
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=60
+# URL base do frontend — usada para montar o link enviado por e-mail
+# (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
+FRONTEND_URL=http://localhost:3000
+
+# E-mail transacional
+# console (padrão): não envia nada de verdade, apenas loga o e-mail — use em dev.
+# smtp: envia de fato via SMTP (SES, Postmark, Resend, Mailgun, Gmail/Workspace...).
+EMAIL_DRIVER=console
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_USE_TLS=true
+SMTP_FROM_EMAIL=no-reply@focopolicial.com.br
+SMTP_FROM_NAME="Alfa Caveira"
+
+# CORS — origens do frontend Next.js
+CORS_ORIGINS=["http://localhost:3000"]
+
+# Rate limiting
+RATE_LIMIT_PER_MINUTE=60
+
+
+# Adicionar ao final de .env.example (e ao seu .env local) —
+# Worker de agregação de analytics, agendado in-process (ver app/core/scheduler.py)
+ANALYTICS_AGGREGATOR_ENABLED=true
+ANALYTICS_AGGREGATOR_INTERVAL_MINUTES=10
+ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC=3
+ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS=30
+
+# Adicionar ao final de .env.example (e ao seu .env local) —
+# Billing: driver de gateway de pagamento (ver app/services/billing/gateway.py)
+# console (padrão): nenhum provedor real, aprova toda cobrança via ConsoleGateway.
+# Usar apenas em desenvolvimento/teste.
+PAYMENT_GATEWAY_DRIVER=console
+# Segredo compartilhado com o provedor, usado para validar a assinatura do
+# webhook (app/api/v1/billing/webhooks.py). Obrigatório em produção quando
+# PAYMENT_GATEWAY_DRIVER != console — deixar vazio em desenvolvimento.
+PAYMENT_WEBHOOK_SECRET=
+
+# Rate limiting — políticas dedicadas (PROMPT 03)
+# Adicionar ao final do bloco "# Rate limiting" já existente no .env.example
+# real (que já tem RATE_LIMIT_PER_MINUTE=60).
+RATE_LIMIT_LOGIN_PER_MINUTE=5
+RATE_LIMIT_REGISTER_PER_MINUTE=5
+RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE=3
+RATE_LIMIT_RESET_PASSWORD_PER_MINUTE=5
+RATE_LIMIT_BILLING_PER_MINUTE=20
+RATE_LIMIT_FAIL_OPEN=true
+
+SCHEDULER_ENABLED=true
+SCHEDULER_LOCK_TTL_SECONDS=300
+</file>
+
+<file path="app/models/enums.py">
+"""Enums compartilhados entre models de diferentes bounded contexts."""
+
+import enum
+
+
+class QuestionDifficulty(str, enum.Enum):
+    FACIL = "facil"
+    MEDIA = "media"
+    DIFICIL = "dificil"
+
+
+class QuestionStatus(str, enum.Enum):
+    RASCUNHO = "rascunho"
+    PUBLICADA = "publicada"
+    EM_REVISAO = "em_revisao"
+    DESATIVADA = "desativada"
+
+
+class QuestionAnswerStatus(str, enum.Enum):
+    """Status de resposta do usuário autenticado para uma questão.
+
+    ETAPA 3 (sessão 6): usado só na listagem pública (`QuestionListItem`),
+    calculado por usuário a partir de `QuestionAttempt` — não é uma coluna
+    de `Question`. Valores espelham exatamente `AnswerStatus` do frontend
+    (`config/questions.ts`), incluindo o hífen em "nao-respondida" — não
+    são um enum Python "bonito" de propósito, para não precisar de
+    tradução na borda.
+    """
+
+    NAO_RESPONDIDA = "nao-respondida"
+    ACERTOU = "acertou"
+    ERROU = "errou"
+
+
+class QuestionRevisionType(str, enum.Enum):
+    CRIACAO = "criacao"
+    EDICAO = "edicao"
+    STATUS = "status"
+    EXCLUSAO = "exclusao"
+
+
+class AttachmentType(str, enum.Enum):
+    IMAGEM = "imagem"
+    ARQUIVO = "arquivo"
+
+
+class SessionType(str, enum.Enum):
+    TREINO = "treino"
+    SIMULADO = "simulado"
+
+
+class ExamAttemptStatus(str, enum.Enum):
+    EM_ANDAMENTO = "em_andamento"
+    FINALIZADO = "finalizado"
+    ABANDONADO = "abandonado"
+
+
+class FlashcardGrade(str, enum.Enum):
+    ERROU = "errou"
+    DIFICIL = "dificil"
+    BOM = "bom"
+    FACIL = "facil"
+
+
+class BillingPeriod(str, enum.Enum):
+    MENSAL = "mensal"
+    SEMESTRAL = "semestral"
+    ANUAL = "anual"
+
+
+class SubscriptionStatus(str, enum.Enum):
+    # PENDENTE: assinatura criada, aguardando confirmação de pagamento do
+    # gateway. Nasce aqui por padrão (ADR-003) e só vira ATIVA quando
+    # `PaymentService.process_webhook_event` confirma um pagamento
+    # APROVADO via `SubscriptionService.activate_subscription` (ver
+    # ADR-014, PROMPT 05).
+    PENDENTE = "pendente"
+    ATIVA = "ativa"
+    CANCELADA = "cancelada"
+    INADIMPLENTE = "inadimplente"
+    EXPIRADA = "expirada"
+
+
+class PaymentStatus(str, enum.Enum):
+    PENDENTE = "pendente"
+    APROVADO = "aprovado"
+    RECUSADO = "recusado"
+    ESTORNADO = "estornado"
+
+
+class FeatureKey(str, enum.Enum):
+    """Catálogo fechado de features que um `Plan` pode conceder."""
+
+    DAILY_QUESTIONS = "daily_questions"
+    NOTEBOOKS = "notebooks"
+    NOTEBOOK_MAX_QUESTIONS = "notebook_max_questions"
+    SIMULADOS = "simulados"
+    FLASHCARDS = "flashcards"
+    ESTATISTICAS = "estatisticas"
+    DASHBOARD_COMPLETO = "dashboard_completo"
+    AI_EXPLICACAO_QUESTAO = "ai_explicacao_questao"
+    AI_RESUMOS = "ai_resumos"
+    AI_CRONOGRAMA = "ai_cronograma"
+    AI_ANALISE_DESEMPENHO = "ai_analise_desempenho"
+    ANALYTICS_AVANCADO = "analytics_avancado"
+
+
+class FeatureKind(str, enum.Enum):
+    """Como uma `Feature` é interpretada por `FeatureGateService`."""
+
+    BOOLEAN = "boolean"
+    QUOTA = "quota"
+
+
+class SubscriptionHistoryReason(str, enum.Enum):
+    CRIADA = "criada"
+    # ATIVADA: transição PENDENTE -> ATIVA feita por
+    # `SubscriptionService.activate_subscription` quando o webhook
+    # confirma o primeiro pagamento (PROMPT 05). Distinta de RENOVADA
+    # (que é ATIVA -> ATIVA, avanço de período de uma assinatura que já
+    # estava paga).
+    ATIVADA = "ativada"
+    RENOVADA = "renovada"
+    UPGRADE = "upgrade"
+    DOWNGRADE = "downgrade"
+    CANCELADA = "cancelada"
+    REATIVADA = "reativada"
+    EXPIRADA = "expirada"
+    PAGAMENTO_FALHOU = "pagamento_falhou"
+    # PROMPT 11 (Dunning): tentativa de recobrança de uma assinatura já
+    # INADIMPLENTE falhou de novo (permanece INADIMPLENTE, from_status ==
+    # to_status — mesmo espírito de RENOVADA, que também é ATIVA -> ATIVA).
+    # Distinta de PAGAMENTO_FALHOU, que é a transição inicial ATIVA/PENDENTE
+    # -> INADIMPLENTE/CANCELADA (falha de status muda).
+    RETRY_DUNNING_FALHOU = "retry_dunning_falhou"
+    # PROMPT 11: uma tentativa de recobrança de uma assinatura INADIMPLENTE
+    # foi aprovada — volta para ATIVA e o período é avançado (mesmo efeito
+    # de uma renovação normal).
+    RECUPERADA_DUNNING = "recuperada_dunning"
+    # PROMPT 12 (Upgrade/Downgrade): upgrade pendente de confirmação de
+    # pagamento (gateway assíncrono). A assinatura permanece no plano atual
+    # até a confirmação; quando o webhook APROVADO chega, a transição é
+    # registrada como UPGRADE (não UPGRADE_PENDENTE). Este valor é usado
+    # apenas para rastrear o estado intermediário, se necessário.
+    UPGRADE_PENDENTE = "upgrade_pendente"
+
+    # app/models/enums.py (adicionar ao final)
+
+class SubscriptionEmailEvent(str, enum.Enum):
+    """Eventos que disparam e-mails transacionais de assinatura."""
+    PAYMENT_APPROVED = "payment_approved"
+    PAYMENT_FAILED = "payment_failed"
+    RENEWAL_SUCCESS = "renewal_success"
+    RENEWAL_REMINDER = "renewal_reminder"
+    CANCELLATION = "cancellation"
+    REACTIVATION = "reactivation"
+    PLAN_CHANGE = "plan_change"
+    DUNNING_RECOVERED = "dunning_recovered"
+    DUNNING_RETRY_FAILED = "dunning_retry_failed"
+    DUNNING_EXPIRED = "dunning_expired"
+
+# app/models/enums.py (adicionar)
+
+# Adicionar ao final do arquivo app/models/enums.py
+
+class ReviewStatus(str, enum.Enum):
+    PENDENTE = "pendente"
+    EM_ANDAMENTO = "em_andamento"
+    CONCLUIDA = "concluida"
+    PULAR = "pular"
+
+
+class ReviewPriority(str, enum.Enum):
+    ALTA = "alta"
+    MEDIA = "media"
+    BAIXA = "baixa"
+
+class CommentStatus(str, enum.Enum):
+    """Status de um comentário."""
+    PUBLICADO = "publicado"
+    PENDENTE = "pendente"
+    DENUNCIADO = "denunciado"
+    REMOVIDO = "removido"
+    BLOQUEADO = "bloqueado"
+
+
+class CommentVoteType(str, enum.Enum):
+    """Tipo de voto em um comentário."""
+    UP = "up"
+    DOWN = "down"
+
+
+
+# app/models/enums.py (adicionar)
+
+# app/models/enums.py (adicionar no final do arquivo)
+
+class NotificationType(str, enum.Enum):
+    """Tipos de notificação."""
+    NEW_COMMENT = "new_comment"
+    NEW_REPLY = "new_reply"
+    COMMENT_VOTE = "comment_vote"
+    MENTION = "mention"
+    SYSTEM = "system"
+    PAYMENT = "payment"
+    RENEWAL = "renewal"
+
+
+class NotificationStatus(str, enum.Enum):
+    """Status da notificação."""
+    UNREAD = "unread"
+    READ = "read"
+    ARCHIVED = "archived"
+
+
+class QuestionReportReason(str, enum.Enum):
+    ENUNCIADO = "enunciado"
+    GABARITO = "gabarito"
+    DUPLICADA = "duplicada"
+    CLASSIFICACAO = "classificacao"
+    OUTRO = "outro"
+
+class NotificationCategory(str, enum.Enum):
+    """Categoria de alto nível usada por UI e preferências."""
+
+    COMMENT = "comment"
+    BILLING = "billing"
+    PLAN = "plan"
+    MARKETING = "marketing"
+    SYSTEM = "system"
+
+
+NOTIFICATION_MANDATORY_CATEGORIES: frozenset[NotificationCategory] = frozenset(
+    {
+        NotificationCategory.BILLING,
+        NotificationCategory.PLAN,
+        NotificationCategory.SYSTEM,
+    }
+)
+</file>
+
 <file path="app/services/practice/training_session_service.py">
 # app/services/practice/training_session_service.py
 import uuid
@@ -38669,6 +39030,36 @@ class TrainingSessionService:
 
         return training_session
 
+    async def get_peer_stats(
+        self, session_id: uuid.UUID, user_id: uuid.UUID
+    ) -> dict[str, object]:
+        """Agregado anônimo de como os outros usuários se saíram nas mesmas
+        questões desta sessão — alimenta o comparativo "Demais usuários" na
+        tela de conclusão (item 2 do prompt da sessão anterior).
+
+        Só usa `question_id`, nunca o `notebook_id`/`filters_snapshot` da
+        sessão: duas pessoas raramente têm a MESMA sessão de treino (cada
+        uma monta a sua, mesmo a partir do mesmo caderno), mas podem
+        perfeitamente ter respondido as MESMAS questões em sessões
+        diferentes — é isso que torna a comparação possível.
+        """
+        training_session = await self.get_session(session_id, user_id)
+        question_ids = [item.question_id for item in training_session.questions]
+
+        user_count, sample_size, correct_count = await self._attempts.get_peer_aggregate(
+            question_ids, exclude_user_id=user_id
+        )
+
+        has_data = sample_size > 0
+        average_accuracy = round((correct_count / sample_size) * 100, 1) if has_data else 0.0
+
+        return {
+            "has_data": has_data,
+            "user_count": user_count,
+            "sample_size": sample_size,
+            "average_accuracy": average_accuracy,
+        }
+
     async def finish_session(
         self, session_id: uuid.UUID, user_id: uuid.UUID
     ) -> TrainingSession:
@@ -38683,89 +39074,87 @@ class TrainingSessionService:
         return await self.get_session(session_id, user_id)
 </file>
 
-<file path=".env.example">
-# Aplicação
-APP_NAME="Alfa Caveira API"
-APP_ENV=development
-DEBUG=true
-API_V1_PREFIX=/api/v1
+<file path="pyproject.toml">
+[tool.poetry]
+name = "foco-policial-backend"
+version = "0.1.0"
+description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
+authors = ["Foco Policial <dev@focopolicial.com>"]
+readme = "README.md"
+package-mode = false
 
-# Banco de dados — Supabase usado apenas como Postgres gerenciado (sem Auth/RLS).
-# Localmente aponta para o serviço `db` do docker-compose.
-# 🔧 CORREÇÃO (auditoria — achado de segurança P0): esta linha continha uma
-# connection string com host e senha reais de um projeto Supabase, commitada
-# num arquivo que deveria ser só exemplo. Se esse valor já foi versionado em
-# algum momento, a senha precisa ser rotacionada no painel do Supabase
-# imediatamente (Project Settings → Database → Reset database password),
-# e qualquer `.env` real que ainda a use precisa ser atualizado. O valor
-# abaixo é só placeholder — nunca commitar aqui a string de produção.
-DATABASE_URL=postgresql+asyncpg://postgres:CHANGE_ME@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
-DATABASE_POOL_SIZE=10
-DATABASE_MAX_OVERFLOW=20
+[tool.poetry.dependencies]
+python = "^3.13"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = "^0.30.0"
+alembic = "^1.13.3"
+pydantic = "^2.9.2"
+pydantic-settings = "^2.6.0"
+email-validator = "^2.2.0"
+pyjwt = "^2.9.0"
+argon2-cffi = "^23.1.0"
+redis = { extras = ["hiredis"], version = "^5.1.1" }
+python-multipart = "^0.0.12"
+structlog = "^24.4.0"
+apscheduler = "^3.10.4"
+prometheus-client = "^0.26.0"
+httpx = "^0.27.0"
+boto3 = "^1.43.76"
+reportlab = "^4.2.5"
+google-auth = ">=2.0.0,<3.0.0"
+pandas = "^3.0.5"
+openpyxl = "^3.1.5"
 
-# Redis
-REDIS_URL=redis://redis:6379/0
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.7.1"
+mypy = "^1.13.0"
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+httpx = "^0.27.2"
+factory-boy = "^3.3.1"
+testcontainers = {extras = ["postgres"], version = "^4.15.0"}
+psycopg2-binary = "^2.9.12"
 
-# Segurança / JWT — gerar um valor forte em produção (nunca commitar o real).
-JWT_SECRET_KEY=changeme-generate-a-strong-random-secret
-JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-REFRESH_TOKEN_EXPIRE_DAYS=30
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
-# Recuperação de senha
-PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=60
-# URL base do frontend — usada para montar o link enviado por e-mail
-# (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
-FRONTEND_URL=http://localhost:3000
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["app", "tests"]
 
-# E-mail transacional
-# console (padrão): não envia nada de verdade, apenas loga o e-mail — use em dev.
-# smtp: envia de fato via SMTP (SES, Postmark, Resend, Mailgun, Gmail/Workspace...).
-EMAIL_DRIVER=console
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_USE_TLS=true
-SMTP_FROM_EMAIL=no-reply@focopolicial.com.br
-SMTP_FROM_NAME="Alfa Caveira"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
 
-# CORS — origens do frontend Next.js
-CORS_ORIGINS=["http://localhost:3000"]
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
 
-# Rate limiting
-RATE_LIMIT_PER_MINUTE=60
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+exclude = ["migrations/"]
 
+[[tool.mypy.overrides]]
+module = "reportlab.*"
+ignore_missing_imports = true
 
-# Adicionar ao final de .env.example (e ao seu .env local) —
-# Worker de agregação de analytics, agendado in-process (ver app/core/scheduler.py)
-ANALYTICS_AGGREGATOR_ENABLED=true
-ANALYTICS_AGGREGATOR_INTERVAL_MINUTES=10
-ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC=3
-ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS=30
+[[tool.mypy.overrides]]
+module = "app.models.*"
+# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
+# revisitar conforme o plugin oficial evolui.
+disallow_untyped_defs = false
 
-# Adicionar ao final de .env.example (e ao seu .env local) —
-# Billing: driver de gateway de pagamento (ver app/services/billing/gateway.py)
-# console (padrão): nenhum provedor real, aprova toda cobrança via ConsoleGateway.
-# Usar apenas em desenvolvimento/teste.
-PAYMENT_GATEWAY_DRIVER=console
-# Segredo compartilhado com o provedor, usado para validar a assinatura do
-# webhook (app/api/v1/billing/webhooks.py). Obrigatório em produção quando
-# PAYMENT_GATEWAY_DRIVER != console — deixar vazio em desenvolvimento.
-PAYMENT_WEBHOOK_SECRET=
-
-# Rate limiting — políticas dedicadas (PROMPT 03)
-# Adicionar ao final do bloco "# Rate limiting" já existente no .env.example
-# real (que já tem RATE_LIMIT_PER_MINUTE=60).
-RATE_LIMIT_LOGIN_PER_MINUTE=5
-RATE_LIMIT_REGISTER_PER_MINUTE=5
-RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE=3
-RATE_LIMIT_RESET_PASSWORD_PER_MINUTE=5
-RATE_LIMIT_BILLING_PER_MINUTE=20
-RATE_LIMIT_FAIL_OPEN=true
-
-SCHEDULER_ENABLED=true
-SCHEDULER_LOCK_TTL_SECONDS=300
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 </file>
 
 <file path="app/api/v1/practice/training_sessions.py">
@@ -38792,6 +39181,7 @@ from app.schemas.practice.training_session import (
     TrainingSessionCreateRequest,
     TrainingSessionDetailResponse,
     TrainingSessionListItem,
+    TrainingSessionPeerStatsResponse,
     TrainingSessionPositionResponse,
     TrainingSessionPositionUpdateRequest,
     TrainingSessionQuestionResponse,
@@ -38993,6 +39383,27 @@ async def update_training_session_position(
     )
 
 
+@router.get(
+    "/{session_id}/peer-stats",
+    response_model=Envelope[TrainingSessionPeerStatsResponse],
+    summary="Comparativo anônimo com os demais usuários nas mesmas questões",
+)
+async def get_training_session_peer_stats(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionPeerStatsResponse]:
+    """
+    Usado pelo painel "Demais usuários" na tela de conclusão da sessão —
+    busca é feita à parte (`use-peer-stats.ts`) e não bloqueia o resto da
+    tela: `get_session` já garante que a sessão pertence a `current_user`,
+    então essa rota é tão pessoal quanto as outras deste router, mesmo
+    devolvendo um dado agregado de terceiros.
+    """
+    stats = await training_session_service.get_peer_stats(session_id, current_user.id)
+    return Envelope(data=TrainingSessionPeerStatsResponse(**stats))
+
+
 @router.post("/{session_id}/finish", response_model=Envelope[TrainingSessionDetailResponse])
 async def finish_training_session(
     session_id: uuid.UUID,
@@ -39002,248 +39413,6 @@ async def finish_training_session(
     training_session = await training_session_service.finish_session(session_id, current_user.id)
     detail = await _build_detail(training_session_service, current_user.id, training_session)
     return Envelope(data=detail)
-</file>
-
-<file path="app/models/enums.py">
-"""Enums compartilhados entre models de diferentes bounded contexts."""
-
-import enum
-
-
-class QuestionDifficulty(str, enum.Enum):
-    FACIL = "facil"
-    MEDIA = "media"
-    DIFICIL = "dificil"
-
-
-class QuestionStatus(str, enum.Enum):
-    RASCUNHO = "rascunho"
-    PUBLICADA = "publicada"
-    EM_REVISAO = "em_revisao"
-    DESATIVADA = "desativada"
-
-
-class QuestionAnswerStatus(str, enum.Enum):
-    """Status de resposta do usuário autenticado para uma questão.
-
-    ETAPA 3 (sessão 6): usado só na listagem pública (`QuestionListItem`),
-    calculado por usuário a partir de `QuestionAttempt` — não é uma coluna
-    de `Question`. Valores espelham exatamente `AnswerStatus` do frontend
-    (`config/questions.ts`), incluindo o hífen em "nao-respondida" — não
-    são um enum Python "bonito" de propósito, para não precisar de
-    tradução na borda.
-    """
-
-    NAO_RESPONDIDA = "nao-respondida"
-    ACERTOU = "acertou"
-    ERROU = "errou"
-
-
-class QuestionRevisionType(str, enum.Enum):
-    CRIACAO = "criacao"
-    EDICAO = "edicao"
-    STATUS = "status"
-    EXCLUSAO = "exclusao"
-
-
-class AttachmentType(str, enum.Enum):
-    IMAGEM = "imagem"
-    ARQUIVO = "arquivo"
-
-
-class SessionType(str, enum.Enum):
-    TREINO = "treino"
-    SIMULADO = "simulado"
-
-
-class ExamAttemptStatus(str, enum.Enum):
-    EM_ANDAMENTO = "em_andamento"
-    FINALIZADO = "finalizado"
-    ABANDONADO = "abandonado"
-
-
-class FlashcardGrade(str, enum.Enum):
-    ERROU = "errou"
-    DIFICIL = "dificil"
-    BOM = "bom"
-    FACIL = "facil"
-
-
-class BillingPeriod(str, enum.Enum):
-    MENSAL = "mensal"
-    SEMESTRAL = "semestral"
-    ANUAL = "anual"
-
-
-class SubscriptionStatus(str, enum.Enum):
-    # PENDENTE: assinatura criada, aguardando confirmação de pagamento do
-    # gateway. Nasce aqui por padrão (ADR-003) e só vira ATIVA quando
-    # `PaymentService.process_webhook_event` confirma um pagamento
-    # APROVADO via `SubscriptionService.activate_subscription` (ver
-    # ADR-014, PROMPT 05).
-    PENDENTE = "pendente"
-    ATIVA = "ativa"
-    CANCELADA = "cancelada"
-    INADIMPLENTE = "inadimplente"
-    EXPIRADA = "expirada"
-
-
-class PaymentStatus(str, enum.Enum):
-    PENDENTE = "pendente"
-    APROVADO = "aprovado"
-    RECUSADO = "recusado"
-    ESTORNADO = "estornado"
-
-
-class FeatureKey(str, enum.Enum):
-    """Catálogo fechado de features que um `Plan` pode conceder."""
-
-    DAILY_QUESTIONS = "daily_questions"
-    NOTEBOOKS = "notebooks"
-    NOTEBOOK_MAX_QUESTIONS = "notebook_max_questions"
-    SIMULADOS = "simulados"
-    FLASHCARDS = "flashcards"
-    ESTATISTICAS = "estatisticas"
-    DASHBOARD_COMPLETO = "dashboard_completo"
-    AI_EXPLICACAO_QUESTAO = "ai_explicacao_questao"
-    AI_RESUMOS = "ai_resumos"
-    AI_CRONOGRAMA = "ai_cronograma"
-    AI_ANALISE_DESEMPENHO = "ai_analise_desempenho"
-    ANALYTICS_AVANCADO = "analytics_avancado"
-
-
-class FeatureKind(str, enum.Enum):
-    """Como uma `Feature` é interpretada por `FeatureGateService`."""
-
-    BOOLEAN = "boolean"
-    QUOTA = "quota"
-
-
-class SubscriptionHistoryReason(str, enum.Enum):
-    CRIADA = "criada"
-    # ATIVADA: transição PENDENTE -> ATIVA feita por
-    # `SubscriptionService.activate_subscription` quando o webhook
-    # confirma o primeiro pagamento (PROMPT 05). Distinta de RENOVADA
-    # (que é ATIVA -> ATIVA, avanço de período de uma assinatura que já
-    # estava paga).
-    ATIVADA = "ativada"
-    RENOVADA = "renovada"
-    UPGRADE = "upgrade"
-    DOWNGRADE = "downgrade"
-    CANCELADA = "cancelada"
-    REATIVADA = "reativada"
-    EXPIRADA = "expirada"
-    PAGAMENTO_FALHOU = "pagamento_falhou"
-    # PROMPT 11 (Dunning): tentativa de recobrança de uma assinatura já
-    # INADIMPLENTE falhou de novo (permanece INADIMPLENTE, from_status ==
-    # to_status — mesmo espírito de RENOVADA, que também é ATIVA -> ATIVA).
-    # Distinta de PAGAMENTO_FALHOU, que é a transição inicial ATIVA/PENDENTE
-    # -> INADIMPLENTE/CANCELADA (falha de status muda).
-    RETRY_DUNNING_FALHOU = "retry_dunning_falhou"
-    # PROMPT 11: uma tentativa de recobrança de uma assinatura INADIMPLENTE
-    # foi aprovada — volta para ATIVA e o período é avançado (mesmo efeito
-    # de uma renovação normal).
-    RECUPERADA_DUNNING = "recuperada_dunning"
-    # PROMPT 12 (Upgrade/Downgrade): upgrade pendente de confirmação de
-    # pagamento (gateway assíncrono). A assinatura permanece no plano atual
-    # até a confirmação; quando o webhook APROVADO chega, a transição é
-    # registrada como UPGRADE (não UPGRADE_PENDENTE). Este valor é usado
-    # apenas para rastrear o estado intermediário, se necessário.
-    UPGRADE_PENDENTE = "upgrade_pendente"
-
-    # app/models/enums.py (adicionar ao final)
-
-class SubscriptionEmailEvent(str, enum.Enum):
-    """Eventos que disparam e-mails transacionais de assinatura."""
-    PAYMENT_APPROVED = "payment_approved"
-    PAYMENT_FAILED = "payment_failed"
-    RENEWAL_SUCCESS = "renewal_success"
-    RENEWAL_REMINDER = "renewal_reminder"
-    CANCELLATION = "cancellation"
-    REACTIVATION = "reactivation"
-    PLAN_CHANGE = "plan_change"
-    DUNNING_RECOVERED = "dunning_recovered"
-    DUNNING_RETRY_FAILED = "dunning_retry_failed"
-    DUNNING_EXPIRED = "dunning_expired"
-
-# app/models/enums.py (adicionar)
-
-# Adicionar ao final do arquivo app/models/enums.py
-
-class ReviewStatus(str, enum.Enum):
-    PENDENTE = "pendente"
-    EM_ANDAMENTO = "em_andamento"
-    CONCLUIDA = "concluida"
-    PULAR = "pular"
-
-
-class ReviewPriority(str, enum.Enum):
-    ALTA = "alta"
-    MEDIA = "media"
-    BAIXA = "baixa"
-
-class CommentStatus(str, enum.Enum):
-    """Status de um comentário."""
-    PUBLICADO = "publicado"
-    PENDENTE = "pendente"
-    DENUNCIADO = "denunciado"
-    REMOVIDO = "removido"
-    BLOQUEADO = "bloqueado"
-
-
-class CommentVoteType(str, enum.Enum):
-    """Tipo de voto em um comentário."""
-    UP = "up"
-    DOWN = "down"
-
-
-
-# app/models/enums.py (adicionar)
-
-# app/models/enums.py (adicionar no final do arquivo)
-
-class NotificationType(str, enum.Enum):
-    """Tipos de notificação."""
-    NEW_COMMENT = "new_comment"
-    NEW_REPLY = "new_reply"
-    COMMENT_VOTE = "comment_vote"
-    MENTION = "mention"
-    SYSTEM = "system"
-    PAYMENT = "payment"
-    RENEWAL = "renewal"
-
-
-class NotificationStatus(str, enum.Enum):
-    """Status da notificação."""
-    UNREAD = "unread"
-    READ = "read"
-    ARCHIVED = "archived"
-
-
-class QuestionReportReason(str, enum.Enum):
-    ENUNCIADO = "enunciado"
-    GABARITO = "gabarito"
-    DUPLICADA = "duplicada"
-    CLASSIFICACAO = "classificacao"
-    OUTRO = "outro"
-
-class NotificationCategory(str, enum.Enum):
-    """Categoria de alto nível usada por UI e preferências."""
-
-    COMMENT = "comment"
-    BILLING = "billing"
-    PLAN = "plan"
-    MARKETING = "marketing"
-    SYSTEM = "system"
-
-
-NOTIFICATION_MANDATORY_CATEGORIES: frozenset[NotificationCategory] = frozenset(
-    {
-        NotificationCategory.BILLING,
-        NotificationCategory.PLAN,
-        NotificationCategory.SYSTEM,
-    }
-)
 </file>
 
 <file path="app/schemas/practice/training_session.py">
@@ -39367,89 +39536,34 @@ class TrainingSessionPositionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     current_question_index: int
-</file>
 
-<file path="pyproject.toml">
-[tool.poetry]
-name = "foco-policial-backend"
-version = "0.1.0"
-description = "Backend do SaaS Foco Policial — preparação para concursos policiais"
-authors = ["Foco Policial <dev@focopolicial.com>"]
-readme = "README.md"
-package-mode = false
 
-[tool.poetry.dependencies]
-python = "^3.13"
-fastapi = "^0.115.0"
-uvicorn = { extras = ["standard"], version = "^0.32.0" }
-sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
-asyncpg = "^0.30.0"
-alembic = "^1.13.3"
-pydantic = "^2.9.2"
-pydantic-settings = "^2.6.0"
-email-validator = "^2.2.0"
-pyjwt = "^2.9.0"
-argon2-cffi = "^23.1.0"
-redis = { extras = ["hiredis"], version = "^5.1.1" }
-python-multipart = "^0.0.12"
-structlog = "^24.4.0"
-apscheduler = "^3.10.4"
-prometheus-client = "^0.26.0"
-httpx = "^0.27.0"
-boto3 = "^1.43.76"
-reportlab = "^4.2.5"
-google-auth = ">=2.0.0,<3.0.0"
-pandas = "^3.0.5"
-openpyxl = "^3.1.5"
+class TrainingSessionPeerStatsResponse(BaseModel):
+    """Comparativo agregado e ANÔNIMO com os demais usuários que já
+    responderam as questões desta sessão/caderno (item 2 do prompt da
+    sessão anterior — painel "Demais usuários" nos moldes do Tec Concursos).
 
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.7.1"
-mypy = "^1.13.0"
-pytest = "^8.3.3"
-pytest-asyncio = "^0.24.0"
-pytest-cov = "^5.0.0"
-httpx = "^0.27.2"
-factory-boy = "^3.3.1"
-testcontainers = {extras = ["postgres"], version = "^4.15.0"}
-psycopg2-binary = "^2.9.12"
+    Deliberadamente não existe nenhum campo que identifique um usuário
+    específico ou a resposta que ele deu — só contagens e uma média.
+    """
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-src = ["app", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
-ignore = ["B008"]  # permite Depends(...) como default de argumento (padrão FastAPI)
-
-[tool.ruff.lint.isort]
-known-first-party = ["app"]
-
-[tool.mypy]
-python_version = "3.13"
-plugins = ["pydantic.mypy"]
-strict = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-exclude = ["migrations/"]
-
-[[tool.mypy.overrides]]
-module = "reportlab.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "app.models.*"
-# Relationships e mapped_column geram falsos positivos comuns em SQLAlchemy 2;
-# revisitar conforme o plugin oficial evolui.
-disallow_untyped_defs = false
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
+    has_data: bool = Field(
+        description=(
+            "False quando nenhum outro usuário ainda respondeu nenhuma "
+            "questão desta sessão — nesse caso `user_count`/`average_accuracy` "
+            "vêm zerados e o frontend deve esconder o comparativo em vez de "
+            "mostrar um 0% enganoso."
+        )
+    )
+    user_count: int = Field(
+        description="Quantidade de outros usuários distintos que responderam ao menos uma dessas questões."
+    )
+    sample_size: int = Field(
+        description="Total de tentativas (QuestionAttempt) somadas de todos os outros usuários."
+    )
+    average_accuracy: float = Field(
+        description="Percentual médio de acerto (0–100) dos outros usuários nessas questões."
+    )
 </file>
 
 <file path="app/core/config.py">
