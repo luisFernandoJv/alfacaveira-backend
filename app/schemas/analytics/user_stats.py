@@ -46,3 +46,24 @@ class TodayStatResponse(BaseModel):
     correct_count: int
     time_studied_seconds: int
     accuracy: float
+
+class DashboardTotalsResponse(BaseModel):
+    questions_answered: int
+    correct_count: int
+    time_studied_seconds: int
+
+
+class DashboardSubjectResponse(SubjectStatResponse):
+    trend: str | None = None
+    status: str
+
+
+class DashboardResponse(BaseModel):
+    score: int | None
+    score_change_30d: float | None
+    period_accuracy: float
+    active_days_30d: int
+    totals: DashboardTotalsResponse
+    daily: list[DailyStatResponse]
+    subjects: list[DashboardSubjectResponse]
+    streak: StreakResponse

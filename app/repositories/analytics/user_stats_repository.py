@@ -9,12 +9,14 @@ as consultas simplesmente não retornam linhas.
 """
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
 from app.models.analytics.user_stats import StudyStreak, UserDailyStat, UserSubjectStat
+from app.models.content.question import Question
+from app.models.practice.question_attempt import QuestionAttempt
 from app.repositories.base import BaseRepository
 
 
@@ -36,6 +38,20 @@ class UserDailyStatRepository(BaseRepository[UserDailyStat]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def sum_totals(self, user_id: uuid.UUID) -> dict[str, int]:
+        """Soma o histórico disponível nos agregados diários do usuário."""
+        stmt = select(
+            func.coalesce(func.sum(UserDailyStat.questions_answered), 0),
+            func.coalesce(func.sum(UserDailyStat.correct_count), 0),
+            func.coalesce(func.sum(UserDailyStat.time_studied_seconds), 0),
+        ).where(UserDailyStat.user_id == user_id)
+        row = (await self.session.execute(stmt)).one()
+        return {
+            "questions_answered": int(row[0]),
+            "correct_count": int(row[1]),
+            "time_studied_seconds": int(row[2]),
+        }
 
     async def get_for_date(self, user_id: uuid.UUID, target_date: date) -> UserDailyStat | None:
         stmt = select(UserDailyStat).where(

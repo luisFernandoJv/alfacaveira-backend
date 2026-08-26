@@ -1,11 +1,10 @@
 """Regras de negócio de estatísticas agregadas do aluno (analytics).
 
 Este service não deriva nenhum número a partir de `question_attempts` — ele
-apenas lê os agregados já calculados pelo worker de background (que ainda
-não existe, ver `app/workers`, vazio). Enquanto o worker não roda, os
-métodos abaixo devolvem listas vazias / valores zerados, nunca dados
-fictícios: é papel da camada HTTP (router) decidir como representar "sem
-dado ainda" para o frontend.
+apenas lê os agregados já calculados pelo worker de background em `app/workers/analytics_aggregator.py`.
+Enquanto o worker ainda não tiver produzido dados para um usuário, os métodos
+abaixo devolvem listas vazias / valores zerados, nunca dados fictícios: é papel
+da camada HTTP decidir como representar "sem dado ainda" para o frontend.
 """
 
 import uuid
@@ -47,6 +46,41 @@ class AnalyticsService:
 
     async def get_streak(self, user_id: uuid.UUID) -> StudyStreak | None:
         return await self._streak.get_by_user(user_id)
+
+    async def get_lifetime_totals(self, user_id: uuid.UUID) -> dict[str, int]:
+        """Totais históricos já agregados em `user_daily_stats`."""
+        return await self._daily.sum_totals(user_id)
+
+    async def get_subject_trends(
+        self, user_id: uuid.UUID, *, days: int = 30
+    ) -> list[dict[str, object]]:
+        """Compara o aproveitamento por disciplina em duas janelas recentes.
+
+        A tendência é derivada da fonte de verdade (`question_attempts`) apenas
+        para a comparação temporal; os totais consolidados continuam vindo dos
+        agregados. Disciplinas com volume insuficiente em uma das janelas não
+        recebem uma tendência artificial.
+        """
+        return await self._subject.list_trends(user_id, days=days)
+
+    @staticmethod
+    def calculate_performance_score(
+        *,
+        accuracy: float,
+        active_days: int,
+        streak: int,
+    ) -> int | None:
+        """Score 0-100 derivado somente de métricas reais dos últimos 30 dias.
+
+        Pesos são regras de apresentação, não dados fictícios:
+        60% aproveitamento + 25% consistência + 15% sequência.
+        """
+        if accuracy <= 0 and active_days <= 0 and streak <= 0:
+            return None
+        accuracy_component = max(0.0, min(accuracy, 100.0)) * 0.60
+        consistency_component = min(active_days / 30.0, 1.0) * 100.0 * 0.25
+        streak_component = min(streak / 30.0, 1.0) * 100.0 * 0.15
+        return round(accuracy_component + consistency_component + streak_component)
 
     @staticmethod
     def _today() -> date:
