@@ -9,14 +9,12 @@ as consultas simplesmente não retornam linhas.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.models.analytics.user_stats import StudyStreak, UserDailyStat, UserSubjectStat
-from app.models.content.question import Question
-from app.models.practice.question_attempt import QuestionAttempt
 from app.repositories.base import BaseRepository
 
 
@@ -39,26 +37,52 @@ class UserDailyStatRepository(BaseRepository[UserDailyStat]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def sum_totals(self, user_id: uuid.UUID) -> dict[str, int]:
-        """Soma o histórico disponível nos agregados diários do usuário."""
-        stmt = select(
-            func.coalesce(func.sum(UserDailyStat.questions_answered), 0),
-            func.coalesce(func.sum(UserDailyStat.correct_count), 0),
-            func.coalesce(func.sum(UserDailyStat.time_studied_seconds), 0),
-        ).where(UserDailyStat.user_id == user_id)
-        row = (await self.session.execute(stmt)).one()
-        return {
-            "questions_answered": int(row[0]),
-            "correct_count": int(row[1]),
-            "time_studied_seconds": int(row[2]),
-        }
-
     async def get_for_date(self, user_id: uuid.UUID, target_date: date) -> UserDailyStat | None:
         stmt = select(UserDailyStat).where(
             UserDailyStat.user_id == user_id, UserDailyStat.date == target_date
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def sum_window(
+        self, user_id: uuid.UUID, start_date: date, end_date: date
+    ) -> tuple[int, int, int, int]:
+        """Agregado SQL (SUM) de `user_daily_stats` no intervalo [start_date, end_date].
+
+        Retorna (questions_answered, correct_count, time_studied_seconds,
+        active_days) -- active_days e a contagem de linhas no intervalo (dias
+        com pelo menos uma resposta), usada no componente de "regularidade"
+        do Performance Score. Feito em SQL (nao em Python sobre
+        list_between) porque e um agregado, nao uma listagem.
+        """
+        stmt = select(
+            func.coalesce(func.sum(UserDailyStat.questions_answered), 0),
+            func.coalesce(func.sum(UserDailyStat.correct_count), 0),
+            func.coalesce(func.sum(UserDailyStat.time_studied_seconds), 0),
+            func.count(UserDailyStat.id),
+        ).where(
+            UserDailyStat.user_id == user_id,
+            UserDailyStat.date >= start_date,
+            UserDailyStat.date <= end_date,
+        )
+        result = await self.session.execute(stmt)
+        row = result.one()
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+    async def sum_lifetime(self, user_id: uuid.UUID) -> tuple[int, int, int]:
+        """Totais vitalicios reais do usuario -- SUM sobre toda a historia de
+        `user_daily_stats` (nao apenas a janela filtrada pela tela).
+
+        Retorna (questions_answered, correct_count, time_studied_seconds).
+        """
+        stmt = select(
+            func.coalesce(func.sum(UserDailyStat.questions_answered), 0),
+            func.coalesce(func.sum(UserDailyStat.correct_count), 0),
+            func.coalesce(func.sum(UserDailyStat.time_studied_seconds), 0),
+        ).where(UserDailyStat.user_id == user_id)
+        result = await self.session.execute(stmt)
+        row = result.one()
+        return int(row[0]), int(row[1]), int(row[2])
 
 
 class UserSubjectStatRepository(BaseRepository[UserSubjectStat]):

@@ -22,6 +22,7 @@ from app.api.v1.analytics.ranking import router as ranking_router
 from app.api.v1.platform.comments import router as comments_router
 from app.api.v1.platform.notifications import router as notifications_router
 from app.api.v1.analytics.user_stats import router as user_stats_router
+from app.api.v1.analytics.dashboard import router as analytics_dashboard_router
 from app.api.v1.learning.notebooks import router as notebooks_router
 from app.api.v1.learning.flashcards import router as flashcards_router
 from app.api.v1.admin import router as admin_router
@@ -114,6 +115,11 @@ api_router.include_router(
 # Analytics
 api_router.include_router(
     user_stats_router,
+    prefix="/analytics",
+    tags=["analytics"],
+)
+api_router.include_router(
+    analytics_dashboard_router,
     prefix="/analytics",
     tags=["analytics"],
 )
