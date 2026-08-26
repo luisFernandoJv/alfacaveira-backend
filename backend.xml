@@ -1075,139 +1075,6 @@ async def get_admin_stats(
 """Endpoints HTTP do contexto 'analytics'."""
 </file>
 
-<file path="app/api/v1/analytics/ranking.py">
-"""Endpoints HTTP de ranking."""
-
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.responses import Envelope
-from app.database.session import get_db
-from app.schemas.analytics.ranking import (
-    RankingPositionResponse,
-    RankingResponse,
-    UserRankingResponse,
-)
-from app.security.dependencies import CurrentUser
-from app.services.analytics.ranking_service import RankingService
-
-router = APIRouter()
-
-
-def get_ranking_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> RankingService:
-    return RankingService(session)
-
-
-RankingServiceDep = Annotated[RankingService, Depends(get_ranking_service)]
-
-
-@router.get("/global", response_model=Envelope[RankingResponse])
-async def get_global_ranking(
-    current_user: CurrentUser,
-    ranking_service: RankingServiceDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> Envelope[RankingResponse]:
-    """
-    Ranking global de todos os usuários.
-
-    Retorna os usuários com mais pontos, ordenados por posição.
-    Inclui a posição do usuário atual.
-    """
-    rankings, user_position = await ranking_service.get_global_ranking(
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-    )
-
-    return Envelope(
-        data=RankingResponse(
-            items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
-            user_position=user_position,
-            has_more=len(rankings) == limit,
-        )
-    )
-
-
-@router.get("/weekly", response_model=Envelope[RankingResponse])
-async def get_weekly_ranking(
-    current_user: CurrentUser,
-    ranking_service: RankingServiceDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> Envelope[RankingResponse]:
-    """Ranking semanal."""
-    rankings, user_position = await ranking_service.get_weekly_ranking(
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-    )
-
-    return Envelope(
-        data=RankingResponse(
-            items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
-            user_position=user_position,
-            has_more=len(rankings) == limit,
-        )
-    )
-
-
-@router.get("/monthly", response_model=Envelope[RankingResponse])
-async def get_monthly_ranking(
-    current_user: CurrentUser,
-    ranking_service: RankingServiceDep,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> Envelope[RankingResponse]:
-    """Ranking mensal."""
-    rankings, user_position = await ranking_service.get_monthly_ranking(
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-    )
-
-    return Envelope(
-        data=RankingResponse(
-            items=[RankingPositionResponse.from_model(r) for r in rankings],
-            total=len(rankings),
-            user_position=user_position,
-            has_more=len(rankings) == limit,
-        )
-    )
-
-
-@router.get("/me", response_model=Envelope[UserRankingResponse | None])
-async def get_my_ranking(
-    current_user: CurrentUser,
-    ranking_service: RankingServiceDep,
-) -> Envelope[UserRankingResponse | None]:
-    """Posição do usuário no ranking."""
-    ranking = await ranking_service.get_user_ranking(current_user.id)
-    if not ranking:
-        return Envelope(data=None)
-    return Envelope(data=UserRankingResponse.model_validate(ranking))
-
-
-@router.post("/update", status_code=status.HTTP_204_NO_CONTENT)
-async def update_rankings(
-    current_user: CurrentUser,
-    ranking_service: RankingServiceDep,
-) -> None:
-    """
-    Atualiza o ranking de todos os usuários.
-
-    Esta rota é protegida e deve ser usada com moderação.
-    O worker já faz a atualização automática.
-    """
-    await ranking_service.update_all_rankings()
-</file>
-
 <file path="app/api/v1/assessment/__init__.py">
 """Endpoints HTTP do contexto 'assessment'."""
 </file>
@@ -2164,62 +2031,6 @@ async def patch_notification_preferences(
 
 <file path="app/api/v1/practice/__init__.py">
 """Endpoints HTTP do contexto 'practice'."""
-</file>
-
-<file path="app/api/v1/practice/attempts.py">
-"""Endpoint de histórico geral de tentativas de resposta do usuário.
-
-Cobre todas as origens (`treino`, e futuramente `simulado`) — mesma tabela
-unificada `QuestionAttempt`, conforme decisão de modelagem da Etapa 8.
-"""
-
-import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.pagination import CursorPage
-from app.core.responses import Envelope, Meta
-from app.database.session import get_db
-from app.schemas.practice.question_attempt import QuestionAttemptListItem
-from app.security.dependencies import CurrentUser
-from app.services.practice.question_attempt_service import QuestionAttemptService
-
-router = APIRouter()
-
-
-def get_question_attempt_service(
-    session: Annotated[AsyncSession, Depends(get_db)],
-) -> QuestionAttemptService:
-    return QuestionAttemptService(session)
-
-
-QuestionAttemptServiceDep = Annotated[
-    QuestionAttemptService, Depends(get_question_attempt_service)
-]
-
-
-@router.get("", response_model=Envelope[list[QuestionAttemptListItem]])
-async def list_attempts(
-    current_user: CurrentUser,
-    question_attempt_service: QuestionAttemptServiceDep,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: Annotated[str | None, Query()] = None,
-) -> Envelope[list[QuestionAttemptListItem]]:
-    page = CursorPage(limit=limit, cursor=cursor)
-    decoded_cursor = page.decode_cursor()
-    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
-
-    attempts, has_more = await question_attempt_service.list_history(
-        current_user.id, limit=limit, cursor_id=cursor_id
-    )
-    next_cursor = CursorPage.encode_cursor(str(attempts[-1].id)) if has_more else None
-
-    return Envelope(
-        data=[QuestionAttemptListItem.model_validate(a) for a in attempts],
-        meta=Meta(next_cursor=next_cursor, has_more=has_more),
-    )
 </file>
 
 <file path="app/api/v1/practice/reviews.py">
@@ -5130,177 +4941,6 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
 """Repositórios do contexto 'analytics'."""
 </file>
 
-<file path="app/repositories/analytics/ranking_repository.py">
-"""Repositório de acesso a dados de `UserRanking`."""
-
-import uuid
-from typing import Optional
-
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import selectinload
-
-from app.models.analytics.ranking import UserRanking
-from app.repositories.base import BaseRepository
-
-_RELATIONS = (selectinload(UserRanking.user),)
-
-
-class RankingRepository(BaseRepository[UserRanking]):
-    """Repositório de ranking de usuários."""
-
-    model = UserRanking
-
-    async def get_by_user(self, user_id: uuid.UUID) -> UserRanking | None:
-        """Busca ranking de um usuário específico com suas métricas."""
-        stmt = (
-            select(UserRanking)
-            .where(UserRanking.user_id == user_id)
-            .options(*_RELATIONS)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_global_ranking(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[UserRanking]:
-        """Retorna ranking global ordenado por posição."""
-        stmt = (
-            select(UserRanking)
-            .where(UserRanking.total_points > 0)
-            .options(*_RELATIONS)
-            .order_by(UserRanking.rank.asc(), UserRanking.total_points.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def get_weekly_ranking(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[UserRanking]:
-        """Retorna ranking semanal."""
-        stmt = (
-            select(UserRanking)
-            .where(UserRanking.weekly_points > 0)
-            .options(*_RELATIONS)
-            .order_by(UserRanking.weekly_points.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def get_monthly_ranking(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[UserRanking]:
-        """Retorna ranking mensal."""
-        stmt = (
-            select(UserRanking)
-            .where(UserRanking.monthly_points > 0)
-            .options(*_RELATIONS)
-            .order_by(UserRanking.monthly_points.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
-
-    async def get_user_position(self, user_id: uuid.UUID) -> int | None:
-        """Retorna a posição global do usuário."""
-        ranking = await self.get_by_user(user_id)
-        return ranking.rank if ranking else None
-
-    async def upsert(self, user_id: uuid.UUID, **fields) -> UserRanking:
-        """Cria ou atualiza o ranking de um usuário."""
-        existing = await self.get_by_user(user_id)
-
-        if existing:
-            for key, value in fields.items():
-                if hasattr(existing, key):
-                    setattr(existing, key, value)
-            await self.session.flush()
-            return existing
-
-        ranking = UserRanking(user_id=user_id, **fields)
-        self.session.add(ranking)
-        await self.session.flush()
-        return ranking
-
-    async def update_rankings(self) -> None:
-        """
-        Atualiza as posições de todos os usuários no ranking global.
-
-        Usa ROW_NUMBER() para calcular posições de forma eficiente.
-        """
-        # Atualiza ranking global
-        await self.session.execute(
-            text("""
-                WITH ranked AS (
-                    SELECT 
-                        id,
-                        ROW_NUMBER() OVER (ORDER BY total_points DESC) as new_rank
-                    FROM user_rankings
-                    WHERE total_points > 0
-                )
-                UPDATE user_rankings
-                SET rank = ranked.new_rank,
-                    updated_at = NOW()
-                FROM ranked
-                WHERE user_rankings.id = ranked.id
-            """)
-        )
-
-        # Atualiza ranking semanal
-        await self.session.execute(
-            text("""
-                WITH ranked AS (
-                    SELECT 
-                        id,
-                        ROW_NUMBER() OVER (ORDER BY weekly_points DESC) as new_rank
-                    FROM user_rankings
-                    WHERE weekly_points > 0
-                )
-                UPDATE user_rankings
-                SET rank_weekly = ranked.new_rank,
-                    updated_at = NOW()
-                FROM ranked
-                WHERE user_rankings.id = ranked.id
-            """)
-        )
-
-        # Atualiza ranking mensal
-        await self.session.execute(
-            text("""
-                WITH ranked AS (
-                    SELECT 
-                        id,
-                        ROW_NUMBER() OVER (ORDER BY monthly_points DESC) as new_rank
-                    FROM user_rankings
-                    WHERE monthly_points > 0
-                )
-                UPDATE user_rankings
-                SET rank_monthly = ranked.new_rank,
-                    updated_at = NOW()
-                FROM ranked
-                WHERE user_rankings.id = ranked.id
-            """)
-        )
-
-        await self.session.flush()
-
-    async def get_count(self) -> int:
-        """Retorna o número total de usuários no ranking."""
-        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.total_points > 0)
-        result = await self.session.execute(stmt)
-        return result.scalar() or 0
-</file>
-
 <file path="app/repositories/analytics/user_stats_repository.py">
 """Repositórios de acesso a dados de estatísticas pré-agregadas do aluno.
 
@@ -6320,71 +5960,6 @@ class BaseRepository(Generic[ModelType]):
 """Schemas do contexto 'analytics'."""
 </file>
 
-<file path="app/schemas/analytics/ranking.py">
-"""Schemas de resposta de ranking."""
-
-import uuid
-from datetime import datetime
-from typing import Optional
-
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.models.analytics.ranking import UserRanking
-
-
-class RankingPositionResponse(BaseModel):
-    """Posição de um usuário no ranking."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    user_id: uuid.UUID
-    user_name: str = Field(description="Nome do usuário")
-    total_points: int = Field(description="Pontuação total")
-    questions_answered: int = Field(description="Total de questões respondidas")
-    accuracy: float = Field(description="Taxa de acerto (%)")
-    streak_days: int = Field(description="Sequência de estudos (dias)")
-    rank: int | None = Field(description="Posição no ranking")
-
-    @classmethod
-    def from_model(cls, ranking: UserRanking) -> "RankingPositionResponse":
-        """Constrói a resposta a partir do modelo ORM."""
-        return cls(
-            user_id=ranking.user_id,
-            user_name=ranking.user.full_name if ranking.user else "Usuário",
-            total_points=ranking.total_points,
-            questions_answered=ranking.questions_answered,
-            accuracy=ranking.accuracy,
-            streak_days=ranking.streak_days,
-            rank=ranking.rank,
-        )
-
-
-class RankingResponse(BaseModel):
-    """Resposta de listagem de ranking."""
-
-    items: list[RankingPositionResponse]
-    total: int = Field(description="Total de itens na página")
-    user_position: int | None = Field(description="Posição do usuário atual")
-    has_more: bool = Field(description="Se há mais itens para carregar")
-
-
-class UserRankingResponse(BaseModel):
-    """Ranking do usuário autenticado."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    user_id: uuid.UUID
-    total_points: int
-    questions_answered: int
-    correct_answers: int
-    accuracy: float
-    streak_days: int
-    rank: int | None
-    rank_weekly: int | None
-    rank_monthly: int | None
-    updated_at: datetime
-</file>
-
 <file path="app/schemas/analytics/user_stats.py">
 """Schemas de resposta de estatísticas agregadas do aluno (analytics).
 
@@ -7210,219 +6785,6 @@ class AnalyticsService:
     @staticmethod
     def _today() -> date:
         return datetime.now(UTC).date()
-</file>
-
-<file path="app/services/analytics/ranking_service.py">
-"""Regras de negócio de ranking."""
-
-import uuid
-from datetime import UTC, datetime, date, timedelta
-from typing import Optional
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import NotFoundError
-from app.models.analytics.ranking import UserRanking
-from app.repositories.analytics.ranking_repository import RankingRepository
-from app.repositories.analytics.user_stats_repository import (
-    StudyStreakRepository,
-    UserDailyStatRepository,
-)
-
-
-class RankingService:
-    """
-    Serviço de ranking de usuários.
-
-    Pontuação calculada com base em:
-    - Questões respondidas: 10 pontos cada
-    - Acertos: 5 pontos adicionais
-    - Sequência de estudos: 2 pontos por dia
-    - Consistência: bônus de 50 pontos para quem estuda 7+ dias consecutivos
-    """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._ranking = RankingRepository(session)
-        self._daily_stats = UserDailyStatRepository(session)
-        self._streak = StudyStreakRepository(session)
-
-    # ==================================================================== #
-    # LEITURA
-    # ==================================================================== #
-
-    async def get_global_ranking(
-        self,
-        user_id: uuid.UUID,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking global com a posição do usuário."""
-        rankings = await self._ranking.get_global_ranking(limit=limit, offset=offset)
-        user_position = await self._ranking.get_user_position(user_id)
-        return rankings, user_position
-
-    async def get_weekly_ranking(
-        self,
-        user_id: uuid.UUID,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking semanal com a posição do usuário."""
-        rankings = await self._ranking.get_weekly_ranking(limit=limit, offset=offset)
-        user_ranking = await self._ranking.get_by_user(user_id)
-        user_position = user_ranking.rank_weekly if user_ranking else None
-        return rankings, user_position
-
-    async def get_monthly_ranking(
-        self,
-        user_id: uuid.UUID,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[UserRanking], int | None]:
-        """Retorna ranking mensal com a posição do usuário."""
-        rankings = await self._ranking.get_monthly_ranking(limit=limit, offset=offset)
-        user_ranking = await self._ranking.get_by_user(user_id)
-        user_position = user_ranking.rank_monthly if user_ranking else None
-        return rankings, user_position
-
-    async def get_user_ranking(self, user_id: uuid.UUID) -> UserRanking | None:
-        """Retorna o ranking de um usuário específico."""
-        return await self._ranking.get_by_user(user_id)
-
-    # ==================================================================== #
-    # CÁLCULO DE PONTUAÇÃO
-    # ==================================================================== #
-
-    async def calculate_user_points(self, user_id: uuid.UUID) -> dict:
-        """
-        Calcula a pontuação de um usuário baseado em métricas de estudo.
-
-        Fórmula:
-        - 10 pontos por questão respondida
-        - 5 pontos adicionais por acerto
-        - 2 pontos por dia de sequência
-        - Bônus de 50 pontos para streak >= 7 dias
-        """
-        # Buscar streak
-        streak = await self._streak.get_by_user(user_id)
-        today = date.today()
-        month_start = date(today.year, today.month, 1)
-
-        # Buscar estatísticas do mês atual
-        daily_stats = await self._daily_stats.list_between(user_id, month_start, today)
-
-        # Métricas
-        total_questions = sum(s.questions_answered for s in daily_stats)
-        total_correct = sum(s.correct_count for s in daily_stats)
-        accuracy = (total_correct / total_questions * 100) if total_questions > 0 else 0
-        current_streak = streak.current_streak if streak else 0
-
-        # Pontuação base
-        points = (total_questions * 10) + (total_correct * 5)
-
-        # Bônus de sequência
-        points += current_streak * 2
-
-        # Bônus de consistência (7+ dias consecutivos)
-        if current_streak >= 7:
-            points += 50
-
-        # Bônus de precisão (acima de 80%)
-        if accuracy >= 80 and total_questions > 0:
-            points += int(accuracy * 0.5)
-
-        return {
-            "total_points": points,
-            "questions_answered": total_questions,
-            "correct_answers": total_correct,
-            "accuracy": round(accuracy, 1),
-            "streak_days": current_streak,
-        }
-
-    async def calculate_weekly_points(self, user_id: uuid.UUID) -> int:
-        """Calcula pontos da semana atual."""
-        today = date.today()
-        week_start = today - timedelta(days=today.weekday())
-
-        stats = await self._daily_stats.list_between(user_id, week_start, today)
-        total_questions = sum(s.questions_answered for s in stats)
-        total_correct = sum(s.correct_count for s in stats)
-
-        return (total_questions * 10) + (total_correct * 5)
-
-    async def calculate_monthly_points(self, user_id: uuid.UUID) -> int:
-        """Calcula pontos do mês atual."""
-        today = date.today()
-        month_start = date(today.year, today.month, 1)
-
-        stats = await self._daily_stats.list_between(user_id, month_start, today)
-        total_questions = sum(s.questions_answered for s in stats)
-        total_correct = sum(s.correct_count for s in stats)
-
-        return (total_questions * 10) + (total_correct * 5)
-
-    # ==================================================================== #
-    # ATUALIZAÇÃO (Worker)
-    # ==================================================================== #
-
-    async def update_user_ranking(self, user_id: uuid.UUID) -> UserRanking:
-        """Atualiza o ranking de um único usuário."""
-        # Calcular pontuação
-        points = await self.calculate_user_points(user_id)
-
-        # Calcular pontos semanais e mensais
-        weekly_points = await self.calculate_weekly_points(user_id)
-        monthly_points = await self.calculate_monthly_points(user_id)
-
-        # Atualizar no banco
-        ranking = await self._ranking.upsert(
-            user_id,
-            **points,
-            weekly_points=weekly_points,
-            monthly_points=monthly_points,
-            updated_at=datetime.now(UTC),
-        )
-
-        return ranking
-
-    async def update_all_rankings(self) -> None:
-        """
-        Atualiza o ranking de todos os usuários (chamado pelo worker).
-
-        Busca todos os usuários com atividade e recalcula suas pontuações.
-        """
-        from app.models.analytics.user_stats import UserDailyStat
-        from sqlalchemy import select
-
-        # Buscar todos os usuários com atividade
-        stmt = select(UserDailyStat.user_id).distinct()
-        result = await self._session.execute(stmt)
-        user_ids = [row[0] for row in result.all()]
-
-        # Atualizar cada usuário
-        for user_id in user_ids:
-            await self.update_user_ranking(user_id)
-
-        # Recalcular posições
-        await self._ranking.update_rankings()
-        
-        # Commit explícito
-        await self._session.commit()
-
-    async def update_ranking_by_email(self, email: str) -> UserRanking:
-        """Atualiza o ranking de um usuário pelo email."""
-        from app.models.identity.user import User
-        from sqlalchemy import select
-
-        result = await self._session.execute(
-            select(User).where(User.email == email)
-        )
-        user = result.scalar_one_or_none()
-        if not user:
-            raise NotFoundError(f"Usuário com email '{email}' não encontrado")
-
-        return await self.update_user_ranking(user.id)
 </file>
 
 <file path="app/services/assessment/__init__.py">
@@ -19510,6 +18872,139 @@ async def revoke_subscription_admin(
     )
 </file>
 
+<file path="app/api/v1/analytics/ranking.py">
+"""Endpoints HTTP de ranking."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.responses import Envelope
+from app.database.session import get_db
+from app.schemas.analytics.ranking import (
+    RankingPositionResponse,
+    RankingResponse,
+    UserRankingResponse,
+)
+from app.security.dependencies import CurrentUser
+from app.services.analytics.ranking_service import RankingService
+
+router = APIRouter()
+
+
+def get_ranking_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> RankingService:
+    return RankingService(session)
+
+
+RankingServiceDep = Annotated[RankingService, Depends(get_ranking_service)]
+
+
+@router.get("/global", response_model=Envelope[RankingResponse])
+async def get_global_ranking(
+    current_user: CurrentUser,
+    ranking_service: RankingServiceDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[RankingResponse]:
+    """
+    Ranking global de todos os usuários.
+
+    Retorna os usuários com mais pontos, ordenados por posição.
+    Inclui a posição do usuário atual.
+    """
+    rankings, user_position, total, has_more = await ranking_service.get_global_ranking(
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+    )
+
+    return Envelope(
+        data=RankingResponse(
+            items=[RankingPositionResponse.from_model(r) for r in rankings],
+            total=total,
+            user_position=user_position,
+            has_more=has_more,
+        )
+    )
+
+
+@router.get("/weekly", response_model=Envelope[RankingResponse])
+async def get_weekly_ranking(
+    current_user: CurrentUser,
+    ranking_service: RankingServiceDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[RankingResponse]:
+    """Ranking semanal."""
+    rankings, user_position, total, has_more = await ranking_service.get_weekly_ranking(
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+    )
+
+    return Envelope(
+        data=RankingResponse(
+            items=[RankingPositionResponse.from_model(r) for r in rankings],
+            total=total,
+            user_position=user_position,
+            has_more=has_more,
+        )
+    )
+
+
+@router.get("/monthly", response_model=Envelope[RankingResponse])
+async def get_monthly_ranking(
+    current_user: CurrentUser,
+    ranking_service: RankingServiceDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[RankingResponse]:
+    """Ranking mensal."""
+    rankings, user_position, total, has_more = await ranking_service.get_monthly_ranking(
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+    )
+
+    return Envelope(
+        data=RankingResponse(
+            items=[RankingPositionResponse.from_model(r) for r in rankings],
+            total=total,
+            user_position=user_position,
+            has_more=has_more,
+        )
+    )
+
+
+@router.get("/me", response_model=Envelope[UserRankingResponse | None])
+async def get_my_ranking(
+    current_user: CurrentUser,
+    ranking_service: RankingServiceDep,
+) -> Envelope[UserRankingResponse | None]:
+    """Posição do usuário no ranking."""
+    ranking = await ranking_service.get_user_ranking(current_user.id)
+    if not ranking:
+        return Envelope(data=None)
+    return Envelope(data=UserRankingResponse.model_validate(ranking))
+
+
+@router.post("/update", status_code=status.HTTP_204_NO_CONTENT)
+async def update_rankings(
+    current_user: CurrentUser,
+    ranking_service: RankingServiceDep,
+) -> None:
+    """
+    Atualiza o ranking de todos os usuários.
+
+    Esta rota é protegida e deve ser usada com moderação.
+    O worker já faz a atualização automática.
+    """
+    await ranking_service.update_all_rankings()
+</file>
+
 <file path="app/api/v1/analytics/user_stats.py">
 """Endpoints HTTP de estatísticas agregadas do aluno (analytics).
 
@@ -20515,6 +20010,62 @@ async def archive_notifications(
     return Envelope(data=count)
 </file>
 
+<file path="app/api/v1/practice/attempts.py">
+"""Endpoint de histórico geral de tentativas de resposta do usuário.
+
+Cobre todas as origens (`treino`, e futuramente `simulado`) — mesma tabela
+unificada `QuestionAttempt`, conforme decisão de modelagem da Etapa 8.
+"""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import CursorPage
+from app.core.responses import Envelope, Meta
+from app.database.session import get_db
+from app.schemas.practice.question_attempt import QuestionAttemptListItem
+from app.security.dependencies import CurrentUser
+from app.services.practice.question_attempt_service import QuestionAttemptService
+
+router = APIRouter()
+
+
+def get_question_attempt_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> QuestionAttemptService:
+    return QuestionAttemptService(session)
+
+
+QuestionAttemptServiceDep = Annotated[
+    QuestionAttemptService, Depends(get_question_attempt_service)
+]
+
+
+@router.get("", response_model=Envelope[list[QuestionAttemptListItem]])
+async def list_attempts(
+    current_user: CurrentUser,
+    question_attempt_service: QuestionAttemptServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query()] = None,
+) -> Envelope[list[QuestionAttemptListItem]]:
+    page = CursorPage(limit=limit, cursor=cursor)
+    decoded_cursor = page.decode_cursor()
+    cursor_id = uuid.UUID(decoded_cursor) if decoded_cursor else None
+
+    attempts, has_more = await question_attempt_service.list_history(
+        current_user.id, limit=limit, cursor_id=cursor_id
+    )
+    next_cursor = CursorPage.encode_cursor(str(attempts[-1].id)) if has_more else None
+
+    return Envelope(
+        data=[QuestionAttemptListItem.model_validate(a) for a in attempts],
+        meta=Meta(next_cursor=next_cursor, has_more=has_more),
+    )
+</file>
+
 <file path="app/database/session.py">
 # app/database/session.py
 """Engine assíncrono, session factory e dependency de sessão do FastAPI."""
@@ -20930,6 +20481,189 @@ class TrainingSessionQuestion(UUIDPKMixin, Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
     session: Mapped["TrainingSession"] = relationship(back_populates="questions")
+</file>
+
+<file path="app/repositories/analytics/ranking_repository.py">
+"""Repositório de acesso a dados de `UserRanking`."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import selectinload
+
+from app.models.analytics.ranking import UserRanking
+from app.repositories.base import BaseRepository
+
+_RELATIONS = (selectinload(UserRanking.user),)
+
+
+class RankingRepository(BaseRepository[UserRanking]):
+    """Repositório de ranking de usuários."""
+
+    model = UserRanking
+
+    async def get_by_user(self, user_id: uuid.UUID) -> UserRanking | None:
+        """Busca ranking de um usuário específico com suas métricas."""
+        stmt = (
+            select(UserRanking)
+            .where(UserRanking.user_id == user_id)
+            .options(*_RELATIONS)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_global_ranking(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[UserRanking]:
+        """Retorna ranking global ordenado por posição."""
+        stmt = (
+            select(UserRanking)
+            .where(UserRanking.total_points > 0)
+            .options(*_RELATIONS)
+            .order_by(UserRanking.rank.asc(), UserRanking.total_points.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_weekly_ranking(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[UserRanking]:
+        """Retorna ranking semanal."""
+        stmt = (
+            select(UserRanking)
+            .where(UserRanking.weekly_points > 0)
+            .options(*_RELATIONS)
+            .order_by(UserRanking.weekly_points.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_monthly_ranking(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[UserRanking]:
+        """Retorna ranking mensal."""
+        stmt = (
+            select(UserRanking)
+            .where(UserRanking.monthly_points > 0)
+            .options(*_RELATIONS)
+            .order_by(UserRanking.monthly_points.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_user_position(self, user_id: uuid.UUID) -> int | None:
+        """Retorna a posição global do usuário."""
+        ranking = await self.get_by_user(user_id)
+        return ranking.rank if ranking else None
+
+    async def upsert(self, user_id: uuid.UUID, **fields) -> UserRanking:
+        """Cria ou atualiza o ranking de um usuário."""
+        existing = await self.get_by_user(user_id)
+
+        if existing:
+            for key, value in fields.items():
+                if hasattr(existing, key):
+                    setattr(existing, key, value)
+            await self.session.flush()
+            return existing
+
+        ranking = UserRanking(user_id=user_id, **fields)
+        self.session.add(ranking)
+        await self.session.flush()
+        return ranking
+
+    async def update_rankings(self) -> None:
+        """
+        Atualiza as posições de todos os usuários no ranking global.
+
+        Usa ROW_NUMBER() para calcular posições de forma eficiente.
+        """
+        # Atualiza ranking global
+        await self.session.execute(
+            text("""
+                WITH ranked AS (
+                    SELECT 
+                        id,
+                        ROW_NUMBER() OVER (ORDER BY total_points DESC) as new_rank
+                    FROM user_rankings
+                    WHERE total_points > 0
+                )
+                UPDATE user_rankings
+                SET rank = ranked.new_rank,
+                    updated_at = NOW()
+                FROM ranked
+                WHERE user_rankings.id = ranked.id
+            """)
+        )
+
+        # Atualiza ranking semanal
+        await self.session.execute(
+            text("""
+                WITH ranked AS (
+                    SELECT 
+                        id,
+                        ROW_NUMBER() OVER (ORDER BY weekly_points DESC) as new_rank
+                    FROM user_rankings
+                    WHERE weekly_points > 0
+                )
+                UPDATE user_rankings
+                SET rank_weekly = ranked.new_rank,
+                    updated_at = NOW()
+                FROM ranked
+                WHERE user_rankings.id = ranked.id
+            """)
+        )
+
+        # Atualiza ranking mensal
+        await self.session.execute(
+            text("""
+                WITH ranked AS (
+                    SELECT 
+                        id,
+                        ROW_NUMBER() OVER (ORDER BY monthly_points DESC) as new_rank
+                    FROM user_rankings
+                    WHERE monthly_points > 0
+                )
+                UPDATE user_rankings
+                SET rank_monthly = ranked.new_rank,
+                    updated_at = NOW()
+                FROM ranked
+                WHERE user_rankings.id = ranked.id
+            """)
+        )
+
+        await self.session.flush()
+
+    async def get_global_count(self) -> int:
+        """Total de usuários elegíveis no ranking global (mesmo filtro de `get_global_ranking`)."""
+        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.total_points > 0)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_weekly_count(self) -> int:
+        """Total de usuários elegíveis no ranking semanal (mesmo filtro de `get_weekly_ranking`)."""
+        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.weekly_points > 0)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_monthly_count(self) -> int:
+        """Total de usuários elegíveis no ranking mensal (mesmo filtro de `get_monthly_ranking`)."""
+        stmt = select(func.count()).select_from(UserRanking).where(UserRanking.monthly_points > 0)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
 </file>
 
 <file path="app/repositories/billing/payment_repository.py">
@@ -22213,6 +21947,77 @@ class UserQuestionStateRepository(BaseRepository[UserQuestionState]):
         return list(result.scalars().unique().all())
 </file>
 
+<file path="app/schemas/analytics/ranking.py">
+"""Schemas de resposta de ranking."""
+
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.analytics.ranking import UserRanking
+
+
+class RankingPositionResponse(BaseModel):
+    """Posição de um usuário no ranking."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: uuid.UUID
+    user_name: str = Field(description="Nome do usuário")
+    total_points: int = Field(description="Pontuação total")
+    questions_answered: int = Field(description="Total de questões respondidas")
+    accuracy: float = Field(description="Taxa de acerto (%)")
+    streak_days: int = Field(description="Sequência de estudos (dias)")
+    rank: int | None = Field(description="Posição no ranking")
+
+    @classmethod
+    def from_model(cls, ranking: UserRanking) -> "RankingPositionResponse":
+        """Constrói a resposta a partir do modelo ORM."""
+        return cls(
+            user_id=ranking.user_id,
+            user_name=ranking.user.full_name if ranking.user else "Usuário",
+            total_points=ranking.total_points,
+            questions_answered=ranking.questions_answered,
+            accuracy=ranking.accuracy,
+            streak_days=ranking.streak_days,
+            rank=ranking.rank,
+        )
+
+
+class RankingResponse(BaseModel):
+    """Resposta de listagem de ranking."""
+
+    items: list[RankingPositionResponse]
+    total: int = Field(
+        description=(
+            "Total de usuários elegíveis nesta aba do ranking (não o tamanho "
+            "da página atual — ver `RankingRepository.get_global_count` / "
+            "`get_weekly_count` / `get_monthly_count`)"
+        )
+    )
+    user_position: int | None = Field(description="Posição do usuário atual")
+    has_more: bool = Field(description="Se há mais itens para carregar")
+
+
+class UserRankingResponse(BaseModel):
+    """Ranking do usuário autenticado."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: uuid.UUID
+    total_points: int
+    questions_answered: int
+    correct_answers: int
+    accuracy: float
+    streak_days: int
+    rank: int | None
+    rank_weekly: int | None
+    rank_monthly: int | None
+    updated_at: datetime
+</file>
+
 <file path="app/schemas/assessment/exam_template.py">
 """Schemas de request/response de moldes de simulado (`ExamTemplate`)."""
 
@@ -23007,6 +22812,243 @@ def RequireFeature(key: FeatureKey) -> Callable[..., Coroutine[None, None, None]
         await FeatureGateService(session).assert_feature(user.id, key)
 
     return _require_feature
+</file>
+
+<file path="app/services/analytics/ranking_service.py">
+"""Regras de negócio de ranking."""
+
+import uuid
+from datetime import UTC, datetime, date, timedelta
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import NotFoundError
+from app.models.analytics.ranking import UserRanking
+from app.repositories.analytics.ranking_repository import RankingRepository
+from app.repositories.analytics.user_stats_repository import (
+    StudyStreakRepository,
+    UserDailyStatRepository,
+)
+
+
+class RankingService:
+    """
+    Serviço de ranking de usuários.
+
+    Pontuação calculada com base em:
+    - Questões respondidas: 10 pontos cada
+    - Acertos: 5 pontos adicionais
+    - Sequência de estudos: 2 pontos por dia
+    - Consistência: bônus de 50 pontos para quem estuda 7+ dias consecutivos
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._ranking = RankingRepository(session)
+        self._daily_stats = UserDailyStatRepository(session)
+        self._streak = StudyStreakRepository(session)
+
+    # ==================================================================== #
+    # LEITURA
+    # ==================================================================== #
+
+    async def get_global_ranking(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking global com a posição do usuário.
+
+        Mesma correção de `QuestionAttemptService.list_history`: busca
+        `limit + 1` e descarta o extra para saber com certeza se há próxima
+        página, em vez de inferir errado (`len(rankings) == limit`) quando o
+        total de usuários é múltiplo exato de `limit`. `total` vem de
+        `get_global_count` (contagem real), não do tamanho da página atual.
+        """
+        rankings = await self._ranking.get_global_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_global_count()
+        user_position = await self._ranking.get_user_position(user_id)
+        return rankings, user_position, total, has_more
+
+    async def get_weekly_ranking(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking semanal com a posição do usuário.
+
+        Mesma correção de paginação de `get_global_ranking` (ver docstring
+        acima), com a contagem filtrada por `weekly_points > 0`.
+        """
+        rankings = await self._ranking.get_weekly_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_weekly_count()
+        user_ranking = await self._ranking.get_by_user(user_id)
+        user_position = user_ranking.rank_weekly if user_ranking else None
+        return rankings, user_position, total, has_more
+
+    async def get_monthly_ranking(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[UserRanking], int | None, int, bool]:
+        """Retorna ranking mensal com a posição do usuário.
+
+        Mesma correção de paginação de `get_global_ranking` (ver docstring
+        acima), com a contagem filtrada por `monthly_points > 0`.
+        """
+        rankings = await self._ranking.get_monthly_ranking(limit=limit + 1, offset=offset)
+        has_more = len(rankings) > limit
+        rankings = rankings[:limit]
+        total = await self._ranking.get_monthly_count()
+        user_ranking = await self._ranking.get_by_user(user_id)
+        user_position = user_ranking.rank_monthly if user_ranking else None
+        return rankings, user_position, total, has_more
+
+    async def get_user_ranking(self, user_id: uuid.UUID) -> UserRanking | None:
+        """Retorna o ranking de um usuário específico."""
+        return await self._ranking.get_by_user(user_id)
+
+    # ==================================================================== #
+    # CÁLCULO DE PONTUAÇÃO
+    # ==================================================================== #
+
+    async def calculate_user_points(self, user_id: uuid.UUID) -> dict:
+        """
+        Calcula a pontuação de um usuário baseado em métricas de estudo.
+
+        Fórmula:
+        - 10 pontos por questão respondida
+        - 5 pontos adicionais por acerto
+        - 2 pontos por dia de sequência
+        - Bônus de 50 pontos para streak >= 7 dias
+        """
+        # Buscar streak
+        streak = await self._streak.get_by_user(user_id)
+        today = date.today()
+        month_start = date(today.year, today.month, 1)
+
+        # Buscar estatísticas do mês atual
+        daily_stats = await self._daily_stats.list_between(user_id, month_start, today)
+
+        # Métricas
+        total_questions = sum(s.questions_answered for s in daily_stats)
+        total_correct = sum(s.correct_count for s in daily_stats)
+        accuracy = (total_correct / total_questions * 100) if total_questions > 0 else 0
+        current_streak = streak.current_streak if streak else 0
+
+        # Pontuação base
+        points = (total_questions * 10) + (total_correct * 5)
+
+        # Bônus de sequência
+        points += current_streak * 2
+
+        # Bônus de consistência (7+ dias consecutivos)
+        if current_streak >= 7:
+            points += 50
+
+        # Bônus de precisão (acima de 80%)
+        if accuracy >= 80 and total_questions > 0:
+            points += int(accuracy * 0.5)
+
+        return {
+            "total_points": points,
+            "questions_answered": total_questions,
+            "correct_answers": total_correct,
+            "accuracy": round(accuracy, 1),
+            "streak_days": current_streak,
+        }
+
+    async def calculate_weekly_points(self, user_id: uuid.UUID) -> int:
+        """Calcula pontos da semana atual."""
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+
+        stats = await self._daily_stats.list_between(user_id, week_start, today)
+        total_questions = sum(s.questions_answered for s in stats)
+        total_correct = sum(s.correct_count for s in stats)
+
+        return (total_questions * 10) + (total_correct * 5)
+
+    async def calculate_monthly_points(self, user_id: uuid.UUID) -> int:
+        """Calcula pontos do mês atual."""
+        today = date.today()
+        month_start = date(today.year, today.month, 1)
+
+        stats = await self._daily_stats.list_between(user_id, month_start, today)
+        total_questions = sum(s.questions_answered for s in stats)
+        total_correct = sum(s.correct_count for s in stats)
+
+        return (total_questions * 10) + (total_correct * 5)
+
+    # ==================================================================== #
+    # ATUALIZAÇÃO (Worker)
+    # ==================================================================== #
+
+    async def update_user_ranking(self, user_id: uuid.UUID) -> UserRanking:
+        """Atualiza o ranking de um único usuário."""
+        # Calcular pontuação
+        points = await self.calculate_user_points(user_id)
+
+        # Calcular pontos semanais e mensais
+        weekly_points = await self.calculate_weekly_points(user_id)
+        monthly_points = await self.calculate_monthly_points(user_id)
+
+        # Atualizar no banco
+        ranking = await self._ranking.upsert(
+            user_id,
+            **points,
+            weekly_points=weekly_points,
+            monthly_points=monthly_points,
+            updated_at=datetime.now(UTC),
+        )
+
+        return ranking
+
+    async def update_all_rankings(self) -> None:
+        """
+        Atualiza o ranking de todos os usuários (chamado pelo worker).
+
+        Busca todos os usuários com atividade e recalcula suas pontuações.
+        """
+        from app.models.analytics.user_stats import UserDailyStat
+        from sqlalchemy import select
+
+        # Buscar todos os usuários com atividade
+        stmt = select(UserDailyStat.user_id).distinct()
+        result = await self._session.execute(stmt)
+        user_ids = [row[0] for row in result.all()]
+
+        # Atualizar cada usuário
+        for user_id in user_ids:
+            await self.update_user_ranking(user_id)
+
+        # Recalcular posições
+        await self._ranking.update_rankings()
+        
+        # Commit explícito
+        await self._session.commit()
+
+    async def update_ranking_by_email(self, email: str) -> UserRanking:
+        """Atualiza o ranking de um usuário pelo email."""
+        from app.models.identity.user import User
+        from sqlalchemy import select
+
+        result = await self._session.execute(
+            select(User).where(User.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            raise NotFoundError(f"Usuário com email '{email}' não encontrado")
+
+        return await self.update_user_ranking(user.id)
 </file>
 
 <file path="app/services/assessment/exam_template_service.py">
@@ -24705,114 +24747,6 @@ class QuestionAttemptService:
         return await self._attempts.list_paginated(
             user_id=user_id, limit=limit, cursor_id=cursor_id
         )
-</file>
-
-<file path="app/services/practice/question_attempt_service.py">
-"""Regras de negócio de tentativas de resposta (`QuestionAttempt`).
-
-Submeter uma resposta é sempre relativo a uma sessão existente (hoje, só
-`treino`; `simulado` reutilizará esta mesma tabela na Etapa 9 —
-`assessment`). Cada resposta atualiza o contador `correct_count` da sessão
-de forma atômica, junto com o registro de `QuestionAttempt`.
-"""
-
-import uuid
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError
-from app.database.uow import UnitOfWork
-from app.models.enums import SessionType
-from app.models.practice.question_attempt import QuestionAttempt
-from app.repositories.content.question_repository import QuestionRepository
-from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
-from app.repositories.practice.training_session_repository import TrainingSessionRepository
-from app.schemas.practice.question_attempt import AnswerSubmitRequest
-
-
-class QuestionAttemptService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._attempts = QuestionAttemptRepository(session)
-        self._questions = QuestionRepository(session)
-        self._sessions = TrainingSessionRepository(session)
-
-    async def submit_training_answer(
-        self,
-        user_id: uuid.UUID,
-        session_id: uuid.UUID,
-        question_id: uuid.UUID,
-        data: AnswerSubmitRequest,
-    ) -> QuestionAttempt:
-        training_session = await self._sessions.get_with_questions(session_id)
-        if training_session is None or training_session.user_id != user_id:
-            raise NotFoundError("Sessão de treino não encontrada.")
-        if training_session.finished_at is not None:
-            raise ConflictError("Sessão já finalizada — não é possível responder.")
-        if not any(item.question_id == question_id for item in training_session.questions):
-            raise NotFoundError("Questão não pertence a esta sessão de treino.")
-
-        already_answered = await self._attempts.get_for_question_in_session(
-            user_id=user_id,
-            question_id=question_id,
-            session_type=SessionType.TREINO,
-            session_id=session_id,
-        )
-        if already_answered is not None:
-            raise ConflictError("Questão já respondida nesta sessão.")
-
-        question = await self._questions.get_with_relations(question_id)
-        if question is None:
-            raise NotFoundError("Questão não encontrada.")
-
-        selected_letter = None
-        if data.selected_alternative_id is not None:
-            selected = next(
-                (alt for alt in question.alternatives if alt.id == data.selected_alternative_id),
-                None,
-            )
-            if selected is None:
-                raise NotFoundError("Alternativa não encontrada para esta questão.")
-            selected_letter = selected.letter
-
-        is_correct = selected_letter == question.correct_alternative_letter
-
-        attempt = QuestionAttempt(
-            user_id=user_id,
-            question_id=question_id,
-            session_type=SessionType.TREINO,
-            session_id=session_id,
-            selected_alternative_id=data.selected_alternative_id,
-            is_correct=is_correct,
-            time_spent_seconds=data.time_spent_seconds,
-        )
-        attempt.question = question  # evita lazy-load em `attempt.question` após a sessão fechar
-
-        async with UnitOfWork(self._session):
-            await self._attempts.add(attempt)
-            if is_correct:
-                training_session.correct_count += 1
-                self._session.add(training_session)
-
-        return attempt
-
-    async def list_history(
-        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> tuple[list[QuestionAttempt], bool]:
-        """Uma página do histórico + se existe página seguinte.
-
-        Busca `limit + 1` registros e descarta o extra: com `limit` exatos,
-        `len(attempts) == limit` não diz se acabou a lista ou se ela termina
-        bem ali — as duas situações ficam indistinguíveis, e o cliente acaba
-        disparando um `loadMore` a mais que sempre volta vazio quando o
-        total é múltiplo exato de `limit`. O item extra resolve a ambiguidade
-        sem precisar de `COUNT(*)` (caro em tabela de alto volume).
-        """
-        attempts = await self._attempts.list_paginated(
-            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
-        )
-        has_more = len(attempts) > limit
-        return attempts[:limit], has_more
 </file>
 
 <file path="migrations/versions/0018_add_notifications.py">
@@ -28044,6 +27978,114 @@ def _render_password_reset_email(*, to_name: str, reset_url: str) -> tuple[str, 
   </body>
 </html>"""
     return text_body, html_body
+</file>
+
+<file path="app/services/practice/question_attempt_service.py">
+"""Regras de negócio de tentativas de resposta (`QuestionAttempt`).
+
+Submeter uma resposta é sempre relativo a uma sessão existente (hoje, só
+`treino`; `simulado` reutilizará esta mesma tabela na Etapa 9 —
+`assessment`). Cada resposta atualiza o contador `correct_count` da sessão
+de forma atômica, junto com o registro de `QuestionAttempt`.
+"""
+
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError
+from app.database.uow import UnitOfWork
+from app.models.enums import SessionType
+from app.models.practice.question_attempt import QuestionAttempt
+from app.repositories.content.question_repository import QuestionRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.schemas.practice.question_attempt import AnswerSubmitRequest
+
+
+class QuestionAttemptService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._attempts = QuestionAttemptRepository(session)
+        self._questions = QuestionRepository(session)
+        self._sessions = TrainingSessionRepository(session)
+
+    async def submit_training_answer(
+        self,
+        user_id: uuid.UUID,
+        session_id: uuid.UUID,
+        question_id: uuid.UUID,
+        data: AnswerSubmitRequest,
+    ) -> QuestionAttempt:
+        training_session = await self._sessions.get_with_questions(session_id)
+        if training_session is None or training_session.user_id != user_id:
+            raise NotFoundError("Sessão de treino não encontrada.")
+        if training_session.finished_at is not None:
+            raise ConflictError("Sessão já finalizada — não é possível responder.")
+        if not any(item.question_id == question_id for item in training_session.questions):
+            raise NotFoundError("Questão não pertence a esta sessão de treino.")
+
+        already_answered = await self._attempts.get_for_question_in_session(
+            user_id=user_id,
+            question_id=question_id,
+            session_type=SessionType.TREINO,
+            session_id=session_id,
+        )
+        if already_answered is not None:
+            raise ConflictError("Questão já respondida nesta sessão.")
+
+        question = await self._questions.get_with_relations(question_id)
+        if question is None:
+            raise NotFoundError("Questão não encontrada.")
+
+        selected_letter = None
+        if data.selected_alternative_id is not None:
+            selected = next(
+                (alt for alt in question.alternatives if alt.id == data.selected_alternative_id),
+                None,
+            )
+            if selected is None:
+                raise NotFoundError("Alternativa não encontrada para esta questão.")
+            selected_letter = selected.letter
+
+        is_correct = selected_letter == question.correct_alternative_letter
+
+        attempt = QuestionAttempt(
+            user_id=user_id,
+            question_id=question_id,
+            session_type=SessionType.TREINO,
+            session_id=session_id,
+            selected_alternative_id=data.selected_alternative_id,
+            is_correct=is_correct,
+            time_spent_seconds=data.time_spent_seconds,
+        )
+        attempt.question = question  # evita lazy-load em `attempt.question` após a sessão fechar
+
+        async with UnitOfWork(self._session):
+            await self._attempts.add(attempt)
+            if is_correct:
+                training_session.correct_count += 1
+                self._session.add(training_session)
+
+        return attempt
+
+    async def list_history(
+        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
+    ) -> tuple[list[QuestionAttempt], bool]:
+        """Uma página do histórico + se existe página seguinte.
+
+        Busca `limit + 1` registros e descarta o extra: com `limit` exatos,
+        `len(attempts) == limit` não diz se acabou a lista ou se ela termina
+        bem ali — as duas situações ficam indistinguíveis, e o cliente acaba
+        disparando um `loadMore` a mais que sempre volta vazio quando o
+        total é múltiplo exato de `limit`. O item extra resolve a ambiguidade
+        sem precisar de `COUNT(*)` (caro em tabela de alto volume).
+        """
+        attempts = await self._attempts.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
+        )
+        has_more = len(attempts) > limit
+        return attempts[:limit], has_more
 </file>
 
 <file path="app/services/storage/s3_service.py">
@@ -33322,597 +33364,6 @@ class AuthService:
         )
 </file>
 
-<file path="app/services/learning/notebook_service.py">
-# app/services/learning/notebook_service.py
-"""Regras de negócio de cadernos."""
-
-import uuid
-from typing import Optional
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError, ForbiddenError
-from app.database.uow import UnitOfWork
-from app.models.learning.notebook import Notebook
-from app.models.learning.notebook_folder import NotebookFolder
-from app.models.learning.notebook_question import NotebookQuestion
-from app.models.learning.notebook_tag import NotebookTag
-from app.repositories.content.question_repository import QuestionRepository
-from app.repositories.learning.notebook_folder_repository import NotebookFolderRepository
-from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
-from app.repositories.learning.notebook_repository import NotebookRepository
-from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
-from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
-from app.repositories.practice.user_question_state_repository import (
-    UserQuestionStateRepository,
-)
-from app.services.billing.feature_gate_service import FeatureGateService
-from app.models.enums import FeatureKey, QuestionAnswerStatus
-
-
-class NotebookService:
-    """Serviço de cadernos."""
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._notebooks = NotebookRepository(session)
-        self._questions = NotebookQuestionRepository(session)
-        self._folders = NotebookFolderRepository(session)
-        self._tags = NotebookTagRepository(session)
-        self._question_repo = QuestionRepository(session)
-        self._feature_gate = FeatureGateService(session)
-        # 🔥 CORREÇÃO (caderno não mostra questão como resolvida): faltavam
-        # aqui — sem eles, `question.answer_status`/`question.is_favorite`
-        # nunca eram calculados para as questões de um caderno, e o schema
-        # (`QuestionListItem`) caía sempre no default `NAO_RESPONDIDA`/
-        # `False`, mesmo para questões já respondidas pelo aluno.
-        self._states = UserQuestionStateRepository(session)
-        self._attempts = QuestionAttemptRepository(session)
-
-    # ==================================================================== #
-    # FOLDERS
-    # ==================================================================== #
-
-    async def list_folders(self, user_id: uuid.UUID) -> list[NotebookFolder]:
-        """Lista todas as pastas do usuário."""
-        return await self._folders.list_by_user(user_id)
-
-    async def create_folder(
-        self,
-        user_id: uuid.UUID,
-        name: str,
-        parent_id: Optional[uuid.UUID] = None,
-    ) -> NotebookFolder:
-        """Cria uma nova pasta."""
-        existing = await self._folders.get_by_name(user_id, name)
-        if existing:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
-
-        if parent_id:
-            parent = await self._folders.get_owned(parent_id, user_id)
-            if not parent:
-                raise NotFoundError("Pasta pai não encontrada.")
-
-        folder = NotebookFolder(
-            user_id=user_id,
-            name=name.strip(),
-            parent_id=parent_id,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._folders.add(folder)
-
-        return folder
-
-    async def update_folder(
-        self,
-        folder_id: uuid.UUID,
-        user_id: uuid.UUID,
-        name: str,
-    ) -> NotebookFolder:
-        """Renomeia uma pasta."""
-        folder = await self._folders.get_owned(folder_id, user_id)
-        if not folder:
-            raise NotFoundError("Pasta não encontrada.")
-
-        existing = await self._folders.get_by_name(user_id, name.strip())
-        if existing and existing.id != folder_id:
-            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
-
-        folder.name = name.strip()
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-
-        return folder
-
-    async def delete_folder(self, folder_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        """Exclui uma pasta (move cadernos para root)."""
-        folder = await self._folders.get_owned(folder_id, user_id)
-        if not folder:
-            raise NotFoundError("Pasta não encontrada.")
-
-        # Mover cadernos para root
-        notebooks, _ = await self._notebooks.list_by_user(
-            user_id, limit=1000, folder_id=folder_id
-        )
-        for notebook in notebooks:
-            notebook.folder_id = None
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-            await self._folders.delete_cascade(folder_id)
-
-    # ==================================================================== #
-    # TAGS
-    # ==================================================================== #
-
-    async def list_tags(self) -> list[NotebookTag]:
-        """Lista todas as tags disponíveis."""
-        return await self._tags.list_all()
-
-    async def create_tag(self, name: str) -> NotebookTag:
-        """Cria uma nova tag."""
-        existing = await self._tags.get_by_name(name.strip())
-        if existing:
-            return existing
-
-        import re
-        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
-
-        tag = NotebookTag(name=name.strip(), slug=slug)
-
-        async with UnitOfWork(self._session):
-            await self._tags.add(tag)
-
-        return tag
-
-    # ==================================================================== #
-    # NOTEBOOKS
-    # ==================================================================== #
-
-    async def list_notebooks(
-        self,
-        user_id: uuid.UUID,
-        limit: int = 20,
-        cursor_id: Optional[uuid.UUID] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        favorite: Optional[bool] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[Notebook], int]:
-        """Lista cadernos do usuário."""
-        notebooks, total = await self._notebooks.list_by_user(
-            user_id=user_id,
-            limit=limit,
-            cursor_id=cursor_id,
-            folder_id=folder_id,
-            favorite=favorite,
-            search=search,
-        )
-        for notebook in notebooks:
-            notebook._question_count = await self._notebooks.count_questions(notebook.id)
-        return notebooks, total
-
-    async def get_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> Notebook:
-        """Busca um caderno específico, com as questões carregadas."""
-        notebook = await self._notebooks.get_with_questions(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        notebook._question_count = len(notebook.questions)
-        return notebook
-
-    async def create_notebook(
-        self,
-        user_id: uuid.UUID,
-        name: str,
-        description: Optional[str] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        tag_ids: Optional[list[uuid.UUID]] = None,
-    ) -> Notebook:
-        """Cria um novo caderno."""
-        # Verificar feature gate
-        has_feature = await self._feature_gate.has_feature(user_id, FeatureKey.NOTEBOOKS)
-        if not has_feature:
-            raise ForbiddenError(
-                "Seu plano atual não inclui a criação de cadernos. "
-                "Faça upgrade para o plano Standard ou Pro."
-            )
-
-        existing = await self._notebooks.get_by_name(user_id, name.strip())
-        if existing:
-            raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
-
-        if folder_id:
-            folder = await self._folders.get_owned(folder_id, user_id)
-            if not folder:
-                raise NotFoundError("Pasta não encontrada.")
-
-        tags = []
-        if tag_ids:
-            tags = await self._tags.list_by_ids(tag_ids)
-            if len(tags) != len(tag_ids):
-                raise NotFoundError("Uma ou mais tags não foram encontradas.")
-
-        notebook = Notebook(
-            user_id=user_id,
-            name=name.strip(),
-            description=description.strip() if description else None,
-            folder_id=folder_id,
-        )
-        notebook.tags = tags
-
-        async with UnitOfWork(self._session):
-            await self._notebooks.add(notebook)
-
-        # 🔥 CRÍTICO: Refresh do objeto e recarregar relações para evitar
-        # MissingGreenlet quando o router acessar notebook.folder/tags.
-        await self._session.refresh(notebook)
-
-        if notebook.folder_id:
-            folder = await self._folders.get_owned(notebook.folder_id, user_id)
-            notebook.folder = folder
-
-        if tag_ids:
-            tags = await self._tags.list_by_ids(tag_ids)
-            notebook.tags = tags
-
-        notebook._question_count = 0
-        return notebook
-
-    async def update_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        folder_id: Optional[uuid.UUID] = None,
-        is_favorite: Optional[bool] = None,
-        tag_ids: Optional[list[uuid.UUID]] = None,
-    ) -> Notebook:
-        """Atualiza um caderno."""
-        # Buscar com relações já carregadas
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        if name is not None and name.strip() != notebook.name:
-            existing = await self._notebooks.get_by_name(user_id, name.strip())
-            if existing and existing.id != notebook_id:
-                raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
-            notebook.name = name.strip()
-
-        if description is not None:
-            notebook.description = description.strip() if description else None
-
-        if folder_id is not None:
-            if folder_id:
-                folder = await self._folders.get_owned(folder_id, user_id)
-                if not folder:
-                    raise NotFoundError("Pasta não encontrada.")
-            notebook.folder_id = folder_id
-
-        if is_favorite is not None:
-            notebook.is_favorite = is_favorite
-
-        if tag_ids is not None:
-            tags = await self._tags.list_by_ids(tag_ids)
-            if len(tags) != len(tag_ids):
-                raise NotFoundError("Uma ou mais tags não foram encontradas.")
-            notebook.tags = tags
-
-        async with UnitOfWork(self._session):
-            await self._session.flush()
-
-            # 🔥 CRÍTICO: Refresh do objeto para recarregar todas as colunas
-            # do banco, incluindo updated_at que é atualizado pelo trigger
-            await self._session.refresh(notebook)
-
-            # Recarregar relações explicitamente
-            if notebook.folder_id:
-                folder = await self._folders.get_owned(notebook.folder_id, user_id)
-                notebook.folder = folder
-
-            # Recarregar tags
-            if tag_ids is not None:
-                tags = await self._tags.list_by_ids(tag_ids)
-                notebook.tags = tags
-
-        notebook._question_count = await self._notebooks.count_questions(notebook_id)
-        return notebook
-
-    async def delete_notebook(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-    ) -> None:
-        """Exclui um caderno (cascade exclui relações)."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        async with UnitOfWork(self._session):
-            await self._notebooks.delete(notebook_id)
-            await self._session.flush()
-
-    # ==================================================================== #
-    # QUESTIONS IN NOTEBOOK
-    # ==================================================================== #
-
-    async def list_notebook_questions(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        limit: int = 20,
-        cursor_id: Optional[uuid.UUID] = None,
-        search: Optional[str] = None,
-    ) -> tuple[list[NotebookQuestion], int]:
-        """Lista questões de um caderno.
-
-        🔥 CORREÇÃO (caderno "esquece" questão respondida): esta listagem
-        devolve `NotebookQuestion.question` (um `Question` do banco), que o
-        schema `QuestionListItem` serializa incluindo `is_favorite` e
-        `answer_status` — mas esses dois são atributos TRANSIENTES (não
-        colunas), que precisam ser calculados e atribuídos explicitamente em
-        cada request, exatamente como `QuestionService.list_questions` já
-        fazia para o Banco de Questões. Sem isso, todo item de caderno caía
-        no default do schema (`NAO_RESPONDIDA` / `False`), então uma questão
-        recém-respondida no treino continuava aparecendo como "não feita" ao
-        montar/abrir um caderno — mesmo com o `QuestionAttempt` já salvo.
-        """
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        items, total = await self._questions.list_by_notebook(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            limit=limit,
-            cursor_id=cursor_id,
-            search=search,
-        )
-        await self._attach_answer_state(items, user_id)
-        return items, total
-
-    async def _attach_answer_state(
-        self, items: list[NotebookQuestion], user_id: uuid.UUID
-    ) -> None:
-        """Preenche `item.question.is_favorite`/`answer_status` em lote —
-        mesma lógica de `QuestionService.list_questions` (duas queries
-        agregadas, independente da quantidade de itens do caderno).
-        """
-        if not items:
-            return
-        question_ids = [item.question_id for item in items]
-        favorited_ids, correct_map = await self._session_gather(
-            self._states.get_favorited_ids(user_id, question_ids),
-            self._attempts.get_correct_status_map(user_id, question_ids),
-        )
-        for item in items:
-            item.question.is_favorite = item.question_id in favorited_ids
-            if item.question_id not in correct_map:
-                item.question.answer_status = QuestionAnswerStatus.NAO_RESPONDIDA
-            elif correct_map[item.question_id]:
-                item.question.answer_status = QuestionAnswerStatus.ACERTOU
-            else:
-                item.question.answer_status = QuestionAnswerStatus.ERROU
-
-    @staticmethod
-    async def _session_gather(*coros):
-        """Executa as queries de estado em sequência (mesma razão de
-        `QuestionService._session_gather`): as coroutines compartilham a
-        MESMA `AsyncSession`, que não é concorrente — `asyncio.gather` aqui
-        corromperia o estado da sessão.
-        """
-        results = []
-        for coro in coros:
-            results.append(await coro)
-        return results
-
-
-    async def list_export_questions(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID] | None = None,
-    ) -> tuple[Notebook, list[NotebookQuestion]]:
-        """Valida posse e carrega as questões completas para exportação."""
-        notebook = await self.get_notebook(notebook_id, user_id)
-        items = await self._questions.list_for_export(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            question_ids=question_ids,
-        )
-        return notebook, items
-
-    async def add_question(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> NotebookQuestion:
-        """Adiciona uma questão ao caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        question = await self._question_repo.get_by_id(question_id)
-        if not question:
-            raise NotFoundError("Questão não encontrada.")
-
-        if await self._questions.exists(notebook_id, question_id):
-            raise ConflictError("Esta questão já está no caderno.")
-
-        current_count = await self._notebooks.count_questions(notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count >= quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões por caderno foi atingido."
-            )
-
-        notebook_question = NotebookQuestion(
-            notebook_id=notebook_id,
-            question_id=question_id,
-        )
-
-        async with UnitOfWork(self._session):
-            await self._questions.add(notebook_question)
-
-        return await self._questions.get_owned(notebook_id, question_id, user_id)
-
-    async def add_questions_bulk(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Adiciona múltiplas questões ao caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        current_count = await self._notebooks.count_questions(notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões por caderno seria excedido."
-            )
-
-        # Remover duplicatas
-        to_add = []
-        for qid in question_ids:
-            if not await self._questions.exists(notebook_id, qid):
-                to_add.append(qid)
-
-        if not to_add:
-            return []
-
-        # Verificar se todas as questões existem
-        questions = await self._question_repo.list_by_ids(to_add)
-        if len(questions) != len(to_add):
-            raise NotFoundError("Uma ou mais questões não foram encontradas.")
-
-        async with UnitOfWork(self._session):
-            result = await self._questions.bulk_create(notebook_id, to_add)
-        return result
-
-    async def remove_question(
-        self,
-        notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_id: uuid.UUID,
-    ) -> None:
-        """Remove uma questão do caderno."""
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        async with UnitOfWork(self._session):
-            removed = await self._questions.delete_by_notebook_and_question(
-                notebook_id, question_id
-            )
-            if not removed:
-                raise NotFoundError("Questão não encontrada neste caderno.")
-
-    async def move_questions(
-        self,
-        source_notebook_id: uuid.UUID,
-        target_notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Move questões para outro caderno."""
-        if source_notebook_id == target_notebook_id:
-            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
-
-        source = await self._notebooks.get_owned(source_notebook_id, user_id)
-        if not source:
-            raise NotFoundError("Caderno de origem não encontrado.")
-
-        target = await self._notebooks.get_owned(target_notebook_id, user_id)
-        if not target:
-            raise NotFoundError("Caderno de destino não encontrado.")
-
-        current_count = await self._notebooks.count_questions(target_notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões no caderno destino seria excedido."
-            )
-
-        moved_ids: list[uuid.UUID] = []
-        async with UnitOfWork(self._session):
-            for qid in question_ids:
-                if not await self._questions.exists(source_notebook_id, qid):
-                    continue
-
-                await self._questions.delete_by_notebook_and_question(
-                    source_notebook_id, qid
-                )
-
-                if not await self._questions.exists(target_notebook_id, qid):
-                    nq = NotebookQuestion(
-                        notebook_id=target_notebook_id,
-                        question_id=qid,
-                    )
-                    await self._questions.add(nq)
-                    moved_ids.append(nq.id)
-
-        return await self._questions.list_by_ids_with_relations(moved_ids)
-
-    async def copy_questions(
-        self,
-        source_notebook_id: uuid.UUID,
-        target_notebook_id: uuid.UUID,
-        user_id: uuid.UUID,
-        question_ids: list[uuid.UUID],
-    ) -> list[NotebookQuestion]:
-        """Copia questões para outro caderno."""
-        if source_notebook_id == target_notebook_id:
-            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
-
-        source = await self._notebooks.get_owned(source_notebook_id, user_id)
-        if not source:
-            raise NotFoundError("Caderno de origem não encontrado.")
-
-        target = await self._notebooks.get_owned(target_notebook_id, user_id)
-        if not target:
-            raise NotFoundError("Caderno de destino não encontrado.")
-
-        current_count = await self._notebooks.count_questions(target_notebook_id)
-        quota_limit = await self._feature_gate.get_quota_limit(
-            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
-        )
-
-        # Remover duplicatas
-        to_add = []
-        for qid in question_ids:
-            if not await self._questions.exists(target_notebook_id, qid):
-                to_add.append(qid)
-
-        if not to_add:
-            return []
-
-        if quota_limit is not None and current_count + len(to_add) > quota_limit:
-            raise ForbiddenError(
-                f"Limite de {quota_limit} questões no caderno destino seria excedido."
-            )
-
-        async with UnitOfWork(self._session):
-            result = await self._questions.bulk_create(target_notebook_id, to_add)
-        return result
-</file>
-
 <file path="app/api/v1/content/questions.py">
 """Endpoints HTTP de questões.
 
@@ -35435,6 +34886,597 @@ __all__ = [
     "PublicUserProfileResponse",
     "UserResponse",
 ]
+</file>
+
+<file path="app/services/learning/notebook_service.py">
+# app/services/learning/notebook_service.py
+"""Regras de negócio de cadernos."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError, ForbiddenError
+from app.database.uow import UnitOfWork
+from app.models.learning.notebook import Notebook
+from app.models.learning.notebook_folder import NotebookFolder
+from app.models.learning.notebook_question import NotebookQuestion
+from app.models.learning.notebook_tag import NotebookTag
+from app.repositories.content.question_repository import QuestionRepository
+from app.repositories.learning.notebook_folder_repository import NotebookFolderRepository
+from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
+from app.repositories.learning.notebook_repository import NotebookRepository
+from app.repositories.learning.notebook_tag_repository import NotebookTagRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.user_question_state_repository import (
+    UserQuestionStateRepository,
+)
+from app.services.billing.feature_gate_service import FeatureGateService
+from app.models.enums import FeatureKey, QuestionAnswerStatus
+
+
+class NotebookService:
+    """Serviço de cadernos."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._notebooks = NotebookRepository(session)
+        self._questions = NotebookQuestionRepository(session)
+        self._folders = NotebookFolderRepository(session)
+        self._tags = NotebookTagRepository(session)
+        self._question_repo = QuestionRepository(session)
+        self._feature_gate = FeatureGateService(session)
+        # 🔥 CORREÇÃO (caderno não mostra questão como resolvida): faltavam
+        # aqui — sem eles, `question.answer_status`/`question.is_favorite`
+        # nunca eram calculados para as questões de um caderno, e o schema
+        # (`QuestionListItem`) caía sempre no default `NAO_RESPONDIDA`/
+        # `False`, mesmo para questões já respondidas pelo aluno.
+        self._states = UserQuestionStateRepository(session)
+        self._attempts = QuestionAttemptRepository(session)
+
+    # ==================================================================== #
+    # FOLDERS
+    # ==================================================================== #
+
+    async def list_folders(self, user_id: uuid.UUID) -> list[NotebookFolder]:
+        """Lista todas as pastas do usuário."""
+        return await self._folders.list_by_user(user_id)
+
+    async def create_folder(
+        self,
+        user_id: uuid.UUID,
+        name: str,
+        parent_id: Optional[uuid.UUID] = None,
+    ) -> NotebookFolder:
+        """Cria uma nova pasta."""
+        existing = await self._folders.get_by_name(user_id, name)
+        if existing:
+            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
+
+        if parent_id:
+            parent = await self._folders.get_owned(parent_id, user_id)
+            if not parent:
+                raise NotFoundError("Pasta pai não encontrada.")
+
+        folder = NotebookFolder(
+            user_id=user_id,
+            name=name.strip(),
+            parent_id=parent_id,
+        )
+
+        async with UnitOfWork(self._session):
+            await self._folders.add(folder)
+
+        return folder
+
+    async def update_folder(
+        self,
+        folder_id: uuid.UUID,
+        user_id: uuid.UUID,
+        name: str,
+    ) -> NotebookFolder:
+        """Renomeia uma pasta."""
+        folder = await self._folders.get_owned(folder_id, user_id)
+        if not folder:
+            raise NotFoundError("Pasta não encontrada.")
+
+        existing = await self._folders.get_by_name(user_id, name.strip())
+        if existing and existing.id != folder_id:
+            raise ConflictError(f"Você já possui uma pasta com o nome '{name}'.")
+
+        folder.name = name.strip()
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+
+        return folder
+
+    async def delete_folder(self, folder_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        """Exclui uma pasta (move cadernos para root)."""
+        folder = await self._folders.get_owned(folder_id, user_id)
+        if not folder:
+            raise NotFoundError("Pasta não encontrada.")
+
+        # Mover cadernos para root
+        notebooks, _ = await self._notebooks.list_by_user(
+            user_id, limit=1000, folder_id=folder_id
+        )
+        for notebook in notebooks:
+            notebook.folder_id = None
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+            await self._folders.delete_cascade(folder_id)
+
+    # ==================================================================== #
+    # TAGS
+    # ==================================================================== #
+
+    async def list_tags(self) -> list[NotebookTag]:
+        """Lista todas as tags disponíveis."""
+        return await self._tags.list_all()
+
+    async def create_tag(self, name: str) -> NotebookTag:
+        """Cria uma nova tag."""
+        existing = await self._tags.get_by_name(name.strip())
+        if existing:
+            return existing
+
+        import re
+        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+
+        tag = NotebookTag(name=name.strip(), slug=slug)
+
+        async with UnitOfWork(self._session):
+            await self._tags.add(tag)
+
+        return tag
+
+    # ==================================================================== #
+    # NOTEBOOKS
+    # ==================================================================== #
+
+    async def list_notebooks(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 20,
+        cursor_id: Optional[uuid.UUID] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        favorite: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[Notebook], int]:
+        """Lista cadernos do usuário."""
+        notebooks, total = await self._notebooks.list_by_user(
+            user_id=user_id,
+            limit=limit,
+            cursor_id=cursor_id,
+            folder_id=folder_id,
+            favorite=favorite,
+            search=search,
+        )
+        for notebook in notebooks:
+            notebook._question_count = await self._notebooks.count_questions(notebook.id)
+        return notebooks, total
+
+    async def get_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Notebook:
+        """Busca um caderno específico, com as questões carregadas."""
+        notebook = await self._notebooks.get_with_questions(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        notebook._question_count = len(notebook.questions)
+        return notebook
+
+    async def create_notebook(
+        self,
+        user_id: uuid.UUID,
+        name: str,
+        description: Optional[str] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        tag_ids: Optional[list[uuid.UUID]] = None,
+    ) -> Notebook:
+        """Cria um novo caderno."""
+        # Verificar feature gate
+        has_feature = await self._feature_gate.has_feature(user_id, FeatureKey.NOTEBOOKS)
+        if not has_feature:
+            raise ForbiddenError(
+                "Seu plano atual não inclui a criação de cadernos. "
+                "Faça upgrade para o plano Standard ou Pro."
+            )
+
+        existing = await self._notebooks.get_by_name(user_id, name.strip())
+        if existing:
+            raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
+
+        if folder_id:
+            folder = await self._folders.get_owned(folder_id, user_id)
+            if not folder:
+                raise NotFoundError("Pasta não encontrada.")
+
+        tags = []
+        if tag_ids:
+            tags = await self._tags.list_by_ids(tag_ids)
+            if len(tags) != len(tag_ids):
+                raise NotFoundError("Uma ou mais tags não foram encontradas.")
+
+        notebook = Notebook(
+            user_id=user_id,
+            name=name.strip(),
+            description=description.strip() if description else None,
+            folder_id=folder_id,
+        )
+        notebook.tags = tags
+
+        async with UnitOfWork(self._session):
+            await self._notebooks.add(notebook)
+
+        # 🔥 CRÍTICO: Refresh do objeto e recarregar relações para evitar
+        # MissingGreenlet quando o router acessar notebook.folder/tags.
+        await self._session.refresh(notebook)
+
+        if notebook.folder_id:
+            folder = await self._folders.get_owned(notebook.folder_id, user_id)
+            notebook.folder = folder
+
+        if tag_ids:
+            tags = await self._tags.list_by_ids(tag_ids)
+            notebook.tags = tags
+
+        notebook._question_count = 0
+        return notebook
+
+    async def update_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        folder_id: Optional[uuid.UUID] = None,
+        is_favorite: Optional[bool] = None,
+        tag_ids: Optional[list[uuid.UUID]] = None,
+    ) -> Notebook:
+        """Atualiza um caderno."""
+        # Buscar com relações já carregadas
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        if name is not None and name.strip() != notebook.name:
+            existing = await self._notebooks.get_by_name(user_id, name.strip())
+            if existing and existing.id != notebook_id:
+                raise ConflictError(f"Você já possui um caderno com o nome '{name}'.")
+            notebook.name = name.strip()
+
+        if description is not None:
+            notebook.description = description.strip() if description else None
+
+        if folder_id is not None:
+            if folder_id:
+                folder = await self._folders.get_owned(folder_id, user_id)
+                if not folder:
+                    raise NotFoundError("Pasta não encontrada.")
+            notebook.folder_id = folder_id
+
+        if is_favorite is not None:
+            notebook.is_favorite = is_favorite
+
+        if tag_ids is not None:
+            tags = await self._tags.list_by_ids(tag_ids)
+            if len(tags) != len(tag_ids):
+                raise NotFoundError("Uma ou mais tags não foram encontradas.")
+            notebook.tags = tags
+
+        async with UnitOfWork(self._session):
+            await self._session.flush()
+
+            # 🔥 CRÍTICO: Refresh do objeto para recarregar todas as colunas
+            # do banco, incluindo updated_at que é atualizado pelo trigger
+            await self._session.refresh(notebook)
+
+            # Recarregar relações explicitamente
+            if notebook.folder_id:
+                folder = await self._folders.get_owned(notebook.folder_id, user_id)
+                notebook.folder = folder
+
+            # Recarregar tags
+            if tag_ids is not None:
+                tags = await self._tags.list_by_ids(tag_ids)
+                notebook.tags = tags
+
+        notebook._question_count = await self._notebooks.count_questions(notebook_id)
+        return notebook
+
+    async def delete_notebook(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> None:
+        """Exclui um caderno (cascade exclui relações)."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        async with UnitOfWork(self._session):
+            await self._notebooks.delete(notebook_id)
+            await self._session.flush()
+
+    # ==================================================================== #
+    # QUESTIONS IN NOTEBOOK
+    # ==================================================================== #
+
+    async def list_notebook_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        limit: int = 20,
+        cursor_id: Optional[uuid.UUID] = None,
+        search: Optional[str] = None,
+    ) -> tuple[list[NotebookQuestion], int]:
+        """Lista questões de um caderno.
+
+        🔥 CORREÇÃO (caderno "esquece" questão respondida): esta listagem
+        devolve `NotebookQuestion.question` (um `Question` do banco), que o
+        schema `QuestionListItem` serializa incluindo `is_favorite` e
+        `answer_status` — mas esses dois são atributos TRANSIENTES (não
+        colunas), que precisam ser calculados e atribuídos explicitamente em
+        cada request, exatamente como `QuestionService.list_questions` já
+        fazia para o Banco de Questões. Sem isso, todo item de caderno caía
+        no default do schema (`NAO_RESPONDIDA` / `False`), então uma questão
+        recém-respondida no treino continuava aparecendo como "não feita" ao
+        montar/abrir um caderno — mesmo com o `QuestionAttempt` já salvo.
+        """
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        items, total = await self._questions.list_by_notebook(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            limit=limit,
+            cursor_id=cursor_id,
+            search=search,
+        )
+        await self._attach_answer_state(items, user_id)
+        return items, total
+
+    async def _attach_answer_state(
+        self, items: list[NotebookQuestion], user_id: uuid.UUID
+    ) -> None:
+        """Preenche `item.question.is_favorite`/`answer_status` em lote —
+        mesma lógica de `QuestionService.list_questions` (duas queries
+        agregadas, independente da quantidade de itens do caderno).
+        """
+        if not items:
+            return
+        question_ids = [item.question_id for item in items]
+        favorited_ids, correct_map = await self._session_gather(
+            self._states.get_favorited_ids(user_id, question_ids),
+            self._attempts.get_correct_status_map(user_id, question_ids),
+        )
+        for item in items:
+            item.question.is_favorite = item.question_id in favorited_ids
+            if item.question_id not in correct_map:
+                item.question.answer_status = QuestionAnswerStatus.NAO_RESPONDIDA
+            elif correct_map[item.question_id]:
+                item.question.answer_status = QuestionAnswerStatus.ACERTOU
+            else:
+                item.question.answer_status = QuestionAnswerStatus.ERROU
+
+    @staticmethod
+    async def _session_gather(*coros):
+        """Executa as queries de estado em sequência (mesma razão de
+        `QuestionService._session_gather`): as coroutines compartilham a
+        MESMA `AsyncSession`, que não é concorrente — `asyncio.gather` aqui
+        corromperia o estado da sessão.
+        """
+        results = []
+        for coro in coros:
+            results.append(await coro)
+        return results
+
+
+    async def list_export_questions(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Notebook, list[NotebookQuestion]]:
+        """Valida posse e carrega as questões completas para exportação."""
+        notebook = await self.get_notebook(notebook_id, user_id)
+        items = await self._questions.list_for_export(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            question_ids=question_ids,
+        )
+        return notebook, items
+
+    async def add_question(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> NotebookQuestion:
+        """Adiciona uma questão ao caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        question = await self._question_repo.get_by_id(question_id)
+        if not question:
+            raise NotFoundError("Questão não encontrada.")
+
+        if await self._questions.exists(notebook_id, question_id):
+            raise ConflictError("Esta questão já está no caderno.")
+
+        current_count = await self._notebooks.count_questions(notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count >= quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões por caderno foi atingido."
+            )
+
+        notebook_question = NotebookQuestion(
+            notebook_id=notebook_id,
+            question_id=question_id,
+        )
+
+        async with UnitOfWork(self._session):
+            await self._questions.add(notebook_question)
+
+        return await self._questions.get_owned(notebook_id, question_id, user_id)
+
+    async def add_questions_bulk(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Adiciona múltiplas questões ao caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        current_count = await self._notebooks.count_questions(notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões por caderno seria excedido."
+            )
+
+        # Remover duplicatas
+        to_add = []
+        for qid in question_ids:
+            if not await self._questions.exists(notebook_id, qid):
+                to_add.append(qid)
+
+        if not to_add:
+            return []
+
+        # Verificar se todas as questões existem
+        questions = await self._question_repo.list_by_ids(to_add)
+        if len(questions) != len(to_add):
+            raise NotFoundError("Uma ou mais questões não foram encontradas.")
+
+        async with UnitOfWork(self._session):
+            result = await self._questions.bulk_create(notebook_id, to_add)
+        return result
+
+    async def remove_question(
+        self,
+        notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+    ) -> None:
+        """Remove uma questão do caderno."""
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        async with UnitOfWork(self._session):
+            removed = await self._questions.delete_by_notebook_and_question(
+                notebook_id, question_id
+            )
+            if not removed:
+                raise NotFoundError("Questão não encontrada neste caderno.")
+
+    async def move_questions(
+        self,
+        source_notebook_id: uuid.UUID,
+        target_notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Move questões para outro caderno."""
+        if source_notebook_id == target_notebook_id:
+            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
+
+        source = await self._notebooks.get_owned(source_notebook_id, user_id)
+        if not source:
+            raise NotFoundError("Caderno de origem não encontrado.")
+
+        target = await self._notebooks.get_owned(target_notebook_id, user_id)
+        if not target:
+            raise NotFoundError("Caderno de destino não encontrado.")
+
+        current_count = await self._notebooks.count_questions(target_notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+        if quota_limit is not None and current_count + len(question_ids) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões no caderno destino seria excedido."
+            )
+
+        moved_ids: list[uuid.UUID] = []
+        async with UnitOfWork(self._session):
+            for qid in question_ids:
+                if not await self._questions.exists(source_notebook_id, qid):
+                    continue
+
+                await self._questions.delete_by_notebook_and_question(
+                    source_notebook_id, qid
+                )
+
+                if not await self._questions.exists(target_notebook_id, qid):
+                    nq = NotebookQuestion(
+                        notebook_id=target_notebook_id,
+                        question_id=qid,
+                    )
+                    await self._questions.add(nq)
+                    moved_ids.append(nq.id)
+
+        return await self._questions.list_by_ids_with_relations(moved_ids)
+
+    async def copy_questions(
+        self,
+        source_notebook_id: uuid.UUID,
+        target_notebook_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_ids: list[uuid.UUID],
+    ) -> list[NotebookQuestion]:
+        """Copia questões para outro caderno."""
+        if source_notebook_id == target_notebook_id:
+            raise ConflictError("Os cadernos de origem e destino são os mesmos.")
+
+        source = await self._notebooks.get_owned(source_notebook_id, user_id)
+        if not source:
+            raise NotFoundError("Caderno de origem não encontrado.")
+
+        target = await self._notebooks.get_owned(target_notebook_id, user_id)
+        if not target:
+            raise NotFoundError("Caderno de destino não encontrado.")
+
+        current_count = await self._notebooks.count_questions(target_notebook_id)
+        quota_limit = await self._feature_gate.get_quota_limit(
+            user_id, FeatureKey.NOTEBOOK_MAX_QUESTIONS
+        )
+
+        # Remover duplicatas
+        to_add = []
+        for qid in question_ids:
+            if not await self._questions.exists(target_notebook_id, qid):
+                to_add.append(qid)
+
+        if not to_add:
+            return []
+
+        if quota_limit is not None and current_count + len(to_add) > quota_limit:
+            raise ForbiddenError(
+                f"Limite de {quota_limit} questões no caderno destino seria excedido."
+            )
+
+        async with UnitOfWork(self._session):
+            result = await self._questions.bulk_create(target_notebook_id, to_add)
+        return result
 </file>
 
 <file path="app/api/v1/learning/notebooks.py">
@@ -37812,315 +37854,6 @@ class QuestionService:
             )
 </file>
 
-<file path="app/services/practice/training_session_service.py">
-# app/services/practice/training_session_service.py
-import uuid
-from datetime import UTC, datetime
-from typing import Optional
-
-import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
-from app.database.uow import UnitOfWork
-from app.models.content.question import Question
-from app.models.enums import FeatureKey, QuestionAnswerStatus, QuestionStatus, SessionType
-from app.models.practice.question_attempt import QuestionAttempt
-from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
-from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
-from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
-from app.repositories.practice.training_session_repository import TrainingSessionRepository
-from app.repositories.learning.notebook_repository import NotebookRepository
-from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
-from app.schemas.practice.training_session import TrainingSessionCreateRequest
-from app.services.billing.feature_gate_service import FeatureGateService
-
-logger = structlog.get_logger(__name__)
-
-
-def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
-    """Snapshot (JSONB) dos filtros usados para montar a sessão."""
-    return {
-        "discipline_id": str(data.discipline_id) if data.discipline_id else None,
-        "subject_id": str(data.subject_id) if data.subject_id else None,
-        "topic_id": str(data.topic_id) if data.topic_id else None,
-        "exam_board_id": str(data.exam_board_id) if data.exam_board_id else None,
-        "exam_edition_id": str(data.exam_edition_id) if data.exam_edition_id else None,
-        "organization_id": str(data.organization_id) if data.organization_id else None,
-        "year": data.year,
-        "difficulty": data.difficulty.value if data.difficulty else None,
-        "tag_id": str(data.tag_id) if data.tag_id else None,
-        "quantity": data.quantity,
-        "question_ids": [str(qid) for qid in (data.question_ids or [])],
-        "notebook_id": str(data.notebook_id) if data.notebook_id else None,
-        "exclude_answered": data.exclude_answered,
-    }
-
-
-class TrainingSessionService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._sessions = TrainingSessionRepository(session)
-        self._questions = QuestionRepository(session)
-        self._attempts = QuestionAttemptRepository(session)
-        self._notebooks = NotebookRepository(session)
-        self._notebook_questions = NotebookQuestionRepository(session)
-        self._feature_gate = FeatureGateService(session)
-
-    async def create_session(
-        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria uma sessão de treino a partir de filtros, lista explícita ou caderno."""
-        logger.info(
-            "training_session.create.start",
-            user_id=str(user_id),
-            has_notebook_id=bool(data.notebook_id),
-            has_question_ids=bool(data.question_ids),
-        )
-
-        # Se for criar a partir de um caderno, usa as questões do caderno
-        if data.notebook_id:
-            return await self._create_session_from_notebook(user_id, data.notebook_id, data)
-
-        # Se for criar a partir de uma lista explícita de IDs
-        if data.question_ids:
-            return await self._create_session_from_question_ids(user_id, data.question_ids, data)
-
-        # Caso contrário, usa os filtros tradicionais
-        return await self._create_session_from_filters(user_id, data)
-
-    async def _create_session_from_filters(
-        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de filtros (comportamento original)."""
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        filters = QuestionFilters(
-            discipline_id=data.discipline_id,
-            subject_id=data.subject_id,
-            topic_id=data.topic_id,
-            exam_board_id=data.exam_board_id,
-            exam_edition_id=data.exam_edition_id,
-            organization_id=data.organization_id,
-            year=data.year,
-            difficulty=data.difficulty,
-            status=QuestionStatus.PUBLICADA,
-            tag_id=data.tag_id,
-            # Sem `user_id`, `_apply_filters` ignora `answer_status` (ver
-            # `QuestionRepository._apply_filters`) — precisa dos dois juntos
-            # pra "só questões que eu ainda não respondi" funcionar.
-            answer_status=QuestionAnswerStatus.NAO_RESPONDIDA if data.exclude_answered else None,
-            user_id=user_id if data.exclude_answered else None,
-        )
-        questions = await self._questions.list_random(filters, limit=data.quantity)
-        if not questions and data.exclude_answered:
-            # Sem isso, "acabaram as questões novas" vira o mesmo erro genérico
-            # de "nenhuma questão encontrada para os filtros", que leva o
-            # aluno a mexer nos filtros errados achando que é isso.
-            raise NotFoundError(
-                "Você já respondeu todas as questões que batem com esses filtros. "
-                "Desmarque \"somente questões novas\" para revisar as que já respondeu."
-            )
-        if not questions:
-            raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
-
-        return await self._persist_session(user_id, questions, data)
-
-    async def _create_session_from_question_ids(
-        self, user_id: uuid.UUID, question_ids: list[uuid.UUID], data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de uma lista explícita de IDs de questões."""
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        # Buscar as questões pelos IDs
-        questions = await self._questions.list_by_ids(question_ids)
-
-        # Verificar se todas as questões foram encontradas
-        found_ids = {q.id for q in questions}
-        missing = [str(qid) for qid in question_ids if qid not in found_ids]
-        if missing:
-            raise NotFoundError(f"Questões não encontradas: {', '.join(missing[:5])}")
-
-        return await self._persist_session(user_id, questions, data)
-
-    async def _create_session_from_notebook(
-        self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
-    ) -> TrainingSession:
-        """Cria sessão a partir de um caderno específico."""
-        logger.info("notebook_session.start", notebook_id=str(notebook_id), user_id=str(user_id))
-
-        # Verificar ownership do caderno
-        notebook = await self._notebooks.get_owned(notebook_id, user_id)
-        if not notebook:
-            raise NotFoundError("Caderno não encontrado.")
-
-        # Buscar questões do caderno
-        notebook_questions, _ = await self._notebook_questions.list_by_notebook(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            limit=1000,  # Limite alto para não truncar
-        )
-
-        logger.info(
-            "notebook_session.questions_found",
-            notebook_id=str(notebook_id),
-            count=len(notebook_questions),
-        )
-
-        if not notebook_questions:
-            raise NotFoundError("Este caderno não possui questões para estudar.")
-
-        # Extrair os IDs das questões
-        question_ids = [nq.question_id for nq in notebook_questions]
-
-        # Buscar as questões completas
-        questions = await self._questions.list_by_ids(question_ids)
-
-        # Verificar quota
-        answered_today = await self._attempts.count_answered_today(
-            user_id, session_type=SessionType.TREINO
-        )
-        await self._feature_gate.assert_within_quota(
-            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
-        )
-
-        # Criar uma cópia do data para não modificar o original
-        session_data = data.model_copy()
-        session_data.quantity = len(questions)
-
-        return await self._persist_session(user_id, questions, session_data)
-
-    async def _persist_session(
-        self,
-        user_id: uuid.UUID,
-        questions: list[Question],
-        data: TrainingSessionCreateRequest,
-    ) -> TrainingSession:
-        """Persiste a sessão no banco de dados."""
-        logger.info(
-            "session.persist.start",
-            user_id=str(user_id),
-            question_count=len(questions),
-        )
-
-        now = datetime.now(UTC)
-
-        # Limitar quantidade
-        quantity = min(data.quantity, len(questions))
-        selected_questions = questions[:quantity]
-
-        training_session = TrainingSession(
-            user_id=user_id,
-            filters_snapshot=_filters_snapshot(data),
-            total_questions=len(selected_questions),
-            correct_count=0,
-            started_at=now,
-        )
-        training_session.questions = [
-            TrainingSessionQuestion(question_id=question.id, position=position)
-            for position, question in enumerate(selected_questions)
-        ]
-
-        async with UnitOfWork(self._session):
-            await self._sessions.add(training_session)
-            logger.info("session.persist.committed", session_id=str(training_session.id))
-
-        return await self.get_session(training_session.id, user_id)
-
-    async def get_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> TrainingSession:
-        training_session = await self._sessions.get_with_questions(session_id)
-        if training_session is None or training_session.user_id != user_id:
-            raise NotFoundError("Sessão de treino não encontrada.")
-        return training_session
-
-    async def list_sessions(
-        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
-    ) -> tuple[list[TrainingSession], bool]:
-        """Mesma correção de `QuestionAttemptService.list_history`: busca
-        `limit + 1` e descarta o extra para saber com certeza se há próxima
-        página, em vez de inferir errado quando o total é múltiplo exato de
-        `limit`."""
-        sessions = await self._sessions.list_paginated(
-            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
-        )
-        has_more = len(sessions) > limit
-        return sessions[:limit], has_more
-
-    async def get_session_questions(
-        self, training_session: TrainingSession
-    ) -> tuple[list[Question], dict[uuid.UUID, Question]]:
-        """Questões da sessão, na ordem, com as relações carregadas."""
-        question_ids = [item.question_id for item in training_session.questions]
-        questions = await self._questions.list_by_ids(question_ids)
-        by_id = {question.id: question for question in questions}
-        ordered = [by_id[qid] for qid in question_ids if qid in by_id]
-        return ordered, by_id
-
-    async def get_answered_question_ids(
-        self, user_id: uuid.UUID, session_id: uuid.UUID
-    ) -> set[uuid.UUID]:
-        attempts = await self._attempts.list_by_session(
-            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
-        )
-        return {attempt.question_id for attempt in attempts}
-
-    async def get_session_attempts_by_question(
-        self, user_id: uuid.UUID, session_id: uuid.UUID
-    ) -> dict[uuid.UUID, QuestionAttempt]:
-        """Tentativa por questão nesta sessão — usado para reconstruir o
-        resultado (alternativa marcada, acerto/erro) de questões já
-        respondidas ao retomar a sessão (`GET .../training-sessions/{id}`).
-        Sem isso, o frontend perde a resposta ao sair e voltar: o `answered`
-        booleano sozinho não basta para remontar o `AnswerRecord`.
-        """
-        attempts = await self._attempts.list_by_session(
-            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
-        )
-        # Em teoria há no máximo 1 attempt por (user, questão, sessão) — o
-        # `ConflictError` em `submit_training_answer` impede um segundo. Usa
-        # dict simples (última tentativa vence) para não quebrar se algum
-        # dado legado tiver duplicata.
-        return {attempt.question_id: attempt for attempt in attempts}
-
-    async def update_position(
-        self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
-    ) -> TrainingSession:
-        training_session = await self.get_session(session_id, user_id)
-        if current_question_index >= training_session.total_questions:
-            raise ValidationDomainError(
-                "Posição fora do intervalo de questões da sessão."
-            )
-
-        async with UnitOfWork(self._session):
-            training_session.current_question_index = current_question_index
-            await self._session.flush()
-
-        return training_session
-
-    async def finish_session(
-        self, session_id: uuid.UUID, user_id: uuid.UUID
-    ) -> TrainingSession:
-        training_session = await self.get_session(session_id, user_id)
-        if training_session.finished_at is not None:
-            raise ConflictError("Sessão já finalizada.")
-
-        async with UnitOfWork(self._session):
-            training_session.finished_at = datetime.now(UTC)
-            await self._session.flush()
-
-        return await self.get_session(session_id, user_id)
-</file>
-
 <file path="scripts/seed_test_data.py">
 """Seed de dados de teste para desenvolvimento local.
 
@@ -38568,6 +38301,473 @@ if __name__ == "__main__":
     asyncio.run(main())
 </file>
 
+<file path="app/models/__init__.py">
+# app/models/__init__.py
+"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
+
+from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
+from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
+from app.models.billing import Feature, Payment, Plan, PlanFeature, Subscription, SubscriptionHistory
+from app.models.content import (
+    Discipline,
+    ExamBoard,
+    ExamEdition,
+    Organization,
+    Question,
+    QuestionAlternative,
+    QuestionAttachment,
+    QuestionRevision,
+    QuestionTag,
+    Subject,
+    Topic,
+)
+from app.models.identity import RefreshToken, User, UserAuthProvider, UserProfile
+from app.models.learning import Flashcard, FlashcardReview
+from app.models.learning.notebook import Notebook
+from app.models.learning.notebook_folder import NotebookFolder
+from app.models.learning.notebook_question import NotebookQuestion
+from app.models.learning.notebook_tag import NotebookTag
+from app.models.platform import AdminAuditLog, Notification, NotificationPreference
+from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
+
+__all__ = [
+    "User",
+    "UserProfile",
+    "RefreshToken",
+    "UserAuthProvider",
+    "Discipline",
+    "Subject",
+    "Topic",
+    "ExamBoard",
+    "Organization",
+    "ExamEdition",
+    "Question",
+    "QuestionAlternative",
+    "QuestionAttachment",
+    "QuestionRevision",
+    "QuestionTag",
+    "TrainingSession",
+    "TrainingSessionQuestion",
+    "QuestionAttempt",
+    "UserQuestionState",
+    "ExamTemplate",
+    "ExamAttempt",
+    "ExamAttemptQuestion",
+    "Flashcard",
+    "FlashcardReview",
+    "UserDailyStat",
+    "UserSubjectStat",
+    "StudyStreak",
+    "Plan",
+    "PlanFeature",
+    "Feature",
+    "Subscription",
+    "SubscriptionHistory",
+    "Payment",
+    "Notification",
+    "NotificationPreference",
+    "AdminAuditLog",
+    "Notebook",
+    "NotebookFolder",
+    "NotebookQuestion",
+    "NotebookTag",
+]
+</file>
+
+<file path="app/services/practice/training_session_service.py">
+# app/services/practice/training_session_service.py
+import uuid
+from datetime import UTC, datetime
+from typing import Optional
+
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, NotFoundError, ValidationDomainError
+from app.database.uow import UnitOfWork
+from app.models.content.question import Question
+from app.models.enums import FeatureKey, QuestionAnswerStatus, QuestionStatus, SessionType
+from app.models.practice.question_attempt import QuestionAttempt
+from app.models.practice.training_session import TrainingSession, TrainingSessionQuestion
+from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
+from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
+from app.repositories.practice.training_session_repository import TrainingSessionRepository
+from app.repositories.learning.notebook_repository import NotebookRepository
+from app.repositories.learning.notebook_question_repository import NotebookQuestionRepository
+from app.schemas.practice.training_session import TrainingSessionCreateRequest
+from app.services.billing.feature_gate_service import FeatureGateService
+
+logger = structlog.get_logger(__name__)
+
+
+def _filters_snapshot(data: TrainingSessionCreateRequest) -> dict[str, object]:
+    """Snapshot (JSONB) dos filtros usados para montar a sessão."""
+    return {
+        "discipline_id": str(data.discipline_id) if data.discipline_id else None,
+        "subject_id": str(data.subject_id) if data.subject_id else None,
+        "topic_id": str(data.topic_id) if data.topic_id else None,
+        "exam_board_id": str(data.exam_board_id) if data.exam_board_id else None,
+        "exam_edition_id": str(data.exam_edition_id) if data.exam_edition_id else None,
+        "organization_id": str(data.organization_id) if data.organization_id else None,
+        "year": data.year,
+        "difficulty": data.difficulty.value if data.difficulty else None,
+        "tag_id": str(data.tag_id) if data.tag_id else None,
+        "quantity": data.quantity,
+        "question_ids": [str(qid) for qid in (data.question_ids or [])],
+        "notebook_id": str(data.notebook_id) if data.notebook_id else None,
+        "exclude_answered": data.exclude_answered,
+    }
+
+
+class TrainingSessionService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._sessions = TrainingSessionRepository(session)
+        self._questions = QuestionRepository(session)
+        self._attempts = QuestionAttemptRepository(session)
+        self._notebooks = NotebookRepository(session)
+        self._notebook_questions = NotebookQuestionRepository(session)
+        self._feature_gate = FeatureGateService(session)
+
+    async def create_session(
+        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria uma sessão de treino a partir de filtros, lista explícita ou caderno."""
+        logger.info(
+            "training_session.create.start",
+            user_id=str(user_id),
+            has_notebook_id=bool(data.notebook_id),
+            has_question_ids=bool(data.question_ids),
+        )
+
+        # Se for criar a partir de um caderno, usa as questões do caderno
+        if data.notebook_id:
+            return await self._create_session_from_notebook(user_id, data.notebook_id, data)
+
+        # Se for criar a partir de uma lista explícita de IDs
+        if data.question_ids:
+            return await self._create_session_from_question_ids(user_id, data.question_ids, data)
+
+        # Caso contrário, usa os filtros tradicionais
+        return await self._create_session_from_filters(user_id, data)
+
+    async def _create_session_from_filters(
+        self, user_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de filtros (comportamento original)."""
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        filters = QuestionFilters(
+            discipline_id=data.discipline_id,
+            subject_id=data.subject_id,
+            topic_id=data.topic_id,
+            exam_board_id=data.exam_board_id,
+            exam_edition_id=data.exam_edition_id,
+            organization_id=data.organization_id,
+            year=data.year,
+            difficulty=data.difficulty,
+            status=QuestionStatus.PUBLICADA,
+            tag_id=data.tag_id,
+            # Sem `user_id`, `_apply_filters` ignora `answer_status` (ver
+            # `QuestionRepository._apply_filters`) — precisa dos dois juntos
+            # pra "só questões que eu ainda não respondi" funcionar.
+            answer_status=QuestionAnswerStatus.NAO_RESPONDIDA if data.exclude_answered else None,
+            user_id=user_id if data.exclude_answered else None,
+        )
+        questions = await self._questions.list_random(filters, limit=data.quantity)
+        if not questions and data.exclude_answered:
+            # Sem isso, "acabaram as questões novas" vira o mesmo erro genérico
+            # de "nenhuma questão encontrada para os filtros", que leva o
+            # aluno a mexer nos filtros errados achando que é isso.
+            raise NotFoundError(
+                "Você já respondeu todas as questões que batem com esses filtros. "
+                "Desmarque \"somente questões novas\" para revisar as que já respondeu."
+            )
+        if not questions:
+            raise NotFoundError("Nenhuma questão encontrada para os filtros informados.")
+
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_question_ids(
+        self, user_id: uuid.UUID, question_ids: list[uuid.UUID], data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de uma lista explícita de IDs de questões."""
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Buscar as questões pelos IDs
+        questions = await self._questions.list_by_ids(question_ids)
+
+        # Verificar se todas as questões foram encontradas
+        found_ids = {q.id for q in questions}
+        missing = [str(qid) for qid in question_ids if qid not in found_ids]
+        if missing:
+            raise NotFoundError(f"Questões não encontradas: {', '.join(missing[:5])}")
+
+        return await self._persist_session(user_id, questions, data)
+
+    async def _create_session_from_notebook(
+        self, user_id: uuid.UUID, notebook_id: uuid.UUID, data: TrainingSessionCreateRequest
+    ) -> TrainingSession:
+        """Cria sessão a partir de um caderno específico."""
+        logger.info("notebook_session.start", notebook_id=str(notebook_id), user_id=str(user_id))
+
+        # Verificar ownership do caderno
+        notebook = await self._notebooks.get_owned(notebook_id, user_id)
+        if not notebook:
+            raise NotFoundError("Caderno não encontrado.")
+
+        # Buscar questões do caderno
+        notebook_questions, _ = await self._notebook_questions.list_by_notebook(
+            notebook_id=notebook_id,
+            user_id=user_id,
+            limit=1000,  # Limite alto para não truncar
+        )
+
+        logger.info(
+            "notebook_session.questions_found",
+            notebook_id=str(notebook_id),
+            count=len(notebook_questions),
+        )
+
+        if not notebook_questions:
+            raise NotFoundError("Este caderno não possui questões para estudar.")
+
+        # Extrair os IDs das questões
+        question_ids = [nq.question_id for nq in notebook_questions]
+
+        # Buscar as questões completas
+        questions = await self._questions.list_by_ids(question_ids)
+
+        # Verificar quota
+        answered_today = await self._attempts.count_answered_today(
+            user_id, session_type=SessionType.TREINO
+        )
+        await self._feature_gate.assert_within_quota(
+            user_id, FeatureKey.DAILY_QUESTIONS, answered_today
+        )
+
+        # Criar uma cópia do data para não modificar o original
+        session_data = data.model_copy()
+        session_data.quantity = len(questions)
+
+        return await self._persist_session(user_id, questions, session_data)
+
+    async def _persist_session(
+        self,
+        user_id: uuid.UUID,
+        questions: list[Question],
+        data: TrainingSessionCreateRequest,
+    ) -> TrainingSession:
+        """Persiste a sessão no banco de dados."""
+        logger.info(
+            "session.persist.start",
+            user_id=str(user_id),
+            question_count=len(questions),
+        )
+
+        now = datetime.now(UTC)
+
+        # Limitar quantidade
+        quantity = min(data.quantity, len(questions))
+        selected_questions = questions[:quantity]
+
+        training_session = TrainingSession(
+            user_id=user_id,
+            filters_snapshot=_filters_snapshot(data),
+            total_questions=len(selected_questions),
+            correct_count=0,
+            started_at=now,
+        )
+        training_session.questions = [
+            TrainingSessionQuestion(question_id=question.id, position=position)
+            for position, question in enumerate(selected_questions)
+        ]
+
+        async with UnitOfWork(self._session):
+            await self._sessions.add(training_session)
+            logger.info("session.persist.committed", session_id=str(training_session.id))
+
+        return await self.get_session(training_session.id, user_id)
+
+    async def get_session(self, session_id: uuid.UUID, user_id: uuid.UUID) -> TrainingSession:
+        training_session = await self._sessions.get_with_questions(session_id)
+        if training_session is None or training_session.user_id != user_id:
+            raise NotFoundError("Sessão de treino não encontrada.")
+        return training_session
+
+    async def list_sessions(
+        self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
+    ) -> tuple[list[TrainingSession], bool]:
+        """Mesma correção de `QuestionAttemptService.list_history`: busca
+        `limit + 1` e descarta o extra para saber com certeza se há próxima
+        página, em vez de inferir errado quando o total é múltiplo exato de
+        `limit`."""
+        sessions = await self._sessions.list_paginated(
+            user_id=user_id, limit=limit + 1, cursor_id=cursor_id
+        )
+        has_more = len(sessions) > limit
+        return sessions[:limit], has_more
+
+    async def get_session_questions(
+        self, training_session: TrainingSession
+    ) -> tuple[list[Question], dict[uuid.UUID, Question]]:
+        """Questões da sessão, na ordem, com as relações carregadas."""
+        question_ids = [item.question_id for item in training_session.questions]
+        questions = await self._questions.list_by_ids(question_ids)
+        by_id = {question.id: question for question in questions}
+        ordered = [by_id[qid] for qid in question_ids if qid in by_id]
+        return ordered, by_id
+
+    async def get_answered_question_ids(
+        self, user_id: uuid.UUID, session_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        attempts = await self._attempts.list_by_session(
+            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
+        )
+        return {attempt.question_id for attempt in attempts}
+
+    async def get_session_attempts_by_question(
+        self, user_id: uuid.UUID, session_id: uuid.UUID
+    ) -> dict[uuid.UUID, QuestionAttempt]:
+        """Tentativa por questão nesta sessão — usado para reconstruir o
+        resultado (alternativa marcada, acerto/erro) de questões já
+        respondidas ao retomar a sessão (`GET .../training-sessions/{id}`).
+        Sem isso, o frontend perde a resposta ao sair e voltar: o `answered`
+        booleano sozinho não basta para remontar o `AnswerRecord`.
+        """
+        attempts = await self._attempts.list_by_session(
+            user_id=user_id, session_type=SessionType.TREINO, session_id=session_id
+        )
+        # Em teoria há no máximo 1 attempt por (user, questão, sessão) — o
+        # `ConflictError` em `submit_training_answer` impede um segundo. Usa
+        # dict simples (última tentativa vence) para não quebrar se algum
+        # dado legado tiver duplicata.
+        return {attempt.question_id: attempt for attempt in attempts}
+
+    async def update_position(
+        self, session_id: uuid.UUID, user_id: uuid.UUID, current_question_index: int
+    ) -> TrainingSession:
+        training_session = await self.get_session(session_id, user_id)
+        if current_question_index >= training_session.total_questions:
+            raise ValidationDomainError(
+                "Posição fora do intervalo de questões da sessão."
+            )
+
+        async with UnitOfWork(self._session):
+            training_session.current_question_index = current_question_index
+            await self._session.flush()
+
+        return training_session
+
+    async def finish_session(
+        self, session_id: uuid.UUID, user_id: uuid.UUID
+    ) -> TrainingSession:
+        training_session = await self.get_session(session_id, user_id)
+        if training_session.finished_at is not None:
+            raise ConflictError("Sessão já finalizada.")
+
+        async with UnitOfWork(self._session):
+            training_session.finished_at = datetime.now(UTC)
+            await self._session.flush()
+
+        return await self.get_session(session_id, user_id)
+</file>
+
+<file path=".env.example">
+# Aplicação
+APP_NAME="Alfa Caveira API"
+APP_ENV=development
+DEBUG=true
+API_V1_PREFIX=/api/v1
+
+# Banco de dados — Supabase usado apenas como Postgres gerenciado (sem Auth/RLS).
+# Localmente aponta para o serviço `db` do docker-compose.
+# 🔧 CORREÇÃO (auditoria — achado de segurança P0): esta linha continha uma
+# connection string com host e senha reais de um projeto Supabase, commitada
+# num arquivo que deveria ser só exemplo. Se esse valor já foi versionado em
+# algum momento, a senha precisa ser rotacionada no painel do Supabase
+# imediatamente (Project Settings → Database → Reset database password),
+# e qualquer `.env` real que ainda a use precisa ser atualizado. O valor
+# abaixo é só placeholder — nunca commitar aqui a string de produção.
+DATABASE_URL=postgresql+asyncpg://postgres:CHANGE_ME@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
+DATABASE_POOL_SIZE=10
+DATABASE_MAX_OVERFLOW=20
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# Segurança / JWT — gerar um valor forte em produção (nunca commitar o real).
+JWT_SECRET_KEY=changeme-generate-a-strong-random-secret
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=30
+
+# Recuperação de senha
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=60
+# URL base do frontend — usada para montar o link enviado por e-mail
+# (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
+FRONTEND_URL=http://localhost:3000
+
+# E-mail transacional
+# console (padrão): não envia nada de verdade, apenas loga o e-mail — use em dev.
+# smtp: envia de fato via SMTP (SES, Postmark, Resend, Mailgun, Gmail/Workspace...).
+EMAIL_DRIVER=console
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_USE_TLS=true
+SMTP_FROM_EMAIL=no-reply@focopolicial.com.br
+SMTP_FROM_NAME="Alfa Caveira"
+
+# CORS — origens do frontend Next.js
+CORS_ORIGINS=["http://localhost:3000"]
+
+# Rate limiting
+RATE_LIMIT_PER_MINUTE=60
+
+
+# Adicionar ao final de .env.example (e ao seu .env local) —
+# Worker de agregação de analytics, agendado in-process (ver app/core/scheduler.py)
+ANALYTICS_AGGREGATOR_ENABLED=true
+ANALYTICS_AGGREGATOR_INTERVAL_MINUTES=10
+ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC=3
+ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS=30
+
+# Adicionar ao final de .env.example (e ao seu .env local) —
+# Billing: driver de gateway de pagamento (ver app/services/billing/gateway.py)
+# console (padrão): nenhum provedor real, aprova toda cobrança via ConsoleGateway.
+# Usar apenas em desenvolvimento/teste.
+PAYMENT_GATEWAY_DRIVER=console
+# Segredo compartilhado com o provedor, usado para validar a assinatura do
+# webhook (app/api/v1/billing/webhooks.py). Obrigatório em produção quando
+# PAYMENT_GATEWAY_DRIVER != console — deixar vazio em desenvolvimento.
+PAYMENT_WEBHOOK_SECRET=
+
+# Rate limiting — políticas dedicadas (PROMPT 03)
+# Adicionar ao final do bloco "# Rate limiting" já existente no .env.example
+# real (que já tem RATE_LIMIT_PER_MINUTE=60).
+RATE_LIMIT_LOGIN_PER_MINUTE=5
+RATE_LIMIT_REGISTER_PER_MINUTE=5
+RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE=3
+RATE_LIMIT_RESET_PASSWORD_PER_MINUTE=5
+RATE_LIMIT_BILLING_PER_MINUTE=20
+RATE_LIMIT_FAIL_OPEN=true
+
+SCHEDULER_ENABLED=true
+SCHEDULER_LOCK_TTL_SECONDS=300
+</file>
+
 <file path="app/api/v1/practice/training_sessions.py">
 """Endpoints HTTP de sessões de treino.
 
@@ -38802,287 +39002,6 @@ async def finish_training_session(
     training_session = await training_session_service.finish_session(session_id, current_user.id)
     detail = await _build_detail(training_session_service, current_user.id, training_session)
     return Envelope(data=detail)
-</file>
-
-<file path="app/models/__init__.py">
-# app/models/__init__.py
-"""Agrega todos os models para que Base.metadata os conheça (uso pelo Alembic)."""
-
-from app.models.analytics import StudyStreak, UserDailyStat, UserSubjectStat
-from app.models.assessment import ExamAttempt, ExamAttemptQuestion, ExamTemplate
-from app.models.billing import Feature, Payment, Plan, PlanFeature, Subscription, SubscriptionHistory
-from app.models.content import (
-    Discipline,
-    ExamBoard,
-    ExamEdition,
-    Organization,
-    Question,
-    QuestionAlternative,
-    QuestionAttachment,
-    QuestionRevision,
-    QuestionTag,
-    Subject,
-    Topic,
-)
-from app.models.identity import RefreshToken, User, UserAuthProvider, UserProfile
-from app.models.learning import Flashcard, FlashcardReview
-from app.models.learning.notebook import Notebook
-from app.models.learning.notebook_folder import NotebookFolder
-from app.models.learning.notebook_question import NotebookQuestion
-from app.models.learning.notebook_tag import NotebookTag
-from app.models.platform import AdminAuditLog, Notification, NotificationPreference
-from app.models.practice import QuestionAttempt, TrainingSession, TrainingSessionQuestion, UserQuestionState
-
-__all__ = [
-    "User",
-    "UserProfile",
-    "RefreshToken",
-    "UserAuthProvider",
-    "Discipline",
-    "Subject",
-    "Topic",
-    "ExamBoard",
-    "Organization",
-    "ExamEdition",
-    "Question",
-    "QuestionAlternative",
-    "QuestionAttachment",
-    "QuestionRevision",
-    "QuestionTag",
-    "TrainingSession",
-    "TrainingSessionQuestion",
-    "QuestionAttempt",
-    "UserQuestionState",
-    "ExamTemplate",
-    "ExamAttempt",
-    "ExamAttemptQuestion",
-    "Flashcard",
-    "FlashcardReview",
-    "UserDailyStat",
-    "UserSubjectStat",
-    "StudyStreak",
-    "Plan",
-    "PlanFeature",
-    "Feature",
-    "Subscription",
-    "SubscriptionHistory",
-    "Payment",
-    "Notification",
-    "NotificationPreference",
-    "AdminAuditLog",
-    "Notebook",
-    "NotebookFolder",
-    "NotebookQuestion",
-    "NotebookTag",
-]
-</file>
-
-<file path="app/schemas/practice/training_session.py">
-# app/schemas/practice/training_session.py
-"""Schemas de request/response de sessões de treino."""
-
-import uuid
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.core.constants import MAX_BULK_QUESTION_SELECTION
-from app.models.enums import QuestionDifficulty
-from app.schemas.content.exam_source import (
-    ExamBoardResponse,
-    ExamEditionResponse,
-    OrganizationResponse,
-)
-from app.schemas.content.question import (
-    QuestionAlternativePublicResponse,
-    QuestionAttachmentResponse,
-    QuestionTagResponse,
-)
-from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
-
-
-class TrainingSessionCreateRequest(BaseModel):
-    """Filtros usados para montar a sessão + quantidade de questões desejada."""
-
-    discipline_id: uuid.UUID | None = None
-    subject_id: uuid.UUID | None = None
-    topic_id: uuid.UUID | None = None
-    exam_board_id: uuid.UUID | None = None
-    exam_edition_id: uuid.UUID | None = None
-    organization_id: uuid.UUID | None = None
-    year: int | None = Field(default=None, ge=1900, le=2100)
-    difficulty: QuestionDifficulty | None = None
-    tag_id: uuid.UUID | None = None
-    quantity: int = Field(default=10, ge=1, le=100)
-    
-    question_ids: list[uuid.UUID] | None = Field(
-        default=None,
-        max_length=MAX_BULK_QUESTION_SELECTION,
-        description="Lista explícita de IDs de questões para montar a sessão"
-    )
-    # 🔥 CORREÇÃO: Adicionar notebook_id
-    notebook_id: uuid.UUID | None = Field(
-        default=None,
-        description="ID do caderno para criar sessão a partir das questões do caderno"
-    )
-    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
-    # não são usados) — nesses dois outros modos a lista de questões já é
-    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
-    exclude_answered: bool = Field(
-        default=False,
-        description=(
-            "Se True, sorteia apenas questões que o usuário ainda não "
-            "respondeu (nenhum QuestionAttempt seu para a questão)."
-        ),
-    )
-
-
-class TrainingSessionQuestionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    statement: str
-    discipline: DisciplineResponse
-    subject: SubjectResponse | None
-    topic: TopicResponse | None
-    exam_board: ExamBoardResponse
-    exam_edition: ExamEditionResponse | None
-    organization: OrganizationResponse | None
-    year: int | None
-    difficulty: QuestionDifficulty
-    alternatives: list[QuestionAlternativePublicResponse]
-    tags: list[QuestionTagResponse]
-    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
-    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
-    # resolução real acontece na sessão de treino, não no detalhe avulso.
-    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
-    position: int
-    answered: bool
-    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
-    # respondida em uma visita anterior a esta mesma sessão. É o que
-    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
-    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
-    # que a página é recarregada ou o aluno sai e volta.
-    # Para questões ainda não respondidas, ficam `None` — o gabarito
-    # nunca é exposto antes da resposta ser enviada.
-    selected_alternative_id: uuid.UUID | None = None
-    is_correct: bool | None = None
-    correct_alternative_letter: str | None = None
-    explanation: str | None = None
-
-
-class TrainingSessionListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    created_at: datetime
-
-
-class TrainingSessionDetailResponse(BaseModel):
-    id: uuid.UUID
-    total_questions: int
-    correct_count: int
-    started_at: datetime
-    finished_at: datetime | None
-    current_question_index: int
-    questions: list[TrainingSessionQuestionResponse]
-
-
-class TrainingSessionPositionUpdateRequest(BaseModel):
-    current_question_index: int = Field(ge=0)
-
-
-class TrainingSessionPositionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    current_question_index: int
-</file>
-
-<file path=".env.example">
-# Aplicação
-APP_NAME="Alfa Caveira API"
-APP_ENV=development
-DEBUG=true
-API_V1_PREFIX=/api/v1
-
-# Banco de dados — Supabase usado apenas como Postgres gerenciado (sem Auth/RLS).
-# Localmente aponta para o serviço `db` do docker-compose.
-# 🔧 CORREÇÃO (auditoria — achado de segurança P0): esta linha continha uma
-# connection string com host e senha reais de um projeto Supabase, commitada
-# num arquivo que deveria ser só exemplo. Se esse valor já foi versionado em
-# algum momento, a senha precisa ser rotacionada no painel do Supabase
-# imediatamente (Project Settings → Database → Reset database password),
-# e qualquer `.env` real que ainda a use precisa ser atualizado. O valor
-# abaixo é só placeholder — nunca commitar aqui a string de produção.
-DATABASE_URL=postgresql+asyncpg://postgres:CHANGE_ME@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
-DATABASE_POOL_SIZE=10
-DATABASE_MAX_OVERFLOW=20
-
-# Redis
-REDIS_URL=redis://redis:6379/0
-
-# Segurança / JWT — gerar um valor forte em produção (nunca commitar o real).
-JWT_SECRET_KEY=changeme-generate-a-strong-random-secret
-JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-REFRESH_TOKEN_EXPIRE_DAYS=30
-
-# Recuperação de senha
-PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=60
-# URL base do frontend — usada para montar o link enviado por e-mail
-# (ex.: {FRONTEND_URL}/redefinir-senha?token=...).
-FRONTEND_URL=http://localhost:3000
-
-# E-mail transacional
-# console (padrão): não envia nada de verdade, apenas loga o e-mail — use em dev.
-# smtp: envia de fato via SMTP (SES, Postmark, Resend, Mailgun, Gmail/Workspace...).
-EMAIL_DRIVER=console
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_USE_TLS=true
-SMTP_FROM_EMAIL=no-reply@focopolicial.com.br
-SMTP_FROM_NAME="Alfa Caveira"
-
-# CORS — origens do frontend Next.js
-CORS_ORIGINS=["http://localhost:3000"]
-
-# Rate limiting
-RATE_LIMIT_PER_MINUTE=60
-
-
-# Adicionar ao final de .env.example (e ao seu .env local) —
-# Worker de agregação de analytics, agendado in-process (ver app/core/scheduler.py)
-ANALYTICS_AGGREGATOR_ENABLED=true
-ANALYTICS_AGGREGATOR_INTERVAL_MINUTES=10
-ANALYTICS_AGGREGATOR_DAILY_HOUR_UTC=3
-ANALYTICS_AGGREGATOR_DAILY_WINDOW_DAYS=30
-
-# Adicionar ao final de .env.example (e ao seu .env local) —
-# Billing: driver de gateway de pagamento (ver app/services/billing/gateway.py)
-# console (padrão): nenhum provedor real, aprova toda cobrança via ConsoleGateway.
-# Usar apenas em desenvolvimento/teste.
-PAYMENT_GATEWAY_DRIVER=console
-# Segredo compartilhado com o provedor, usado para validar a assinatura do
-# webhook (app/api/v1/billing/webhooks.py). Obrigatório em produção quando
-# PAYMENT_GATEWAY_DRIVER != console — deixar vazio em desenvolvimento.
-PAYMENT_WEBHOOK_SECRET=
-
-# Rate limiting — políticas dedicadas (PROMPT 03)
-# Adicionar ao final do bloco "# Rate limiting" já existente no .env.example
-# real (que já tem RATE_LIMIT_PER_MINUTE=60).
-RATE_LIMIT_LOGIN_PER_MINUTE=5
-RATE_LIMIT_REGISTER_PER_MINUTE=5
-RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE=3
-RATE_LIMIT_RESET_PASSWORD_PER_MINUTE=5
-RATE_LIMIT_BILLING_PER_MINUTE=20
-RATE_LIMIT_FAIL_OPEN=true
-
-SCHEDULER_ENABLED=true
-SCHEDULER_LOCK_TTL_SECONDS=300
 </file>
 
 <file path="app/models/enums.py">
@@ -39325,6 +39244,129 @@ NOTIFICATION_MANDATORY_CATEGORIES: frozenset[NotificationCategory] = frozenset(
         NotificationCategory.SYSTEM,
     }
 )
+</file>
+
+<file path="app/schemas/practice/training_session.py">
+# app/schemas/practice/training_session.py
+"""Schemas de request/response de sessões de treino."""
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.constants import MAX_BULK_QUESTION_SELECTION
+from app.models.enums import QuestionDifficulty
+from app.schemas.content.exam_source import (
+    ExamBoardResponse,
+    ExamEditionResponse,
+    OrganizationResponse,
+)
+from app.schemas.content.question import (
+    QuestionAlternativePublicResponse,
+    QuestionAttachmentResponse,
+    QuestionTagResponse,
+)
+from app.schemas.content.taxonomy import DisciplineResponse, SubjectResponse, TopicResponse
+
+
+class TrainingSessionCreateRequest(BaseModel):
+    """Filtros usados para montar a sessão + quantidade de questões desejada."""
+
+    discipline_id: uuid.UUID | None = None
+    subject_id: uuid.UUID | None = None
+    topic_id: uuid.UUID | None = None
+    exam_board_id: uuid.UUID | None = None
+    exam_edition_id: uuid.UUID | None = None
+    organization_id: uuid.UUID | None = None
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    difficulty: QuestionDifficulty | None = None
+    tag_id: uuid.UUID | None = None
+    quantity: int = Field(default=10, ge=1, le=100)
+    
+    question_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_BULK_QUESTION_SELECTION,
+        description="Lista explícita de IDs de questões para montar a sessão"
+    )
+    # 🔥 CORREÇÃO: Adicionar notebook_id
+    notebook_id: uuid.UUID | None = Field(
+        default=None,
+        description="ID do caderno para criar sessão a partir das questões do caderno"
+    )
+    # Só se aplica ao modo "por filtros" (quando `question_ids`/`notebook_id`
+    # não são usados) — nesses dois outros modos a lista de questões já é
+    # explícita, escolhida pelo usuário, então não faz sentido excluir nada.
+    exclude_answered: bool = Field(
+        default=False,
+        description=(
+            "Se True, sorteia apenas questões que o usuário ainda não "
+            "respondeu (nenhum QuestionAttempt seu para a questão)."
+        ),
+    )
+
+
+class TrainingSessionQuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    statement: str
+    discipline: DisciplineResponse
+    subject: SubjectResponse | None
+    topic: TopicResponse | None
+    exam_board: ExamBoardResponse
+    exam_edition: ExamEditionResponse | None
+    organization: OrganizationResponse | None
+    year: int | None
+    difficulty: QuestionDifficulty
+    alternatives: list[QuestionAlternativePublicResponse]
+    tags: list[QuestionTagResponse]
+    # Imagens do enunciado — a mesma peça que aparece no Banco de Questões
+    # (`QuestionDetailResponse.attachments`), exposta aqui também porque a
+    # resolução real acontece na sessão de treino, não no detalhe avulso.
+    attachments: list[QuestionAttachmentResponse] = Field(default_factory=list)
+    position: int
+    answered: bool
+    # Preenchidos SOMENTE quando `answered=True` — a questão já foi
+    # respondida em uma visita anterior a esta mesma sessão. É o que
+    # permite o frontend reconstruir o resultado (`AnswerRecord`) ao
+    # retomar a sessão, em vez de perder o "já respondi isso" toda vez
+    # que a página é recarregada ou o aluno sai e volta.
+    # Para questões ainda não respondidas, ficam `None` — o gabarito
+    # nunca é exposto antes da resposta ser enviada.
+    selected_alternative_id: uuid.UUID | None = None
+    is_correct: bool | None = None
+    correct_alternative_letter: str | None = None
+    explanation: str | None = None
+
+
+class TrainingSessionListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class TrainingSessionDetailResponse(BaseModel):
+    id: uuid.UUID
+    total_questions: int
+    correct_count: int
+    started_at: datetime
+    finished_at: datetime | None
+    current_question_index: int
+    questions: list[TrainingSessionQuestionResponse]
+
+
+class TrainingSessionPositionUpdateRequest(BaseModel):
+    current_question_index: int = Field(ge=0)
+
+
+class TrainingSessionPositionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    current_question_index: int
 </file>
 
 <file path="pyproject.toml">

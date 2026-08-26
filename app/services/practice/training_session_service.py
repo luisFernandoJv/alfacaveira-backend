@@ -292,6 +292,36 @@ class TrainingSessionService:
 
         return training_session
 
+    async def get_peer_stats(
+        self, session_id: uuid.UUID, user_id: uuid.UUID
+    ) -> dict[str, object]:
+        """Agregado anônimo de como os outros usuários se saíram nas mesmas
+        questões desta sessão — alimenta o comparativo "Demais usuários" na
+        tela de conclusão (item 2 do prompt da sessão anterior).
+
+        Só usa `question_id`, nunca o `notebook_id`/`filters_snapshot` da
+        sessão: duas pessoas raramente têm a MESMA sessão de treino (cada
+        uma monta a sua, mesmo a partir do mesmo caderno), mas podem
+        perfeitamente ter respondido as MESMAS questões em sessões
+        diferentes — é isso que torna a comparação possível.
+        """
+        training_session = await self.get_session(session_id, user_id)
+        question_ids = [item.question_id for item in training_session.questions]
+
+        user_count, sample_size, correct_count = await self._attempts.get_peer_aggregate(
+            question_ids, exclude_user_id=user_id
+        )
+
+        has_data = sample_size > 0
+        average_accuracy = round((correct_count / sample_size) * 100, 1) if has_data else 0.0
+
+        return {
+            "has_data": has_data,
+            "user_count": user_count,
+            "sample_size": sample_size,
+            "average_accuracy": average_accuracy,
+        }
+
     async def finish_session(
         self, session_id: uuid.UUID, user_id: uuid.UUID
     ) -> TrainingSession:

@@ -118,3 +118,31 @@ class TrainingSessionPositionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     current_question_index: int
+
+
+class TrainingSessionPeerStatsResponse(BaseModel):
+    """Comparativo agregado e ANÔNIMO com os demais usuários que já
+    responderam as questões desta sessão/caderno (item 2 do prompt da
+    sessão anterior — painel "Demais usuários" nos moldes do Tec Concursos).
+
+    Deliberadamente não existe nenhum campo que identifique um usuário
+    específico ou a resposta que ele deu — só contagens e uma média.
+    """
+
+    has_data: bool = Field(
+        description=(
+            "False quando nenhum outro usuário ainda respondeu nenhuma "
+            "questão desta sessão — nesse caso `user_count`/`average_accuracy` "
+            "vêm zerados e o frontend deve esconder o comparativo em vez de "
+            "mostrar um 0% enganoso."
+        )
+    )
+    user_count: int = Field(
+        description="Quantidade de outros usuários distintos que responderam ao menos uma dessas questões."
+    )
+    sample_size: int = Field(
+        description="Total de tentativas (QuestionAttempt) somadas de todos os outros usuários."
+    )
+    average_accuracy: float = Field(
+        description="Percentual médio de acerto (0–100) dos outros usuários nessas questões."
+    )

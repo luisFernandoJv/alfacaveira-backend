@@ -90,6 +90,40 @@ class QuestionAttemptRepository(BaseRepository[QuestionAttempt]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    async def get_peer_aggregate(
+        self, question_ids: list[uuid.UUID], exclude_user_id: uuid.UUID
+    ) -> tuple[int, int, int]:
+        """Agregado ANÔNIMO de todas as tentativas de outros usuários nas
+        questões de `question_ids` — base da comparação "Demais usuários" na
+        tela de resultado da sessão/caderno (item 2 do prompt).
+
+        Retorna `(distinct_user_count, total_attempts, correct_attempts)`.
+        Deliberadamente NÃO existe um `user_id` no retorno: a query só soma
+        e conta linhas (`func.count`, `func.count(distinct ...)`), nunca
+        seleciona `QuestionAttempt.user_id`, `selected_alternative_id` ou
+        qualquer coluna que amarre um dado a uma pessoa específica — dá pra
+        expor esse número no frontend sem vazar resposta nem identidade de
+        ninguém, só o percentual médio da turma.
+
+        `exclude_user_id` tira o próprio usuário da conta: o objetivo é
+        comparar "eu" vs "os outros", não diluir a média dos outros com a
+        tentativa de quem está vendo a tela.
+        """
+        if not question_ids:
+            return (0, 0, 0)
+
+        stmt = select(
+            func.count(func.distinct(QuestionAttempt.user_id)),
+            func.count(QuestionAttempt.id),
+            func.count(QuestionAttempt.id).filter(QuestionAttempt.is_correct.is_(True)),
+        ).where(
+            QuestionAttempt.question_id.in_(question_ids),
+            QuestionAttempt.user_id != exclude_user_id,
+        )
+        result = await self.session.execute(stmt)
+        user_count, total_attempts, correct_attempts = result.one()
+        return (user_count or 0, total_attempts or 0, correct_attempts or 0)
+
     async def list_paginated(
         self, user_id: uuid.UUID, limit: int, cursor_id: uuid.UUID | None
     ) -> list[QuestionAttempt]:

@@ -21,6 +21,7 @@ from app.schemas.practice.training_session import (
     TrainingSessionCreateRequest,
     TrainingSessionDetailResponse,
     TrainingSessionListItem,
+    TrainingSessionPeerStatsResponse,
     TrainingSessionPositionResponse,
     TrainingSessionPositionUpdateRequest,
     TrainingSessionQuestionResponse,
@@ -220,6 +221,27 @@ async def update_training_session_position(
     return Envelope(
         data=TrainingSessionPositionResponse.model_validate(training_session)
     )
+
+
+@router.get(
+    "/{session_id}/peer-stats",
+    response_model=Envelope[TrainingSessionPeerStatsResponse],
+    summary="Comparativo anônimo com os demais usuários nas mesmas questões",
+)
+async def get_training_session_peer_stats(
+    session_id: uuid.UUID,
+    current_user: CurrentUser,
+    training_session_service: TrainingSessionServiceDep,
+) -> Envelope[TrainingSessionPeerStatsResponse]:
+    """
+    Usado pelo painel "Demais usuários" na tela de conclusão da sessão —
+    busca é feita à parte (`use-peer-stats.ts`) e não bloqueia o resto da
+    tela: `get_session` já garante que a sessão pertence a `current_user`,
+    então essa rota é tão pessoal quanto as outras deste router, mesmo
+    devolvendo um dado agregado de terceiros.
+    """
+    stats = await training_session_service.get_peer_stats(session_id, current_user.id)
+    return Envelope(data=TrainingSessionPeerStatsResponse(**stats))
 
 
 @router.post("/{session_id}/finish", response_model=Envelope[TrainingSessionDetailResponse])
