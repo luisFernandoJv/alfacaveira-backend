@@ -125,6 +125,11 @@ class QuestionAlternative(UUIDPKMixin, TimestampMixin, Base):
     letter: Mapped[str] = mapped_column(String(1), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     is_correct: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # Imagem opcional da própria alternativa (ex.: gráfico, mapa, figura que
+    # só faz sentido numa opção específica) — separada da imagem do
+    # enunciado, que continua vivendo em `QuestionAttachment`. Adicionada na
+    # migration 0028_add_alternative_image.
+    image_url: Mapped[str | None] = mapped_column(String(1000))
 
     question: Mapped["Question"] = relationship(back_populates="alternatives")
 

@@ -4,19 +4,28 @@ histórico de alterações (auditoria append-only via `QuestionRevision`).
 
 import uuid
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import MAX_BULK_QUESTION_SELECTION
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.database.uow import UnitOfWork
 from app.models.content.question import Question, QuestionAlternative
 from app.models.content.question_attachment import QuestionAttachment
 from app.models.content.question_revision import QuestionRevision
 from app.models.enums import AttachmentType, QuestionAnswerStatus, QuestionRevisionType, QuestionStatus
-from app.repositories.content.exam_source_repository import ExamBoardRepository
+from app.repositories.content.exam_source_repository import (
+    ExamBoardRepository,
+    ExamEditionRepository,
+    OrganizationRepository,
+)
 from app.repositories.content.question_repository import QuestionFilters, QuestionRepository
 from app.repositories.content.question_tag_repository import QuestionTagRepository
-from app.repositories.content.taxonomy_repository import DisciplineRepository
+from app.repositories.content.taxonomy_repository import (
+    DisciplineRepository,
+    SubjectRepository,
+    TopicRepository,
+)
 from app.repositories.practice.question_attempt_repository import QuestionAttemptRepository
 from app.repositories.practice.user_question_state_repository import (
     UserQuestionStateRepository,
@@ -41,7 +50,12 @@ def _snapshot(question: Question) -> dict[str, object]:
         "teacher_name": question.teacher_name,
         "correct_alternative_letter": question.correct_alternative_letter,
         "alternatives": [
-            {"letter": alt.letter, "text": alt.text, "is_correct": alt.is_correct}
+            {
+                "letter": alt.letter,
+                "text": alt.text,
+                "is_correct": alt.is_correct,
+                "image_url": alt.image_url,
+            }
             for alt in question.alternatives
         ],
         "tag_ids": [str(tag.id) for tag in question.tags],
@@ -57,7 +71,11 @@ class QuestionService:
         self._session = session
         self._questions = QuestionRepository(session)
         self._disciplines = DisciplineRepository(session)
+        self._subjects = SubjectRepository(session)
+        self._topics = TopicRepository(session)
         self._exam_boards = ExamBoardRepository(session)
+        self._exam_editions = ExamEditionRepository(session)
+        self._organizations = OrganizationRepository(session)
         self._tags = QuestionTagRepository(session)
         self._states = UserQuestionStateRepository(session)
         self._attempts = QuestionAttemptRepository(session)
@@ -229,7 +247,12 @@ class QuestionService:
             created_by=admin_user_id,
         )
         question.alternatives = [
-            QuestionAlternative(letter=alt.letter, text=alt.text, is_correct=alt.is_correct)
+            QuestionAlternative(
+                letter=alt.letter,
+                text=alt.text,
+                is_correct=alt.is_correct,
+                image_url=alt.image_url,
+            )
             for alt in data.alternatives
         ]
         question.tags = tags
@@ -261,14 +284,34 @@ class QuestionService:
         fields = data.model_dump(
             exclude_unset=True, exclude={"alternatives", "tag_ids", "attachments"}
         )
-        if "discipline_id" in fields:
-            discipline = await self._disciplines.get_by_id(fields["discipline_id"])
-            if discipline is None:
+
+        # 🔥 CORREÇÃO (500 genérico ao salvar na tela "Conferir questões"):
+        # a tela passou a permitir editar disciplina/assunto/banca/dificuldade
+        # no mesmo PATCH que já editava enunciado/alternativas, mas só
+        # `discipline_id`/`exam_board_id` eram validados aqui. Um
+        # `subject_id`/`topic_id`/`exam_edition_id`/`organization_id` que não
+        # existisse (ou não existisse mais) só era percebido no `flush()`
+        # como um `IntegrityError` de FK, sem handler — virava um 500 sem
+        # explicação nenhuma para o admin. Agora todo campo de referência
+        # opcional é validado antes de tocar no objeto, com um 404 legível.
+        if "discipline_id" in fields and fields["discipline_id"] is not None:
+            if await self._disciplines.get_by_id(fields["discipline_id"]) is None:
                 raise NotFoundError("Disciplina não encontrada.")
-        if "exam_board_id" in fields:
-            exam_board = await self._exam_boards.get_by_id(fields["exam_board_id"])
-            if exam_board is None:
+        if "exam_board_id" in fields and fields["exam_board_id"] is not None:
+            if await self._exam_boards.get_by_id(fields["exam_board_id"]) is None:
                 raise NotFoundError("Banca examinadora não encontrada.")
+        if "subject_id" in fields and fields["subject_id"] is not None:
+            if await self._subjects.get_by_id(fields["subject_id"]) is None:
+                raise NotFoundError("Assunto não encontrado.")
+        if "topic_id" in fields and fields["topic_id"] is not None:
+            if await self._topics.get_by_id(fields["topic_id"]) is None:
+                raise NotFoundError("Subassunto não encontrado.")
+        if "exam_edition_id" in fields and fields["exam_edition_id"] is not None:
+            if await self._exam_editions.get_by_id(fields["exam_edition_id"]) is None:
+                raise NotFoundError("Edição de concurso não encontrada.")
+        if "organization_id" in fields and fields["organization_id"] is not None:
+            if await self._organizations.get_by_id(fields["organization_id"]) is None:
+                raise NotFoundError("Órgão não encontrado.")
 
         new_tags = None
         if data.tag_ids is not None:
@@ -276,42 +319,59 @@ class QuestionService:
             if len(new_tags) != len(set(data.tag_ids)):
                 raise NotFoundError("Uma ou mais tags não foram encontradas.")
 
-        async with UnitOfWork(self._session):
-            for field, value in fields.items():
-                setattr(question, field, value)
+        try:
+            async with UnitOfWork(self._session):
+                for field, value in fields.items():
+                    setattr(question, field, value)
 
-            if data.alternatives is not None:
-                correct = next(alt for alt in data.alternatives if alt.is_correct)
-                question.alternatives = [
-                    QuestionAlternative(letter=alt.letter, text=alt.text, is_correct=alt.is_correct)
-                    for alt in data.alternatives
-                ]
-                question.correct_alternative_letter = correct.letter
+                if data.alternatives is not None:
+                    correct = next(alt for alt in data.alternatives if alt.is_correct)
+                    question.alternatives = [
+                        QuestionAlternative(
+                            letter=alt.letter,
+                            text=alt.text,
+                            is_correct=alt.is_correct,
+                            image_url=alt.image_url,
+                        )
+                        for alt in data.alternatives
+                    ]
+                    question.correct_alternative_letter = correct.letter
 
-            if new_tags is not None:
-                question.tags = new_tags
+                if new_tags is not None:
+                    question.tags = new_tags
 
-            if data.attachments is not None:
-                # Substitui integralmente o conjunto de anexos, mesmo padrão
-                # já adotado para `alternatives` — o cascade
-                # "all, delete-orphan" da relationship cuida de apagar os
-                # antigos que saírem da lista.
-                question.attachments = [
-                    QuestionAttachment(
-                        type=AttachmentType(att.type), url=att.url, alt_text=att.alt_text
+                if data.attachments is not None:
+                    # Substitui integralmente o conjunto de anexos, mesmo padrão
+                    # já adotado para `alternatives` — o cascade
+                    # "all, delete-orphan" da relationship cuida de apagar os
+                    # antigos que saírem da lista.
+                    question.attachments = [
+                        QuestionAttachment(
+                            type=AttachmentType(att.type), url=att.url, alt_text=att.alt_text
+                        )
+                        for att in data.attachments
+                    ]
+
+                await self._session.flush()
+                self._session.add(
+                    QuestionRevision(
+                        question_id=question.id,
+                        changed_by=admin_user_id,
+                        change_type=QuestionRevisionType.EDICAO,
+                        snapshot=_snapshot(question),
                     )
-                    for att in data.attachments
-                ]
-
-            await self._session.flush()
-            self._session.add(
-                QuestionRevision(
-                    question_id=question.id,
-                    changed_by=admin_user_id,
-                    change_type=QuestionRevisionType.EDICAO,
-                    snapshot=_snapshot(question),
                 )
-            )
+        except IntegrityError as exc:
+            # Backstop: mesmo com as validações acima, uma corrida (ex.: o
+            # registro referenciado foi excluído entre a validação e o
+            # commit) ainda pode violar uma FK/constraint no banco. Isso
+            # agora vira um 409 com mensagem legível — nunca mais um 500
+            # sem explicação nenhuma.
+            raise ConflictError(
+                "Não foi possível salvar: um dos valores selecionados (disciplina, "
+                "assunto, subassunto, banca, edição ou órgão) não é mais válido. "
+                "Recarregue a questão e tente novamente."
+            ) from exc
 
         return await self.get_question(question.id)
 

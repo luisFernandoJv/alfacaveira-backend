@@ -30,6 +30,10 @@ class QuestionAlternativeInput(BaseModel):
     letter: str = Field(min_length=1, max_length=1)
     text: str = Field(min_length=1)
     is_correct: bool = False
+    # Imagem opcional da própria alternativa (migration 0028). Sem isso, o
+    # campo era descartado silenciosamente pelo Pydantic (extra ignorado
+    # por padrão) — a UI mostrava sucesso ao salvar, mas nada era gravado.
+    image_url: str | None = Field(default=None, max_length=1000)
 
     @field_validator("letter")
     @classmethod
@@ -47,6 +51,7 @@ class QuestionAlternativeResponse(BaseModel):
     letter: str
     text: str
     is_correct: bool
+    image_url: str | None = None
 
 
 class QuestionAlternativePublicResponse(BaseModel):
@@ -62,6 +67,7 @@ class QuestionAlternativePublicResponse(BaseModel):
     id: uuid.UUID
     letter: str
     text: str
+    image_url: str | None = None
 
 
 class QuestionAttachmentInput(BaseModel):
