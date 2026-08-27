@@ -4,6 +4,7 @@ histórico de alterações (auditoria append-only via `QuestionRevision`).
 
 import uuid
 
+import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +32,8 @@ from app.repositories.practice.user_question_state_repository import (
     UserQuestionStateRepository,
 )
 from app.schemas.content.question import QuestionCreateRequest, QuestionUpdateRequest
+
+logger = structlog.get_logger(__name__)
 
 
 def _snapshot(question: Question) -> dict[str, object]:
@@ -325,16 +328,48 @@ class QuestionService:
                     setattr(question, field, value)
 
                 if data.alternatives is not None:
+                    # 🔥 CORREÇÃO REAL do 500/409 ao salvar (a causa raiz
+                    # não era nenhuma FK de taxonomia): `question.alternatives
+                    # = [novas instâncias...]` agenda DELETE das antigas +
+                    # INSERT das novas via cascade "all, delete-orphan". O
+                    # SQLAlchemy SEMPRE executa todos os INSERTs antes de
+                    # todos os DELETEs num mesmo flush (comportamento
+                    # documentado do Unit of Work, não uma corrida). Como
+                    # existe `UniqueConstraint(question_id, letter)`, o
+                    # INSERT da nova alternativa "A" tentava entrar antes de
+                    # a antiga "A" ser apagada -> violação de unicidade em
+                    # TODA edição que reenviasse alternativas (ou seja,
+                    # praticamente toda edição feita por esta tela).
+                    #
+                    # A correção é nunca apagar+recriar uma letra que já
+                    # existe: atualizamos a alternativa existente em memória
+                    # (mesma linha/mesmo id) e só inserimos/removemos as
+                    # letras que de fato mudaram de conjunto — nesse caso o
+                    # DELETE e o INSERT são de letras diferentes e nunca
+                    # colidem na constraint.
                     correct = next(alt for alt in data.alternatives if alt.is_correct)
-                    question.alternatives = [
-                        QuestionAlternative(
-                            letter=alt.letter,
-                            text=alt.text,
-                            is_correct=alt.is_correct,
-                            image_url=alt.image_url,
-                        )
-                        for alt in data.alternatives
-                    ]
+                    existing_by_letter = {alt.letter: alt for alt in question.alternatives}
+                    incoming_letters = {alt.letter for alt in data.alternatives}
+
+                    for letter, existing_alt in list(existing_by_letter.items()):
+                        if letter not in incoming_letters:
+                            question.alternatives.remove(existing_alt)
+
+                    for alt in data.alternatives:
+                        existing_alt = existing_by_letter.get(alt.letter)
+                        if existing_alt is not None:
+                            existing_alt.text = alt.text
+                            existing_alt.is_correct = alt.is_correct
+                            existing_alt.image_url = alt.image_url
+                        else:
+                            question.alternatives.append(
+                                QuestionAlternative(
+                                    letter=alt.letter,
+                                    text=alt.text,
+                                    is_correct=alt.is_correct,
+                                    image_url=alt.image_url,
+                                )
+                            )
                     question.correct_alternative_letter = correct.letter
 
                 if new_tags is not None:
@@ -362,15 +397,25 @@ class QuestionService:
                     )
                 )
         except IntegrityError as exc:
-            # Backstop: mesmo com as validações acima, uma corrida (ex.: o
-            # registro referenciado foi excluído entre a validação e o
-            # commit) ainda pode violar uma FK/constraint no banco. Isso
-            # agora vira um 409 com mensagem legível — nunca mais um 500
-            # sem explicação nenhuma.
+            logger.warning(
+                "question_update.integrity_error",
+                question_id=str(question_id),
+                error=repr(exc),
+            )
+            # Backstop genérico: mesmo com as validações acima, uma corrida
+            # (ex.: o registro referenciado foi excluído entre a validação e
+            # o commit) ainda pode violar uma constraint no banco. Isso vira
+            # um 409 com mensagem legível — nunca mais um 500 sem explicação
+            # nenhuma. Não é mais o caminho esperado: o bug mais comum
+            # (reordenação INSERT/DELETE nas alternativas) foi corrigido
+            # acima, então se este backstop disparar de novo, o motivo real
+            # está em `structlog`/logs do servidor (`unhandled_exception`
+            # nunca chega a rodar aqui, mas o `repr(exc)` do IntegrityError
+            # original ajuda a diagnosticar — considere logar `exc` também).
             raise ConflictError(
-                "Não foi possível salvar: um dos valores selecionados (disciplina, "
-                "assunto, subassunto, banca, edição ou órgão) não é mais válido. "
-                "Recarregue a questão e tente novamente."
+                "Não foi possível salvar a questão porque um dos dados enviados "
+                "conflita com o que já existe no banco. Recarregue a questão e "
+                "tente novamente; se persistir, verifique os logs do servidor."
             ) from exc
 
         return await self.get_question(question.id)
