@@ -36,6 +36,28 @@ class RateLimitPolicy:
     limit_per_minute: int
 
 
+def _resolve_client_ip(request: Request) -> str:
+    """Resolve o IP do visitante real por trás da Cloudflare.
+
+    `request.client.host` é sempre o IP interno do container do Caddy
+    (a app só é alcançada via rede Docker interna), então nunca reflete
+    quem de fato fez a requisição. `CF-Connecting-IP` é o header que a
+    Cloudflare preenche com o IP real do cliente sempre que o proxy
+    (nuvem laranja) está ativo — é a fonte preferida. `X-Forwarded-For`
+    fica como fallback (ex.: acesso local/sem Cloudflare em dev), usando
+    o primeiro IP da lista por convenção.
+    """
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip.strip()
+
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    return request.client.host if request.client else "unknown"
+
+
 def _resolve_policy(path: str) -> RateLimitPolicy:
     """Mapeia o caminho da requisição para a política dedicada mais
     específica, ou para a política `default` se nenhuma casar.
@@ -86,7 +108,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
 
         try:
-            client_ip = request.client.host if request.client else "unknown"
+            client_ip = _resolve_client_ip(request)
             window = int(time.time() // 60)
             key = f"ratelimit:{policy.name}:{client_ip}:{window}"
 
